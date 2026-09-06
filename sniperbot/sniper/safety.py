@@ -35,7 +35,7 @@ from sniperbot.chain.dex import (
 )
 from sniperbot.chain.erc20 import TokenInfo, fetch_token, trading_limits
 from sniperbot.config import RouterConfig
-from sniperbot.utils.evm import hex32, mapping_slot, nested_mapping_slot
+from sniperbot.utils.evm import has_code, hex32, mapping_slot, nested_mapping_slot
 from sniperbot.utils.fmt import from_wei
 
 log = logging.getLogger(__name__)
@@ -409,7 +409,7 @@ async def analyze_token(
     checks = report.checks
 
     code = await client.run(lambda w3: w3.eth.get_code(to_checksum_address(token_address)))
-    if not code or len(code) <= 2:
+    if not has_code(code):
         checks.append(Check("contract", "Контракт токена", False, "по адресу нет кода", critical=True))
         return report
     checks.append(Check("contract", "Контракт токена", True, f"{len(code)} байт"))

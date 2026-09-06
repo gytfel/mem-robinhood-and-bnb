@@ -175,10 +175,17 @@ class Settings(BaseSettings):
         return problems
 
 
+# Короткие префиксы env-переменных для сетей: BSC_RPC_URLS, RH_ROUTER и т.д.
+ENV_PREFIXES = {"bsc": "BSC", "robinhood": "RH"}
+
+
+def env_prefix(chain_key: str) -> str:
+    return ENV_PREFIXES.get(chain_key, chain_key.upper())
+
+
 def _apply_env_overrides(key: str, raw: dict) -> dict:
     """Позволяет переопределить параметры сети через переменные окружения."""
-    prefixes = {"bsc": "BSC", "robinhood": "RH"}
-    prefix = prefixes.get(key, key.upper())
+    prefix = env_prefix(key)
 
     def env(name: str) -> str | None:
         value = os.getenv(f"{prefix}_{name}")

@@ -130,3 +130,54 @@ def test_env_file_flag_is_exported(tmp_path):
     env_path = tmp_path / "custom.env"
     cli.main(["--env-file", str(env_path), "init", "--yes", "--bot-token", "7000000000:AAF-" + "z" * 32])
     assert os.environ["SNIPER_ENV_FILE"] == str(env_path)
+
+
+# --------------------------------------------------------------- sniper discover
+class _StubClient:
+    """Роутер, отвечающий заранее заданными адресами."""
+
+    def __init__(self, *, code=b"\x60\x60", weth="0x" + "b" * 40,
+                 factory="0x" + "f" * 40, pairs=1234, fail_on=None):
+        self._code = code
+        self._weth = weth
+        self._factory = factory
+        self._pairs = pairs
+        self._fail_on = fail_on
+
+    async def run(self, fn):
+        return self._code
+
+    async def call(self, address, abi, fn_name, *args, **kwargs):
+        if fn_name == self._fail_on:
+            raise ValueError("execution reverted")
+        return {"WETH": self._weth, "factory": self._factory, "allPairsLength": self._pairs}[fn_name]
+
+
+async def test_probe_router_returns_factory_and_weth():
+    found = await cli.probe_router(_StubClient(), "0x" + "r" * 40)
+    assert found["factory"] == "0x" + "f" * 40
+    assert found["weth"] == "0x" + "b" * 40
+    assert found["pairs"] == 1234
+
+
+async def test_probe_router_rejects_address_without_code():
+    with pytest.raises(ValueError, match="нет кода"):
+        await cli.probe_router(_StubClient(code=b""), "0x" + "r" * 40)
+
+
+async def test_probe_router_rejects_non_v2_router():
+    """У Universal Router (v3/v4) нет WETH() — такой адрес не должен пройти."""
+    with pytest.raises(ValueError):
+        await cli.probe_router(_StubClient(fail_on="WETH"), "0x" + "r" * 40)
+
+
+async def test_probe_router_rejects_wrong_factory():
+    with pytest.raises(ValueError):
+        await cli.probe_router(_StubClient(fail_on="allPairsLength"), "0x" + "r" * 40)
+
+
+def test_discover_rejects_garbage_address(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("BOT_TOKEN=t\nMASTER_KEY=" + "k" * 32 + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cli.main(["--env-file", str(env_path), "discover", "не-адрес"])

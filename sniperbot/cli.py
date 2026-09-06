@@ -438,6 +438,69 @@ async def _check(args: argparse.Namespace) -> int:
     return 0 if report.verdict != "danger" else 2
 
 
+# -------------------------------------------------------------------------- discover
+async def probe_router(client, router: str) -> dict:
+    """Спрашивает у роутера его фабрику и WETH, проверяя, что это правда V2-роутер."""
+    from sniperbot.chain.abi import FACTORY_ABI, ROUTER_ABI
+    from sniperbot.utils.evm import has_code
+
+    if not has_code(await client.run(lambda w3: w3.eth.get_code(router))):
+        raise ValueError("по этому адресу нет кода — это не контракт")
+
+    weth = await client.call(router, ROUTER_ABI, "WETH")
+    factory = await client.call(router, ROUTER_ABI, "factory")
+    # allPairsLength есть у любой фабрики Uniswap V2 — заодно убеждаемся,
+    # что адрес указывает на фабрику, а не на произвольный контракт.
+    pairs = int(await client.call(factory, FACTORY_ABI, "allPairsLength"))
+    return {"router": router, "weth": weth, "factory": factory, "pairs": pairs}
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    import asyncio
+
+    return asyncio.run(_discover(args))
+
+
+async def _discover(args: argparse.Namespace) -> int:
+    from sniperbot.chain.clients import ChainClient
+    from sniperbot.config import env_prefix, get_settings, load_chains
+    from sniperbot.utils.evm import extract_address
+
+    router = extract_address(args.router)
+    if not router:
+        die(f"«{args.router}» не похоже на адрес (нужен формат 0x… из 42 символов)")
+
+    settings = get_settings()
+    chains = load_chains(settings=settings)
+    key = args.chain or settings.default_chain
+    config = chains.get(key)
+    if config is None:
+        die(f"Сеть {key} не описана в config/chains.json")
+    if not config.rpc_urls:
+        die(f"Для сети {config.name} не задан RPC — заполните {env_prefix(key)}_RPC_URLS в .env")
+
+    print(f"\n🔎 Спрашиваю роутер {router} в сети {config.name}…\n")
+    client = ChainClient(config)
+    try:
+        found = await probe_router(client, router)
+    except Exception as exc:  # noqa: BLE001 - показываем причину, а не трейсбек
+        die(f"Не похоже на Uniswap V2 Router02: {str(exc)[:200]}\n"
+            "   Убедитесь, что это роутер именно V2, а не Universal Router (v3/v4).")
+        return 1
+    finally:
+        await client.close()
+
+    prefix = env_prefix(key)
+    print(f"{OK} Это роутер Uniswap V2: фабрика знает о {found['pairs']} парах\n")
+    print("Скопируйте эти строки в .env:\n")
+    print(f"{prefix}_ENABLED=true")
+    print(f"{prefix}_ROUTER={found['router']}")
+    print(f"{prefix}_FACTORY={found['factory']}")
+    print(f"{prefix}_WRAPPED_NATIVE={found['weth']}")
+    print("\nПосле правки .env выполните: sniper doctor\n")
+    return 0
+
+
 # --------------------------------------------------------------------------- wallets
 def cmd_wallets(args: argparse.Namespace) -> int:
     import asyncio
@@ -502,6 +565,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  sniper doctor                   проверить конфигурацию и связь\n"
             "  sniper run                      запустить бота\n"
             "  sniper check 0xТокен            проверить токен из терминала\n"
+            "  sniper discover 0xРоутер        достать адреса фабрики и WETH для .env\n"
             "  sniper wallets                  кошельки пользователей и балансы\n"
         ),
     )
@@ -534,6 +598,12 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--amount", default="0.01", help="сумма для симуляции (по умолчанию 0.01)")
     check_parser.add_argument("--no-simulation", action="store_true", help="без симуляции сделки")
     check_parser.set_defaults(func=cmd_check)
+
+    discover_parser = subparsers.add_parser(
+        "discover", help="по адресу роутера DEX найти фабрику и WETH для .env")
+    discover_parser.add_argument("router", help="адрес Uniswap V2 Router02 в этой сети")
+    discover_parser.add_argument("--chain", help="ключ сети (bsc, robinhood, …)")
+    discover_parser.set_defaults(func=cmd_discover)
 
     wallets_parser = subparsers.add_parser("wallets", help="кошельки пользователей и балансы")
     wallets_parser.add_argument("--no-balances", action="store_true", help="не запрашивать балансы")

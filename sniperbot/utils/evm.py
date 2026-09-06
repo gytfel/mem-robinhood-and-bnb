@@ -61,5 +61,14 @@ def nested_mapping_slot(owner: str, spender: str, slot: int) -> str:
     return "0x" + keccak(pad32(spender_int) + first).hex()
 
 
+def has_code(code: bytes | str | None) -> bool:
+    """Есть ли по адресу байт-код. Ноды отдают либо bytes, либо строку '0x…'."""
+    if not code:
+        return False
+    if isinstance(code, str):
+        return len(code.removeprefix("0x")) > 0
+    return len(code) > 0
+
+
 def hex32(value: int) -> str:
     return "0x" + value.to_bytes(32, "big").hex()

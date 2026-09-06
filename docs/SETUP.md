@@ -136,8 +136,19 @@ Robinhood Chain — L2 на Arbitrum Orbit, mainnet работает с 1 июл
 1. [`docs.robinhood.com/chain/contracts`](https://docs.robinhood.com/chain/contracts) — официальный список контрактов сети (там же адрес WETH);
 2. [`developers.uniswap.org/docs/protocols/v2/deployments`](https://developers.uniswap.org/docs/protocols/v2/deployments) — адреса V2 Router02 и V2 Factory по сетям;
 3. если сомневаетесь — откройте в обозревателе любой своп на Uniswap V2, посмотрите,
-   какому контракту шёл вызов (это роутер), затем на его странице через
-   *Read contract* вызовите `factory()` и `WETH()` — получите два остальных адреса.
+   какому контракту шёл вызов: это и есть роутер.
+
+Фактически найти нужно **только адрес роутера** — два других бот достанет сам:
+
+```bash
+cd /opt/memecoin-sniper
+sudo -u sniper .venv/bin/sniper --env-file .env discover 0xАдресРоутера --chain robinhood
+```
+
+Команда спросит у контракта `factory()` и `WETH()`, убедится, что это
+действительно Uniswap V2 (у фабрики есть `allPairsLength`), и напечатает готовые
+строки для `.env`. Если адрес окажется от Universal Router (v3/v4) или просто
+чужим контрактом — команда откажется, а не выдаст мусор.
 
 Затем впишите их в `.env`:
 

@@ -50,3 +50,14 @@ def test_mapping_slots_are_deterministic_and_distinct():
     assert mapping_slot(DEAD, 0, vyper_layout=True) != a
     assert len(a) == 66
     assert nested_mapping_slot(DEAD, DEAD, 1) != a
+
+
+def test_has_code_distinguishes_contracts_from_wallets():
+    from sniperbot.utils.evm import has_code
+
+    assert has_code(b"\x60\x80\x60\x40") is True
+    assert has_code("0x6080") is True
+    assert has_code(b"\x60") is True          # даже крошечный контракт — это контракт
+    assert has_code(b"") is False
+    assert has_code("0x") is False
+    assert has_code(None) is False

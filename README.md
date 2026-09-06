@@ -69,6 +69,7 @@ sniper run                # запуск
 | `sniper doctor` | проверяет ключи, Telegram, каждый RPC и поддержку симуляции сделок |
 | `sniper run` | запускает бота (`--log-level DEBUG` — подробные логи) |
 | `sniper check 0xТокен` | полная проверка токена прямо в терминале |
+| `sniper discover 0xРоутер` | по адресу роутера DEX достаёт фабрику и WETH — готовые строки для `.env` |
 | `sniper wallets` | пользователи, их адреса и балансы |
 | `sniper keygen` | печатает новый `MASTER_KEY` |
 
