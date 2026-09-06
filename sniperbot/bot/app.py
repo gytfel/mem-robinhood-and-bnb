@@ -115,4 +115,5 @@ async def run_bot() -> None:
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
         await bot.session.close()
+        await registry.close_all()
         await close_db()

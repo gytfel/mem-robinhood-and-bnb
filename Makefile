@@ -1,10 +1,16 @@
-.PHONY: install run test lint fmt key docker clean
+.PHONY: install setup run doctor test lint fmt key docker clean
 
-install:            ## поставить зависимости в .venv
-	python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+install:            ## поставить зависимости и команду sniper в .venv
+	python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/pip install -e .
 
 run:                ## запустить бота
-	.venv/bin/python -m sniperbot
+	.venv/bin/sniper run
+
+doctor:             ## проверить конфигурацию, Telegram и RPC
+	.venv/bin/sniper doctor
+
+setup:              ## создать .env и ключи
+	.venv/bin/sniper init
 
 test:               ## прогнать тесты
 	.venv/bin/python -m pytest -q

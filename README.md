@@ -45,18 +45,56 @@
 
 ---
 
-## Быстрый старт
+## Быстрый старт (терминал)
 
 ```bash
-git clone <этот репозиторий>
+git clone https://github.com/gytfel/mem-robinhood-and-bnb.git
 cd mem-robinhood-and-bnb
 
-make install                  # виртуальное окружение + зависимости
-cp .env.example .env
-make key                      # сгенерировать MASTER_KEY и вставить в .env
-nano .env                     # BOT_TOKEN от @BotFather + MASTER_KEY
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .          # появится команда sniper
 
-make run                      # запуск
+sniper init               # спросит токен бота, сгенерирует MASTER_KEY, создаст .env
+sniper doctor             # проверит ключи, Telegram и ноды
+sniper run                # запуск
+```
+
+Дальше отправьте боту `/start` — он создаст кошелёк и покажет адрес для пополнения.
+
+### Команды CLI
+
+| Команда | Что делает |
+|---|---|
+| `sniper init` | создаёт `.env` и `MASTER_KEY` (`--force` — перезаписать) |
+| `sniper doctor` | проверяет ключи, Telegram, каждый RPC и поддержку симуляции сделок |
+| `sniper run` | запускает бота (`--log-level DEBUG` — подробные логи) |
+| `sniper check 0xТокен` | полная проверка токена прямо в терминале |
+| `sniper wallets` | пользователи, их адреса и балансы |
+| `sniper keygen` | печатает новый `MASTER_KEY` |
+
+Общий флаг `--env-file /путь/к/.env`. Без установки пакета работает
+`python -m sniperbot <команда>`.
+
+## Запуск на сервере (24/7)
+
+```bash
+ssh root@ВАШ_IP
+apt update && apt install -y git
+git clone https://github.com/gytfel/mem-robinhood-and-bnb.git
+cd mem-robinhood-and-bnb
+sudo bash scripts/install-server.sh
+```
+
+Скрипт поставит Python и зависимости, создаст пользователя `sniper`, установит
+бота в `/opt/memecoin-sniper`, спросит ключи, зарегистрирует systemd-сервис и
+запустит его. Дальше:
+
+```bash
+systemctl status memecoin-sniper      # состояние
+journalctl -u memecoin-sniper -f      # логи
+systemctl restart memecoin-sniper     # после правки .env
+bash scripts/update.sh                # обновление
+bash scripts/backup.sh                # бэкап базы кошельков
 ```
 
 Через Docker:
@@ -64,14 +102,15 @@ make run                      # запуск
 ```bash
 cp .env.example .env && nano .env
 docker compose up -d --build
-docker compose logs -f
 ```
 
-После запуска отправьте боту `/start` — он создаст кошелёк и покажет адрес для пополнения.
-
----
+📖 **Подробная инструкция по каждому ключу, VPS и решению проблем —
+[docs/SETUP.md](docs/SETUP.md).**
 
 ## Настройка
+
+Все ключи лежат в `.env`; создать его проще всего командой `sniper init`.
+Разбор каждого ключа с картинками шагов — в [docs/SETUP.md](docs/SETUP.md).
 
 ### Обязательные переменные `.env`
 
@@ -193,7 +232,7 @@ Telegram (aiogram)
 ## Разработка
 
 ```bash
-make test     # 74 теста: шифрование, симулятор honeypot, фильтры, БД, сканер, бот
+make test     # 85 тестов: шифрование, симулятор honeypot, фильтры, БД, сканер, бот
 make lint     # ruff
 ```
 

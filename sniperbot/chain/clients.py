@@ -109,6 +109,17 @@ class ChainClient:
             f"Все RPC сети {self.config.name} недоступны: {last_error}"
         ) from last_error
 
+    async def close(self) -> None:
+        """Закрывает HTTP-сессии провайдеров (иначе aiohttp ругается на выходе)."""
+        for provider in self._providers:
+            disconnect = getattr(provider.provider, "disconnect", None)
+            if disconnect is None:
+                continue
+            try:
+                await disconnect()
+            except Exception as exc:  # noqa: BLE001 - на выходе это не важно
+                log.debug("Не смог закрыть провайдера: %s", exc)
+
     async def healthcheck(self) -> bool:
         try:
             block = await self.run(lambda w3: w3.eth.get_block_number())
@@ -227,6 +238,10 @@ class ChainRegistry:
     @property
     def configs(self) -> dict[str, ChainConfig]:
         return dict(self._configs)
+
+    async def close_all(self) -> None:
+        for client in self._clients.values():
+            await client.close()
 
     async def healthcheck_all(self) -> dict[str, bool]:
         result: dict[str, bool] = {}

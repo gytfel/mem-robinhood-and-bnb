@@ -1,8 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "memecoin-sniper-bot"
 version = "1.0.0"
 description = "Telegram-бот для снайпинга мемкоинов в BNB Smart Chain и Robinhood Chain"
 requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.13,<4",
+    "web3>=7.6,<8",
+    "eth-account>=0.13",
+    "SQLAlchemy[asyncio]>=2.0.30",
+    "aiosqlite>=0.20",
+    "cryptography>=42.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.0",
+    "tenacity>=8.3",
+    "aiohttp>=3.9",
+]
+
+[project.scripts]
+sniper = "sniperbot.cli:main"
+
+[tool.setuptools]
+packages = [
+    "sniperbot",
+    "sniperbot.bot",
+    "sniperbot.bot.handlers",
+    "sniperbot.chain",
+    "sniperbot.db",
+    "sniperbot.security",
+    "sniperbot.sniper",
+    "sniperbot.utils",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

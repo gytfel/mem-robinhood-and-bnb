@@ -10,12 +10,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+COPY pyproject.toml README.md ./
+COPY sniperbot/ ./sniperbot/
+RUN pip install --no-cache-dir . \
     && apt-get purge -y build-essential && apt-get autoremove -y
 
-COPY sniperbot/ ./sniperbot/
 COPY config/ ./config/
+COPY .env.example ./
 
 RUN useradd --create-home --uid 10001 sniper \
     && mkdir -p /app/data && chown -R sniper:sniper /app
@@ -23,4 +24,5 @@ USER sniper
 
 VOLUME ["/app/data"]
 
-CMD ["python", "-m", "sniperbot"]
+# `docker compose run --rm bot sniper doctor` — диагностика внутри контейнера
+CMD ["sniper", "run"]

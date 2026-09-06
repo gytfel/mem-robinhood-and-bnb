@@ -1,0 +1,38 @@
+# systemd-юнит для Memecoin Sniper Bot.
+# Пути и пользователь подставляются скриптом scripts/install-server.sh,
+# при ручной установке замените __APP_DIR__ и __APP_USER__ сами.
+
+[Unit]
+Description=Memecoin Sniper Telegram Bot
+Documentation=file://__APP_DIR__/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/.venv/bin/sniper run
+Restart=always
+RestartSec=10
+# бот сам переживает падение RPC, но если рестарты идут лавиной — тормозим
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=memecoin-sniper
+
+# Ограничения: сервису нужен только свой каталог с базой
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=__APP_DIR__/data
+
+[Install]
+WantedBy=multi-user.target
