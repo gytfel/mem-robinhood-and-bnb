@@ -328,3 +328,48 @@ async def test_v3_simulation_detects_router_variant():
     from sniperbot.chain import dex_adapter
 
     assert dex_adapter._variant_cache[ROUTER.lower()] == "router01"
+
+
+# ------------------------------------------------- проверка адресов из CLI
+async def test_verify_quote_confirms_working_quoter():
+    """`discover --quoter` подтверждает адреса настоящей котировкой."""
+    import argparse
+
+    from sniperbot import cli
+
+    client = FakeV3Client()
+    found = {"kind": "v3", "router": ROUTER, "factory": FACTORY, "weth": WNATIVE, "pairs": None}
+    args = argparse.Namespace(token=TOKEN, quoter=QUOTER, amount="0.01")
+
+    note = await cli._verify_quote(client, found, args)
+    assert "Котировка работает" in note
+    assert "V3 0.3%" in note
+
+
+async def test_verify_quote_rejects_wrong_quoter():
+    class BrokenQuoter(FakeV3Client):
+        async def call(self, address, abi, fn_name, *args, **kwargs):
+            if fn_name == "quoteExactInputSingle":
+                raise Revert("нет такого метода")
+            return await super().call(address, abi, fn_name, *args, **kwargs)
+
+    import argparse
+
+    from sniperbot import cli
+
+    args = argparse.Namespace(token=TOKEN, quoter="0x" + "9" * 40, amount="0.01")
+    note = await cli._verify_quote(BrokenQuoter(), {"kind": "v3", "router": ROUTER,
+                                                    "factory": FACTORY, "weth": WNATIVE}, args)
+    assert "котировка не получена" in note
+    assert "Quoter" in note
+
+
+async def test_verify_quote_reports_missing_pool():
+    import argparse
+
+    from sniperbot import cli
+
+    args = argparse.Namespace(token=TOKEN, quoter=QUOTER, amount="0.01")
+    note = await cli._verify_quote(FakeV3Client(pools={}), {"kind": "v3", "router": ROUTER,
+                                                            "factory": FACTORY, "weth": WNATIVE}, args)
+    assert "не найден" in note

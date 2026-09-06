@@ -526,11 +526,16 @@ async def _discover(args: argparse.Namespace) -> int:
     print(f"\n🔎 Спрашиваю роутер {router} в сети {config.name}…\n")
     client = ChainClient(config)
     try:
-        found = await probe_router(client, router)
-    except Exception as exc:  # noqa: BLE001 - показываем причину, а не трейсбек
-        die(f"Не похоже на Uniswap V2 Router02: {str(exc)[:200]}\n"
-            "   Убедитесь, что это роутер именно V2, а не Universal Router (v3/v4).")
-        return 1
+        try:
+            found = await probe_router(client, router)
+        except Exception as exc:  # noqa: BLE001 - показываем причину, а не трейсбек
+            die(f"Не похоже на роутер Uniswap: {str(exc)[:200]}\n"
+                "   Universal Router (v4) не поддерживается — нужен V2 Router02 или V3 SwapRouter.")
+            return 1
+
+        quote_note = ""
+        if args.token:
+            quote_note = await _verify_quote(client, found, args)
     finally:
         await client.close()
 
@@ -553,8 +558,55 @@ async def _discover(args: argparse.Namespace) -> int:
         print(f"# {prefix}_V3_FEES=100,500,3000,10000   # тиры комиссий, если у форка свои")
         print(f"\n{WARN}Без QuoterV2 котировки для V3 недоступны — найдите его адрес там же,")
         print("   где брали роутер (docs DEX, раздел Deployments).")
+    if quote_note:
+        print(quote_note)
+    elif found["kind"] == "v3" and not args.quoter:
+        print(f"\nПроверить кандидата в Quoter:\n"
+              f"  sniper discover {router} --chain {key} --quoter 0xКандидат --token 0xТокен")
     print("\nПосле правки .env выполните: sniper doctor\n")
     return 0
+
+
+async def _verify_quote(client, found: dict, args: argparse.Namespace) -> str:
+    """Проверяет связку роутер+фабрика(+Quoter) настоящей котировкой по токену."""
+    from decimal import Decimal
+
+    from sniperbot.chain.dex_adapter import get_adapter
+    from sniperbot.config import RouterConfig
+    from sniperbot.utils.evm import extract_address
+    from sniperbot.utils.fmt import fmt_amount, from_wei, to_wei
+
+    token = extract_address(args.token)
+    if not token:
+        return f"\n{WARN}--token: «{args.token}» не похоже на адрес — котировку не проверял."
+
+    cfg = RouterConfig(
+        name="проверка", router=found["router"], factory=found["factory"], default=True,
+        kind=found["kind"], quoter=extract_address(args.quoter or "") or "",
+    )
+    if found["kind"] == "v3" and not cfg.quoter:
+        return f"\n{WARN}Для проверки котировки V3 добавьте --quoter 0xКандидат."
+
+    adapter = get_adapter(client, cfg)
+    try:
+        pool = await adapter.find_pool(token)
+    except Exception as exc:  # noqa: BLE001
+        return f"\n{BAD} Поиск пула не удался: {str(exc)[:160]}"
+    if pool is None:
+        return (f"\n{BAD} Пул {token} с нативной монетой не найден на этой площадке.\n"
+                "   Возможно, токен торгуется на другой версии протокола или в другой паре.")
+
+    amount = to_wei(Decimal(str(args.amount)), client.config.native_decimals)
+    try:
+        out = await adapter.quote_buy(token, amount, pool)
+    except Exception as exc:  # noqa: BLE001
+        return (f"\n{BAD} Пул найден ({pool.label}), но котировка не получена: {str(exc)[:160]}\n"
+                "   Для V3 это обычно значит, что адрес Quoter неверный.")
+
+    symbol = client.config.native_symbol
+    return (f"\n{OK} Котировка работает: за {args.amount} {symbol} дают "
+            f"{fmt_amount(from_wei(out, 18), 4)} токенов (пул {pool.label}, {pool.address}).\n"
+            "   Значит адреса верные — можно вписывать в .env.")
 
 
 # --------------------------------------------------------------------------- wallets
@@ -657,8 +709,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     discover_parser = subparsers.add_parser(
         "discover", help="по адресу роутера DEX найти фабрику и WETH для .env")
-    discover_parser.add_argument("router", help="адрес Uniswap V2 Router02 в этой сети")
+    discover_parser.add_argument("router", help="адрес роутера DEX (V2 Router02 или V3 SwapRouter)")
     discover_parser.add_argument("--chain", help="ключ сети (bsc, robinhood, …)")
+    discover_parser.add_argument("--quoter", help="проверить кандидата в QuoterV2 (для V3)")
+    discover_parser.add_argument("--token", help="токен, на котором проверить котировку")
+    discover_parser.add_argument("--amount", default="0.01", help="сумма проверочной котировки")
     discover_parser.set_defaults(func=cmd_discover)
 
     wallets_parser = subparsers.add_parser("wallets", help="кошельки пользователей и балансы")
