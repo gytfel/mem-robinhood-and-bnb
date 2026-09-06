@@ -111,3 +111,29 @@ def test_absolute_and_memory_database_urls_untouched(monkeypatch, tmp_path):
     postgres = "postgresql+asyncpg://user:pass@localhost/sniper"
     assert Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32,
                     DATABASE_URL=postgres).resolved_database_url == postgres
+
+
+def test_missing_lists_empty_fields(settings):
+    chains = load_chains(settings=settings)
+    rh = chains["robinhood"]
+    # RPC и chain_id уже заполнены в конфиге, адресов DEX ещё нет
+    assert "WRAPPED_NATIVE" in rh.missing
+    assert "ROUTER и FACTORY" in rh.missing
+    assert "RPC_URLS" not in rh.missing
+    assert chains["bsc"].missing == []
+
+
+def test_chain_without_chain_id_is_not_configured(tmp_path, settings):
+    import json
+
+    path = tmp_path / "chains.json"
+    path.write_text(json.dumps({
+        "x": {"name": "X", "chain_id": 0, "enabled": True,
+              "rpc_urls": ["https://rpc"], "wrapped_native": "0x" + "b" * 40,
+              "routers": [{"name": "D", "router": "0x" + "r" * 40,
+                           "factory": "0x" + "f" * 40, "default": True}]}
+    }), encoding="utf-8")
+    chain = load_chains(path, settings=settings)["x"]
+    assert chain.missing == ["CHAIN_ID"]
+    assert chain.configured is False
+    assert chain.enabled is False  # ненастроенную сеть бот не запускает

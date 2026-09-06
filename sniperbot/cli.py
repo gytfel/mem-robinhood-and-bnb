@@ -164,7 +164,7 @@ async def _doctor(args: argparse.Namespace) -> int:
     import aiohttp
 
     from sniperbot.chain.clients import ChainClient
-    from sniperbot.config import get_settings, load_chains
+    from sniperbot.config import env_prefix, get_settings, load_chains
     from sniperbot.security.keyvault import KeyVault, VaultError
     from sniperbot.sniper.safety import HoneypotSimulator
 
@@ -243,10 +243,13 @@ async def _doctor(args: argparse.Namespace) -> int:
     ready = 0
     for key, config in chains.items():
         print(f"  {config.name} ({key})")
-        if not config.enabled or not config.configured:
-            reason = "не заполнены RPC/роутер" if not config.configured else "выключена в конфиге"
-            hint = " — заполните RH_* в .env" if key == "robinhood" else ""
-            print(f"    {SKIP} {reason}{hint}")
+        if not config.configured:
+            prefix = env_prefix(key)
+            gaps = ", ".join(f"{prefix}_{name}" for name in config.missing)
+            print(f"    {SKIP} не заполнено в .env: {gaps}")
+            continue
+        if not config.enabled:
+            print(f"    {SKIP} выключена: добавьте «{key}» в ENABLED_CHAINS")
             continue
 
         try:
@@ -369,7 +372,7 @@ async def _check(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
     from sniperbot.chain.clients import ChainClient
-    from sniperbot.config import get_settings, load_chains
+    from sniperbot.config import env_prefix, get_settings, load_chains
     from sniperbot.sniper.safety import analyze_token
     from sniperbot.utils.evm import extract_address
     from sniperbot.utils.fmt import to_wei
@@ -385,7 +388,9 @@ async def _check(args: argparse.Namespace) -> int:
     if config is None:
         die(f"Сеть {key} не описана в config/chains.json")
     if not config.configured:
-        die(f"Сеть {config.name} не настроена (нет RPC/роутера)")
+        prefix = env_prefix(key)
+        gaps = ", ".join(f"{prefix}_{name}" for name in config.missing)
+        die(f"Сеть {config.name} не настроена — заполните в .env: {gaps}")
 
     client = ChainClient(config)
     amount = Decimal(str(args.amount))

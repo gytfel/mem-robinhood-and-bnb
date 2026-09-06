@@ -70,9 +70,23 @@ class ChainConfig:
         return None
 
     @property
+    def missing(self) -> list[str]:
+        """Чего не хватает сети для работы — списком, для понятных подсказок."""
+        gaps: list[str] = []
+        if not self.rpc_urls:
+            gaps.append("RPC_URLS")
+        if not self.chain_id:
+            gaps.append("CHAIN_ID")
+        if not self.wrapped_native:
+            gaps.append("WRAPPED_NATIVE")
+        if self.default_router is None:
+            gaps.append("ROUTER и FACTORY")
+        return gaps
+
+    @property
     def configured(self) -> bool:
-        """Готова ли сеть к работе (есть RPC, WNATIVE и роутер)."""
-        return bool(self.rpc_urls) and bool(self.wrapped_native) and self.default_router is not None
+        """Готова ли сеть к работе (есть RPC, chain_id, WNATIVE и роутер)."""
+        return not self.missing
 
     def router_by_address(self, address: str) -> RouterConfig | None:
         address = (address or "").lower()
