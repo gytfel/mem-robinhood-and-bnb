@@ -40,20 +40,22 @@
   },
   "robinhood": {
     "name": "Robinhood Chain",
-    "chain_id": 0,
+    "chain_id": 4663,
     "native_symbol": "ETH",
     "native_decimals": 18,
     "enabled": false,
     "poa": true,
     "eip1559": true,
-    "block_time": 0.25,
-    "rpc_urls": [],
-    "explorer_url": "",
+    "block_time": 0.1,
+    "rpc_urls": [
+      "https://rpc.mainnet.chain.robinhood.com"
+    ],
+    "explorer_url": "https://robinhoodchain.blockscout.com",
     "wrapped_native": "",
     "stable_token": "",
     "routers": [
       {
-        "name": "Robinhood DEX (Uniswap V2 fork)",
+        "name": "Uniswap V2",
         "router": "",
         "factory": "",
         "fee_bps": 30,
@@ -64,6 +66,6 @@
       "0x0000000000000000000000000000000000000000",
       "0x000000000000000000000000000000000000dEaD"
     ],
-    "_comment": "Robinhood Chain (Arbitrum Orbit L2). Заполните адреса/RPC через .env (RH_*) или прямо здесь, когда сеть и DEX будут доступны. Любая EVM-сеть с Uniswap V2-совместимым роутером работает без изменений кода."
+    "_comment": "Robinhood Chain (Arbitrum Orbit L2, mainnet с 01.07.2026, chain_id 4663). RPC и обозреватель заполнены, осталось вписать три адреса Uniswap V2: router, factory и wrapped_native (WETH) — возьмите их из docs.robinhood.com/chain/contracts или developers.uniswap.org/docs/protocols/v2/deployments и проверьте командой `sniper doctor`: она сверит chain_id и то, что router.factory() и router.WETH() совпадают с конфигом. Поддерживаются только пулы Uniswap V2; v3/v4 бот не видит."
   }
 }

@@ -118,29 +118,56 @@ BSC_RPC_URLS=https://ваш-эндпоинт.quiknode.pro/КЛЮЧ/,https://bsc-
 Проверить, что нода годится, можно командой `sniper doctor` — она пишет,
 поддерживается ли `state override`.
 
-### 2.6 `RH_*` — Robinhood Chain (когда сеть станет доступна)
+### 2.6 `RH_*` — Robinhood Chain
 
-Robinhood Chain — L2 на технологии Arbitrum Orbit. Публичных адресов DEX на момент
-написания нет, поэтому сеть выключена. Как только появятся — заполните
-шесть значений, и сеть заработает **без единой правки кода**:
+Robinhood Chain — L2 на Arbitrum Orbit, mainnet работает с 1 июля 2026.
+Известные параметры сети уже прописаны в `config/chains.json`:
+
+| Параметр | Значение |
+|---|---|
+| chain_id | `4663` (testnet — `46630`) |
+| RPC | `https://rpc.mainnet.chain.robinhood.com` |
+| Обозреватель | `https://robinhoodchain.blockscout.com` |
+| Газ | ETH |
+
+Не хватает **трёх адресов контрактов Uniswap V2** — их нужно взять из
+первоисточника, а не из статей и чатов:
+
+1. [`docs.robinhood.com/chain/contracts`](https://docs.robinhood.com/chain/contracts) — официальный список контрактов сети (там же адрес WETH);
+2. [`developers.uniswap.org/docs/protocols/v2/deployments`](https://developers.uniswap.org/docs/protocols/v2/deployments) — адреса V2 Router02 и V2 Factory по сетям;
+3. если сомневаетесь — откройте в обозревателе любой своп на Uniswap V2, посмотрите,
+   какому контракту шёл вызов (это роутер), затем на его странице через
+   *Read contract* вызовите `factory()` и `WETH()` — получите два остальных адреса.
+
+Затем впишите их в `.env`:
 
 ```env
 RH_ENABLED=true
-RH_CHAIN_ID=<номер сети, из документации или chainlist>
-RH_RPC_URLS=https://<rpc-1>,https://<rpc-2>
-RH_ROUTER=0x<адрес роутера DEX (Uniswap V2-совместимого)>
-RH_FACTORY=0x<адрес фабрики того же DEX>
-RH_WRAPPED_NATIVE=0x<адрес обёрнутой нативной монеты, WETH/WRH>
-RH_EXPLORER_URL=https://<обозреватель сети>
-RH_NATIVE_SYMBOL=ETH
+RH_ROUTER=0x<Uniswap V2 Router02>
+RH_FACTORY=0x<Uniswap V2 Factory>
+RH_WRAPPED_NATIVE=0x<WETH>
 ENABLED_CHAINS=bsc,robinhood
 ```
 
-Где брать адреса: в документации DEX (раздел Contracts / Deployments) либо в
-обозревателе — откройте любой своп на этом DEX и посмотрите, какому контракту
-шёл вызов (это роутер), затем на странице роутера прочитайте методы `factory()` и
-`WETH()`. `sniper doctor` дополнительно сверит, что роутер, фабрика и WNATIVE
-согласованы между собой.
+И обязательно проверьте:
+
+```bash
+cd /opt/memecoin-sniper
+sudo -u sniper .venv/bin/sniper --env-file .env doctor
+```
+
+`doctor` не просто пингует ноду: он сверяет `chain_id` с конфигом и проверяет,
+что `router.factory()` и `router.WETH()` совпадают с тем, что вы вписали.
+Перепутанный или поддельный адрес роутера будет пойман здесь — **до** того, как
+через него пойдут деньги.
+
+> ⚠️ Бот работает только с пулами **Uniswap V2** (и её форками). Ликвидность
+> Uniswap v3/v4 он не видит: если на Robinhood Chain мемкоины торгуются
+> преимущественно в v4-пулах, автоснайп там ничего не найдёт. Сначала проверьте
+> вручную: `sniper check 0xАдресТокена --chain robinhood`.
+
+Testnet-адреса (chain_id 46630) для торговли не годятся — там нет реальной
+ликвидности.
 
 Точно так же добавляется любая другая EVM-сеть — блоком в `config/chains.json`.
 
