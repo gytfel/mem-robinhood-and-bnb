@@ -82,6 +82,7 @@ ssh root@ВАШ_IP
 apt update && apt install -y git
 git clone https://github.com/gytfel/mem-robinhood-and-bnb.git
 cd mem-robinhood-and-bnb
+ls scripts/install-server.sh          # нет файла? git checkout claude/memecoin-sniper-bot-1nkbtm
 sudo bash scripts/install-server.sh
 ```
 

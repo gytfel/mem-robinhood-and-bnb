@@ -272,6 +272,16 @@ ssh root@ВАШ_IP        # пароль или ключ выдаёт хосте
 apt update && apt install -y git
 git clone https://github.com/gytfel/mem-robinhood-and-bnb.git
 cd mem-robinhood-and-bnb
+
+# проверьте, что скрипт установки на месте:
+ls scripts/install-server.sh
+```
+
+Если файла нет — значит свежая версия ещё не влита в `main`. Переключитесь на
+рабочую ветку:
+
+```bash
+git checkout claude/memecoin-sniper-bot-1nkbtm
 ```
 
 ### Шаг 4. Установить одной командой
