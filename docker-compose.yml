@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    container_name: memecoin-sniper
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # база с кошельками и позициями живёт вне контейнера
+      - ./data:/app/data
+      # правки сетей без пересборки образа
+      - ./config:/app/config:ro
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets & runtime data  (НИКОГДА не коммитить!)
+.env
+*.env
+!.env.example
+data/
+*.db
+*.sqlite3
+*.log
+keys/
+backups/
