@@ -25,19 +25,45 @@ def _split(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
 
 
+# Тиры комиссий Uniswap V3 по умолчанию (форки добавляют свои, например 2500).
+DEFAULT_V3_FEES = (100, 500, 3000, 10000)
+
+
 @dataclass(slots=True)
 class RouterConfig:
-    """Uniswap V2-совместимый роутер + его фабрика."""
+    """DEX: Uniswap V2-совместимый роутер либо Uniswap V3 (SwapRouter + Quoter)."""
 
     name: str
     router: str
     factory: str
     fee_bps: int = 30
     default: bool = False
+    kind: str = "v2"                     # v2 | v3
+    quoter: str = ""                     # только v3: QuoterV2 (или Quoter v1)
+    fee_tiers: tuple[int, ...] = DEFAULT_V3_FEES
+    variant: str = "auto"                # v3: auto | router02 | router01
+
+    @property
+    def is_v3(self) -> bool:
+        return self.kind == "v3"
 
     @property
     def configured(self) -> bool:
-        return bool(self.router) and bool(self.factory)
+        if not (self.router and self.factory):
+            return False
+        # Для V3 нужен ещё Quoter: без него не получить котировку до сделки.
+        return bool(self.quoter) if self.is_v3 else True
+
+    @property
+    def missing(self) -> list[str]:
+        gaps = []
+        if not self.router:
+            gaps.append("ROUTER")
+        if not self.factory:
+            gaps.append("FACTORY")
+        if self.is_v3 and not self.quoter:
+            gaps.append("QUOTER")
+        return gaps
 
 
 @dataclass(slots=True)
@@ -71,6 +97,11 @@ class ChainConfig:
         return None
 
     @property
+    def active_routers(self) -> list[RouterConfig]:
+        """Все настроенные DEX сети — по ним работают сканер и поиск пула."""
+        return [router for router in self.routers if router.configured]
+
+    @property
     def missing(self) -> list[str]:
         """Чего не хватает сети для работы — списком, для понятных подсказок."""
         gaps: list[str] = []
@@ -81,7 +112,8 @@ class ChainConfig:
         if not self.wrapped_native:
             gaps.append("WRAPPED_NATIVE")
         if self.default_router is None:
-            gaps.append("ROUTER и FACTORY")
+            # Подойдёт любая площадка: V2 (роутер + фабрика) либо V3 (+ Quoter).
+            gaps.append("ROUTER+FACTORY (V2) или V3_ROUTER+V3_FACTORY+V3_QUOTER (V3)")
         return gaps
 
     @property
@@ -237,15 +269,45 @@ def _apply_env_overrides(key: str, raw: dict, source: dict[str, str] | None = No
     if (enabled := env("ENABLED")) is not None:
         raw["enabled"] = enabled.lower() in {"1", "true", "yes", "on"}
 
+    routers = list(raw.get("routers") or [])
+
+    def _slot(kind: str, name: str) -> dict:
+        """Находит (или создаёт) описание роутера нужного типа."""
+        for item in routers:
+            if str(item.get("kind", "v2")).lower() == kind:
+                return item
+        item = {"name": name, "kind": kind, "default": kind == "v2"}
+        routers.append(item)
+        return item
+
     router_addr, factory_addr = env("ROUTER"), env("FACTORY")
     if router_addr or factory_addr:
-        routers = raw.get("routers") or [{"name": f"{key} DEX", "default": True}]
-        primary = routers[0]
+        primary = _slot("v2", f"{key} DEX V2")
         if router_addr:
             primary["router"] = router_addr
         if factory_addr:
             primary["factory"] = factory_addr
-        primary["default"] = True
+
+    v3_router, v3_factory, v3_quoter = env("V3_ROUTER"), env("V3_FACTORY"), env("V3_QUOTER")
+    if v3_router or v3_factory or v3_quoter:
+        pool = _slot("v3", f"{key} DEX V3")
+        if v3_router:
+            pool["router"] = v3_router
+        if v3_factory:
+            pool["factory"] = v3_factory
+        if v3_quoter:
+            pool["quoter"] = v3_quoter
+    if (fees := env("V3_FEES")) is not None:
+        _slot("v3", f"{key} DEX V3")["fee_tiers"] = [int(f) for f in _split(fees) if f.isdigit()]
+    if (variant := env("V3_VARIANT")) is not None:
+        _slot("v3", f"{key} DEX V3")["variant"] = variant.lower()
+
+    if (default_kind := env("DEFAULT_DEX")) is not None:
+        wanted = default_kind.lower()
+        for item in routers:
+            item["default"] = str(item.get("kind", "v2")).lower() == wanted
+
+    if routers:
         raw["routers"] = routers
     return raw
 
@@ -273,6 +335,10 @@ def load_chains(path: str | Path | None = None, settings: Settings | None = None
                 factory=r.get("factory", ""),
                 fee_bps=int(r.get("fee_bps", 30)),
                 default=bool(r.get("default", False)),
+                kind=str(r.get("kind", "v2")).lower(),
+                quoter=r.get("quoter", ""),
+                fee_tiers=tuple(int(f) for f in r.get("fee_tiers", DEFAULT_V3_FEES)),
+                variant=str(r.get("variant", "auto")).lower(),
             )
             for r in raw.get("routers", [])
         ]

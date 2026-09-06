@@ -1,4 +1,10 @@
-"""Исполнение сделок: покупка и продажа токенов с записью позиций в БД."""
+"""Исполнение сделок: покупка и продажа токенов с записью позиций в БД.
+
+Работает и с Uniswap V2, и с V3 — различия спрятаны в :mod:`chain.dex_adapter`.
+Перед отправкой каждая транзакция прогоняется через ``eth_call``: это ловит
+honeypot, закрытую торговлю и слишком высокий налог до того, как потрачен газ,
+а для V3 заодно определяет, какую кодировку понимает роутер.
+"""
 
 from __future__ import annotations
 
@@ -7,15 +13,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
-from sniperbot.chain.dex import (
-    apply_slippage,
-    build_approve_tx,
-    build_buy_tx,
-    build_sell_tx,
-    get_pair_address,
-    quote_buy,
-    quote_sell,
-)
+from sniperbot.chain.dex import apply_slippage
+from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, find_best_venue, get_adapter
 from sniperbot.chain.erc20 import allowance, balance_of, fetch_token
 from sniperbot.chain.wallet import WalletError, WalletService
 from sniperbot.config import Settings
@@ -47,15 +46,34 @@ class TradeResult:
     token_decimals: int = 18
     error: str | None = None
     explorer_url: str | None = None
+    dex: str = ""
 
 
 class Trader:
-    """Покупка/продажа через Uniswap V2-совместимый роутер."""
+    """Покупка и продажа через DEX выбранной сети."""
 
     def __init__(self, registry: ChainRegistry, wallets: WalletService, settings: Settings) -> None:
         self.registry = registry
         self.wallets = wallets
         self.settings = settings
+
+    # ------------------------------------------------------- выбор площадки
+    async def best_venue(self, chain_key: str, token: str) -> tuple[DexAdapter, PoolRef] | None:
+        """Самый ликвидный пул токена среди всех DEX сети (V2 и V3)."""
+        found = await find_best_venue(self.registry.get(chain_key), token)
+        return (found[0], found[1]) if found else None
+
+    def adapter_for_position(self, position: Position) -> DexAdapter:
+        client = self.registry.get(position.chain)
+        for cfg in client.config.active_routers:
+            same_address = cfg.router.lower() == (position.router_address or "").lower()
+            if same_address:
+                return get_adapter(client, cfg)
+        # Роутер убрали из конфига — берём любой подходящей версии.
+        for cfg in client.config.active_routers:
+            if cfg.kind == (position.dex_kind or "v2"):
+                return get_adapter(client, cfg)
+        raise TradeError("Для этой позиции не настроен DEX")
 
     # --------------------------------------------------------------- покупка
     async def buy(
@@ -68,14 +86,17 @@ class Trader:
         cfg: ChainSettings,
         source: str = "manual",
         pair_address: str | None = None,
+        venue: tuple[DexAdapter, PoolRef] | None = None,
     ) -> TradeResult:
         client = self.registry.get(chain_key)
         chain = client.config
-        router_cfg = chain.default_router
-        if router_cfg is None:
-            return TradeResult(False, "buy", error=f"Для сети {chain.name} не настроен роутер")
-
         token_address = to_checksum(token_address)
+
+        venue = venue or await self.best_venue(chain_key, token_address)
+        if venue is None:
+            return TradeResult(False, "buy", error="Не нашёл пул с ликвидностью ни на одном DEX этой сети")
+        adapter, pool = venue
+
         account = self.wallets.account(user)
         amount_wei = to_wei(amount_native, chain.native_decimals)
         if amount_wei <= 0:
@@ -90,34 +111,34 @@ class Trader:
         needed = amount_wei + gas_price * cfg.gas_limit
         if balance < needed:
             return TradeResult(
-                False,
-                "buy",
-                error=(
-                    f"Недостаточно {chain.native_symbol}: нужно ~{from_wei(needed):.6f}, "
-                    f"на балансе {from_wei(balance):.6f}. Пополните кошелёк."
-                ),
+                False, "buy",
+                error=(f"Недостаточно {chain.native_symbol}: нужно ~{from_wei(needed):.6f}, "
+                       f"на балансе {from_wei(balance):.6f}. Пополните кошелёк."),
             )
 
         token = await fetch_token(client, token_address)
         try:
-            expected = await quote_buy(client, router_cfg.router, token_address, spend_wei)
+            expected = await adapter.quote_buy(token_address, spend_wei, pool)
         except Exception as exc:  # noqa: BLE001
             return TradeResult(False, "buy", error=f"Не удалось получить котировку: {exc}")
+        if expected <= 0:
+            return TradeResult(False, "buy", error="Пул не отдаёт токены за эту сумму")
         amount_out_min = apply_slippage(expected, cfg.slippage_bps)
 
         nonce = await self.wallets.next_nonce(client, account.address)
-        tx = await build_buy_tx(
-            client,
-            router_cfg.router,
-            token_address,
-            account.address,
-            spend_wei,
-            amount_out_min,
-            nonce=nonce,
-            gas_limit=cfg.gas_limit,
-            gas_fees=gas_fees,
-        )
-        tx["gas"] = await self._gas_limit(client, tx, cfg.gas_limit)
+
+        async def build(nonce_value: int) -> dict:
+            tx = await adapter.build_buy_tx(
+                token_address, account.address, spend_wei, amount_out_min, pool,
+                nonce=nonce_value, gas_limit=cfg.gas_limit, gas_fees=gas_fees,
+            )
+            tx["gas"] = await self._gas_limit(client, tx, cfg.gas_limit)
+            return tx
+
+        tx, error = await self._prepare(client, adapter, build, nonce)
+        if tx is None:
+            return TradeResult(False, "buy", token_symbol=token.symbol, dex=adapter.name,
+                               error=f"Покупка не пройдёт: {error}")
 
         balance_before = await balance_of(client, token_address, account.address)
         try:
@@ -125,19 +146,17 @@ class Trader:
         except WalletError as exc:
             return TradeResult(False, "buy", error=str(exc), token_symbol=token.symbol)
 
-        log.info("BUY %s %s: tx %s", token.symbol, chain_key, sent.tx_hash)
+        log.info("BUY %s %s (%s): tx %s", token.symbol, chain_key, adapter.name, sent.tx_hash)
         try:
             receipt = await client.wait_receipt(sent.tx_hash, timeout=180)
         except TimeoutError as exc:
             return TradeResult(False, "buy", tx_hash=sent.tx_hash, error=str(exc), token_symbol=token.symbol)
 
         if int(receipt.get("status", 0)) != 1:
-            await self._log(
-                user.id, chain_key, "buy", token_address, spend_wei, 0, sent.tx_hash, "failed",
-                error="Транзакция отклонена сетью",
-            )
+            await self._log(user.id, chain_key, "buy", token_address, spend_wei, 0, sent.tx_hash,
+                            "failed", error="Транзакция отклонена сетью")
             return TradeResult(
-                False, "buy", tx_hash=sent.tx_hash, token_symbol=token.symbol,
+                False, "buy", tx_hash=sent.tx_hash, token_symbol=token.symbol, dex=adapter.name,
                 error="Транзакция не прошла (revert). Обычно это высокий налог, лимит на покупку или закрытая торговля.",
                 explorer_url=chain.tx_url(sent.tx_hash),
             )
@@ -146,55 +165,15 @@ class Trader:
         received = max(0, balance_after - balance_before)
         if received == 0:
             return TradeResult(
-                False, "buy", tx_hash=sent.tx_hash, token_symbol=token.symbol,
+                False, "buy", tx_hash=sent.tx_hash, token_symbol=token.symbol, dex=adapter.name,
                 error="Транзакция прошла, но токены не пришли (100% налог?)",
                 explorer_url=chain.tx_url(sent.tx_hash),
             )
 
-        if not pair_address:
-            pair_address = await get_pair_address(client, router_cfg, token_address)
-
-        entry_price = (from_wei(spend_wei, chain.native_decimals) / from_wei(received, token.decimals)) if received else None
-
-        async with session_scope() as session:
-            position = await repo.position_by_token(session, user.id, chain_key, token_address)
-            if position is None:
-                position = Position(
-                    user_id=user.id,
-                    chain=chain_key,
-                    token_address=token_address,
-                    token_symbol=token.symbol,
-                    token_decimals=token.decimals,
-                    pair_address=pair_address,
-                    router_address=router_cfg.router,
-                    source=source,
-                )
-                session.add(position)
-            position.amount_wei += received
-            position.bought_wei += received
-            position.native_spent_wei += spend_wei
-            position.buy_tx = sent.tx_hash
-            position.status = "open"
-            # усреднение цены входа по всей позиции
-            total_tokens = from_wei(position.amount_wei, token.decimals)
-            position.entry_price = (
-                from_wei(position.native_spent_wei, chain.native_decimals) / total_tokens
-                if total_tokens > 0 else entry_price
-            )
-            position.last_price = position.entry_price
-            position.peak_price = max(position.peak_price or Decimal(0), position.entry_price or Decimal(0))
-            position.take_profit_pct = cfg.take_profit_pct
-            position.stop_loss_pct = cfg.stop_loss_pct
-            position.trailing_stop_pct = cfg.trailing_stop_pct
-            position.auto_sell = cfg.auto_sell
-            position.sell_percent = cfg.sell_percent
-            await session.flush()
-            position_id = position.id
-            await repo.log_trade(
-                session, user_id=user.id, position_id=position_id, chain=chain_key, kind="buy",
-                token_address=token_address, amount_in_wei=spend_wei, amount_out_wei=received,
-                tx_hash=sent.tx_hash, status="success", gas_used=int(receipt.get("gasUsed", 0)),
-            )
+        position_id = await self._store_buy(
+            user, chain_key, token, adapter, pool, spend_wei, received, sent.tx_hash,
+            source, cfg, receipt, pair_address,
+        )
 
         if fee_wei > 0 and self.settings.service_fee_wallet:
             await self._send_service_fee(client, account, fee_wei)
@@ -202,7 +181,7 @@ class Trader:
         return TradeResult(
             True, "buy", tx_hash=sent.tx_hash, amount_in=spend_wei, amount_out=received,
             position_id=position_id, token_symbol=token.symbol, token_decimals=token.decimals,
-            explorer_url=chain.tx_url(sent.tx_hash),
+            explorer_url=chain.tx_url(sent.tx_hash), dex=f"{adapter.name} ({pool.label})",
         )
 
     # -------------------------------------------------------------- продажа
@@ -217,9 +196,12 @@ class Trader:
     ) -> TradeResult:
         client = self.registry.get(position.chain)
         chain = client.config
-        router_address = position.router_address or (chain.default_router.router if chain.default_router else "")
-        if not router_address:
-            return TradeResult(False, "sell", error="Не настроен роутер для продажи")
+        try:
+            adapter = self.adapter_for_position(position)
+        except TradeError as exc:
+            return TradeResult(False, "sell", error=str(exc), token_symbol=position.token_symbol)
+        pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
+                       fee=position.pool_fee or 0)
 
         account = self.wallets.account(user)
         token_address = to_checksum(position.token_address)
@@ -241,29 +223,39 @@ class Trader:
             return TradeResult(False, "sell", error="Слишком маленький объём для продажи")
 
         gas_fees = await client.gas_fees(float(cfg.gas_multiplier))
-        await self._ensure_allowance(client, account, token_address, router_address, amount, cfg, gas_fees)
+        await self._ensure_allowance(client, adapter, account, token_address, amount, cfg, gas_fees)
 
         try:
-            expected_native = await quote_sell(client, router_address, token_address, amount)
+            expected_native = await adapter.quote_sell(token_address, amount, pool)
         except Exception as exc:  # noqa: BLE001
             return TradeResult(False, "sell", error=f"Нет котировки на продажу: {exc}",
                                token_symbol=position.token_symbol)
         amount_out_min = apply_slippage(expected_native, cfg.slippage_bps)
 
         nonce = await self.wallets.next_nonce(client, account.address)
-        tx = await build_sell_tx(
-            client, router_address, token_address, account.address, amount, amount_out_min,
-            nonce=nonce, gas_limit=cfg.gas_limit, gas_fees=gas_fees,
-        )
-        tx["gas"] = await self._gas_limit(client, tx, cfg.gas_limit)
+
+        async def build(nonce_value: int) -> dict:
+            tx = await adapter.build_sell_tx(
+                token_address, account.address, amount, amount_out_min, pool,
+                nonce=nonce_value, gas_limit=cfg.gas_limit, gas_fees=gas_fees,
+            )
+            tx["gas"] = await self._gas_limit(client, tx, cfg.gas_limit)
+            return tx
+
+        tx, error = await self._prepare(client, adapter, build, nonce)
+        if tx is None:
+            return TradeResult(False, "sell", token_symbol=position.token_symbol,
+                               error=f"Продажа не пройдёт: {error}")
 
         native_before = await client.native_balance(account.address)
+        wrapped_before = await self._wrapped_balance(client, adapter, account.address)
         try:
             sent = await self.wallets.send_tx(client, account, tx)
         except WalletError as exc:
             return TradeResult(False, "sell", error=str(exc), token_symbol=position.token_symbol)
 
-        log.info("SELL %s %s (%s): tx %s", position.token_symbol, position.chain, reason, sent.tx_hash)
+        log.info("SELL %s %s (%s, %s): tx %s", position.token_symbol, position.chain,
+                 adapter.name, reason, sent.tx_hash)
         try:
             receipt = await client.wait_receipt(sent.tx_hash, timeout=180)
         except TimeoutError as exc:
@@ -279,11 +271,9 @@ class Trader:
                 explorer_url=chain.tx_url(sent.tx_hash),
             )
 
-        native_after = await client.native_balance(account.address)
-        gas_cost = int(receipt.get("gasUsed", 0)) * int(
-            receipt.get("effectiveGasPrice") or gas_fees.get("gasPrice") or gas_fees.get("maxFeePerGas") or 0
+        received_native = await self._settle_sell(
+            client, adapter, account, receipt, gas_fees, native_before, wrapped_before
         )
-        received_native = max(0, native_after - native_before + gas_cost)
         remaining = await balance_of(client, token_address, account.address)
 
         async with session_scope() as session:
@@ -306,20 +296,130 @@ class Trader:
             True, "sell", tx_hash=sent.tx_hash, amount_in=amount, amount_out=received_native,
             position_id=position.id, token_symbol=position.token_symbol,
             token_decimals=position.token_decimals, explorer_url=chain.tx_url(sent.tx_hash),
+            dex=adapter.name,
         )
 
     # ------------------------------------------------------------ служебное
-    async def _ensure_allowance(
-        self, client, account, token: str, spender: str, amount: int, cfg: ChainSettings, gas_fees: dict
-    ) -> None:
+    async def _prepare(self, client, adapter: DexAdapter, build, nonce: int) -> tuple[dict | None, str]:
+        """Собирает транзакцию и проверяет её через eth_call до отправки.
+
+        Если роутер V3 не понял кодировку, пробуем следующую — так вариант
+        SwapRouter02 / SwapRouter определяется сам, без настроек.
+        """
+        last_error = "неизвестная причина"
+        for _ in range(3):
+            tx = await build(nonce)
+            ok, error = await self._simulate(client, tx)
+            if ok:
+                if hasattr(adapter, "remember_variant"):
+                    adapter.remember_variant()
+                return tx, ""
+            last_error = error
+            if not adapter.try_next_variant():
+                break
+        return None, last_error
+
+    async def _simulate(self, client, tx: dict) -> tuple[bool, str]:
+        call = {key: tx[key] for key in ("from", "to", "data") if key in tx}
+        if tx.get("value"):
+            call["value"] = int(tx["value"])
+        try:
+            await client.raw_call(call)
+        except Exception as exc:  # noqa: BLE001 - причина уходит пользователю
+            return False, _revert_reason(exc)
+        return True, ""
+
+    async def _wrapped_balance(self, client, adapter: DexAdapter, address: str) -> int:
+        if not adapter.needs_unwrap:
+            return 0
+        try:
+            return await balance_of(client, client.config.wrapped_native, address)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    async def _settle_sell(self, client, adapter: DexAdapter, account, receipt, gas_fees,
+                           native_before: int, wrapped_before: int) -> int:
+        """Сколько нативной монеты получено; для V3 разворачивает WETH."""
+        if adapter.needs_unwrap:
+            wrapped_after = await self._wrapped_balance(client, adapter, account.address)
+            received = max(0, wrapped_after - wrapped_before)
+            if received > 0:
+                await self._unwrap(client, adapter, account, received, gas_fees)
+            return received
+
+        native_after = await client.native_balance(account.address)
+        gas_cost = int(receipt.get("gasUsed", 0)) * int(
+            receipt.get("effectiveGasPrice") or gas_fees.get("gasPrice") or gas_fees.get("maxFeePerGas") or 0
+        )
+        return max(0, native_after - native_before + gas_cost)
+
+    async def _unwrap(self, client, adapter: DexAdapter, account, amount: int, gas_fees: dict) -> None:
+        """WETH -> нативная монета. Неудача не критична: средства остаются в WETH."""
+        try:
+            nonce = await self.wallets.next_nonce(client, account.address)
+            tx = await adapter.build_unwrap_tx(account.address, amount, nonce=nonce, gas_fees=gas_fees)
+            sent = await self.wallets.send_tx(client, account, tx)
+            await client.wait_receipt(sent.tx_hash, timeout=120)
+            log.info("UNWRAP %s: %s", from_wei(amount), sent.tx_hash)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось развернуть WETH (%s) — средства остались в WETH: %s",
+                        from_wei(amount), exc)
+
+    async def _store_buy(self, user, chain_key, token, adapter, pool, spend_wei, received,
+                         tx_hash, source, cfg, receipt, pair_address) -> int:
+        chain = self.registry.config(chain_key)
+        async with session_scope() as session:
+            position = await repo.position_by_token(session, user.id, chain_key, token.address)
+            if position is None:
+                position = Position(
+                    user_id=user.id, chain=chain_key, token_address=token.address,
+                    token_symbol=token.symbol, token_decimals=token.decimals,
+                    pair_address=pool.address or pair_address, router_address=adapter.router,
+                    dex_kind=adapter.kind, pool_fee=pool.fee, source=source,
+                )
+                session.add(position)
+            position.amount_wei += received
+            position.bought_wei += received
+            position.native_spent_wei += spend_wei
+            position.buy_tx = tx_hash
+            position.status = "open"
+            position.dex_kind = adapter.kind
+            position.pool_fee = pool.fee
+            position.pair_address = pool.address or position.pair_address
+            position.router_address = adapter.router
+
+            total_tokens = from_wei(position.amount_wei, token.decimals)
+            entry = from_wei(spend_wei, chain.native_decimals) / from_wei(received, token.decimals)
+            position.entry_price = (
+                from_wei(position.native_spent_wei, chain.native_decimals) / total_tokens
+                if total_tokens > 0 else entry
+            )
+            position.last_price = position.entry_price
+            position.peak_price = max(position.peak_price or Decimal(0), position.entry_price or Decimal(0))
+            position.take_profit_pct = cfg.take_profit_pct
+            position.stop_loss_pct = cfg.stop_loss_pct
+            position.trailing_stop_pct = cfg.trailing_stop_pct
+            position.auto_sell = cfg.auto_sell
+            position.sell_percent = cfg.sell_percent
+            await session.flush()
+            position_id = position.id
+            await repo.log_trade(
+                session, user_id=user.id, position_id=position_id, chain=chain_key, kind="buy",
+                token_address=token.address, amount_in_wei=spend_wei, amount_out_wei=received,
+                tx_hash=tx_hash, status="success", gas_used=int(receipt.get("gasUsed", 0)),
+            )
+        return position_id
+
+    async def _ensure_allowance(self, client, adapter: DexAdapter, account, token: str,
+                                amount: int, cfg: ChainSettings, gas_fees: dict) -> None:
+        spender = adapter.spender
         current = await allowance(client, token, account.address, spender)
         if current >= amount:
             return
         approve_amount = MAX_UINT256 if cfg.approve_max else amount
         nonce = await self.wallets.next_nonce(client, account.address)
-        tx = await build_approve_tx(
-            client, token, spender, account.address, approve_amount, nonce=nonce, gas_fees=gas_fees
-        )
+        tx = await adapter.build_approve_tx(token, account.address, approve_amount,
+                                            nonce=nonce, gas_fees=gas_fees)
         tx["gas"] = await self._gas_limit(client, tx, 120_000)
         sent = await self.wallets.send_tx(client, account, tx)
         await client.wait_receipt(sent.tx_hash, timeout=120)
@@ -347,3 +447,13 @@ class Trader:
                 token_address=token, amount_in_wei=amount_in, amount_out_wei=amount_out,
                 tx_hash=tx_hash, status=status, error=error,
             )
+
+
+def _revert_reason(exc: Exception) -> str:
+    """Короткая причина отказа для сообщения пользователю."""
+    text = str(exc)
+    for marker in ("execution reverted:", "execution reverted"):
+        if marker in text:
+            tail = text.split(marker, 1)[1].strip(" '\";:")
+            return tail[:120] or "контракт отклонил сделку"
+    return text[:160]

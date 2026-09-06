@@ -7,7 +7,7 @@ import logging
 from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
-from sniperbot.chain.dex import quote_sell
+from sniperbot.chain.dex_adapter import PoolRef
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -64,12 +64,10 @@ class PositionMonitor:
         if position.amount_wei <= 0:
             return None
         client = self.registry.get(position.chain)
-        router = position.router_address or (
-            client.config.default_router.router if client.config.default_router else None
-        )
-        if not router:
-            return None
-        native_out = await quote_sell(client, router, position.token_address, position.amount_wei)
+        adapter = self.trader.adapter_for_position(position)
+        pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
+                       fee=position.pool_fee or 0)
+        native_out = await adapter.quote_sell(position.token_address, position.amount_wei, pool)
         tokens = from_wei(position.amount_wei, position.token_decimals)
         if tokens <= 0:
             return None

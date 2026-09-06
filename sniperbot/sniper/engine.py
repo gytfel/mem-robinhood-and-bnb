@@ -7,7 +7,7 @@ import logging
 from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
-from sniperbot.chain.dex import read_pair
+from sniperbot.chain.dex_adapter import PoolRef, get_adapter
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import Settings
 from sniperbot.db import repo
@@ -96,7 +96,10 @@ class SniperEngine:
         if not subscribers:
             return
 
-        if not await self._wait_for_liquidity(client, event):
+        adapter = get_adapter(client, event.router)
+        pool = PoolRef(address=event.pair, kind=event.kind, fee=event.fee)
+
+        if not await self._wait_for_liquidity(adapter, event, pool):
             await self._mark(pair_id, "rejected", "ликвидность не появилась")
             return
 
@@ -105,11 +108,12 @@ class SniperEngine:
         sim_amount = min(max((cfg.buy_amount for _, cfg in subscribers), default=Decimal("0.01")), MAX_SIM_AMOUNT)
         report = await analyze_token(
             client,
-            event.router,
+            adapter,
             event.token,
             amount_native_wei=to_wei(sim_amount, chain.native_decimals),
             settings=None,
             run_simulation=True,
+            pool=pool,
         )
 
         sniped = 0
@@ -124,23 +128,24 @@ class SniperEngine:
             async with session_scope() as session:
                 if await repo.is_blacklisted(session, event.chain, event.token, user.id):
                     continue
-            await self._snipe(user, cfg, event, report)
+            await self._snipe(user, cfg, event, report, (adapter, pool))
             sniped += 1
 
         await self._mark(pair_id, "sniped" if sniped else "rejected", reject_reason or None)
 
-    async def _wait_for_liquidity(self, client, event: PairEvent) -> bool:
-        """Ждём, пока в пару зальют ликвидность (обычно это отдельная транзакция)."""
-        deadline = self.settings.scanner_liquidity_wait_blocks * max(client.config.block_time, 0.2)
+    async def _wait_for_liquidity(self, adapter, event: PairEvent, pool: PoolRef) -> bool:
+        """Ждём, пока в пул зальют ликвидность (обычно это отдельная транзакция)."""
+        block_time = self.registry.config(event.chain).block_time
+        deadline = self.settings.scanner_liquidity_wait_blocks * max(block_time, 0.2)
         elapsed = 0.0
-        step = max(client.config.block_time, 0.5)
+        step = max(block_time, 0.5)
         while elapsed < deadline:
             try:
-                state = await read_pair(client, event.pair, event.token)
+                state = await adapter.pool_state(event.token, pool)
                 if state.has_liquidity:
                     return True
             except Exception as exc:  # noqa: BLE001
-                log.debug("read_pair(%s): %s", event.pair, exc)
+                log.debug("pool_state(%s): %s", event.pair, exc)
             await asyncio.sleep(step)
             elapsed += step
         return False
@@ -153,19 +158,21 @@ class SniperEngine:
                 return True
         return False
 
-    async def _snipe(self, user, cfg, event: PairEvent, report) -> None:
+    async def _snipe(self, user, cfg, event: PairEvent, report, venue) -> None:
         chain = self.registry.config(event.chain)
         symbol = esc(report.token.symbol)
         await self.notifier.send(
             user.id,
             f"🎯 <b>Новый токен</b> {symbol} в сети {esc(chain.name)}\n"
             f"<code>{event.token}</code>\n"
+            f"Площадка: {esc(report.venue or event.router.name)}\n"
             f"Ликвидность: {fmt_amount(report.liquidity_native, 4)} {chain.native_symbol}\n"
             f"Налоги: покупка {_tax(report.buy_tax_pct)} / продажа {_tax(report.sell_tax_pct)}\n"
             f"Покупаю на {fmt_amount(cfg.buy_amount)} {chain.native_symbol}…",
         )
         result = await self.trader.buy(
-            user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source="auto", pair_address=event.pair
+            user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source="auto",
+            pair_address=event.pair, venue=venue,
         )
         if result.ok:
             await self.notifier.send(

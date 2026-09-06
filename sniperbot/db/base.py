@@ -39,8 +39,37 @@ async def init_db(database_url: str) -> AsyncEngine:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA foreign_keys=ON"))
         await conn.run_sync(Base.metadata.create_all)
+        if database_url.startswith("sqlite"):
+            await conn.run_sync(_add_missing_columns)
     log.info("База данных готова: %s", database_url.split("://")[0])
     return _engine
+
+
+def _add_missing_columns(connection) -> None:  # noqa: ANN001 - sync-соединение SQLAlchemy
+    """Добавляетновые столбцы в уже существующие таблицы SQLite.
+
+    create_all() создаёт только отсутствующие таблицы и не трогает старые,
+    поэтому при обновлении бота новые поля появляются здесь. Полноценные
+    миграции для этого проекта избыточны: столбцы только добавляются.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        present = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in present:
+                continue
+            ddl = f"ALTER TABLE {table.name} ADD COLUMN {column.name} {column.type.compile(connection.dialect)}"
+            default = column.default.arg if column.default is not None and not callable(column.default.arg) else None
+            if default is not None:
+                literal = f"'{default}'" if isinstance(default, str) else int(default) if isinstance(default, bool) else default
+                ddl += f" DEFAULT {literal}"
+            log.info("Миграция: добавляю столбец %s.%s", table.name, column.name)
+            connection.execute(text(ddl))
 
 
 async def close_db() -> None:

@@ -274,26 +274,14 @@ async def _doctor(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"    {WARN}не смог прочитать chain_id: {exc}")
 
-        router_cfg = config.default_router
-        try:
-            from sniperbot.chain.abi import ROUTER_ABI
-
-            weth = await client.call(router_cfg.router, ROUTER_ABI, "WETH")
-            factory = await client.call(router_cfg.router, ROUTER_ABI, "factory")
-            if weth.lower() != config.wrapped_native.lower():
-                print(f"    {BAD} Роутер {router_cfg.name}: WETH={weth}, а в конфиге {config.wrapped_native}")
-                problems += 1
-            elif factory.lower() != router_cfg.factory.lower():
-                print(f"    {BAD} Роутер {router_cfg.name}: factory={factory}, а в конфиге {router_cfg.factory}")
-                problems += 1
-            else:
-                print(f"    {OK} Роутер {router_cfg.name} и фабрика совпадают с конфигом")
-        except Exception as exc:  # noqa: BLE001
-            print(f"    {BAD} Роутер {router_cfg.name} не отвечает: {str(exc)[:120]}")
-            problems += 1
+        for router_cfg in config.active_routers:
+            await _check_router(client, config, router_cfg, print)
 
         try:
-            supported = await HoneypotSimulator(client, router_cfg).supports_override()
+            from sniperbot.chain.dex_adapter import PoolRef, get_adapter
+
+            adapter = get_adapter(client, config.default_router)
+            supported = await HoneypotSimulator(client, adapter, PoolRef("0x")).supports_override()
         except Exception:  # noqa: BLE001
             supported = False
         if supported:
@@ -313,6 +301,43 @@ async def _doctor(args: argparse.Namespace) -> int:
         return 1
     print("Можно запускать: sniper run\n")
     return 0
+
+
+async def _check_router(client, config, router_cfg, out) -> None:  # noqa: ANN001
+    """Сверяет адреса роутера с конфигом: WETH и фабрика должны совпадать."""
+    from sniperbot.chain.abi import ROUTER_ABI, V3_ROUTER02_ABI
+    from sniperbot.utils.evm import has_code
+
+    label = f"{router_cfg.name} [{router_cfg.kind}]"
+    try:
+        if router_cfg.is_v3:
+            weth = await client.call(router_cfg.router, V3_ROUTER02_ABI, "WETH9")
+            factory = await client.call(router_cfg.router, V3_ROUTER02_ABI, "factory")
+        else:
+            weth = await client.call(router_cfg.router, ROUTER_ABI, "WETH")
+            factory = await client.call(router_cfg.router, ROUTER_ABI, "factory")
+    except Exception as exc:  # noqa: BLE001
+        out(f"    {BAD} {label}: роутер не отвечает — {str(exc)[:120]}")
+        return
+
+    if weth.lower() != config.wrapped_native.lower():
+        out(f"    {BAD} {label}: WETH={weth}, а в конфиге {config.wrapped_native}")
+        return
+    if factory.lower() != router_cfg.factory.lower():
+        out(f"    {BAD} {label}: factory={factory}, а в конфиге {router_cfg.factory}")
+        return
+    out(f"    {OK} {label}: роутер и фабрика совпадают с конфигом")
+
+    if router_cfg.is_v3:
+        try:
+            quoter_ok = has_code(await client.run(lambda w3: w3.eth.get_code(router_cfg.quoter)))
+        except Exception:  # noqa: BLE001
+            quoter_ok = False
+        if quoter_ok:
+            tiers = ", ".join(f"{f / 10_000:g}%" for f in router_cfg.fee_tiers)
+            out(f"    {OK} {label}: Quoter на месте, тиры {tiers}")
+        else:
+            out(f"    {BAD} {label}: по адресу Quoter нет контракта — котировки V3 работать не будут")
 
 
 def _json_or_empty(body: str) -> dict:
@@ -373,7 +398,7 @@ async def _check(args: argparse.Namespace) -> int:
 
     from sniperbot.chain.clients import ChainClient
     from sniperbot.config import env_prefix, get_settings, load_chains
-    from sniperbot.sniper.safety import analyze_token
+    from sniperbot.sniper.safety import analyze_best
     from sniperbot.utils.evm import extract_address
     from sniperbot.utils.fmt import to_wei
 
@@ -397,8 +422,8 @@ async def _check(args: argparse.Namespace) -> int:
     print(f"\n🔎 Проверяю {token} в сети {config.name} (сумма симуляции {amount} {config.native_symbol})…\n")
 
     try:
-        report = await analyze_token(
-            client, config.default_router, token,
+        report = await analyze_best(
+            client, token,
             amount_native_wei=to_wei(amount, config.native_decimals),
             settings=None, run_simulation=not args.no_simulation,
         )
@@ -413,8 +438,10 @@ async def _check(args: argparse.Namespace) -> int:
     print(f"Адрес:        {token_info.address}")
     print(f"Decimals:     {token_info.decimals}")
     print(f"Владелец:     {'renounced' if token_info.renounced else (token_info.owner or 'неизвестен')}")
+    if report.venue:
+        print(f"Площадка:     {report.venue}")
     if report.pair:
-        print(f"Пара:         {report.pair}")
+        print(f"Пул:          {report.pair}")
         print(f"Ликвидность:  {report.liquidity_native:.4f} {config.native_symbol}")
     if report.lp_burned is not None:
         print(f"LP сожжён:    {report.lp_burned:.1f}%")
@@ -445,19 +472,31 @@ async def _check(args: argparse.Namespace) -> int:
 
 # -------------------------------------------------------------------------- discover
 async def probe_router(client, router: str) -> dict:
-    """Спрашивает у роутера его фабрику и WETH, проверяя, что это правда V2-роутер."""
-    from sniperbot.chain.abi import FACTORY_ABI, ROUTER_ABI
+    """Определяет версию роутера и достаёт у него фабрику и WETH.
+
+    V2 отвечает на `WETH()`, V3 — на `WETH9()`; фабрика проверяется вызовом,
+    который есть только у неё (`allPairsLength` у V2, `getPool` у V3).
+    """
+    from sniperbot.chain.abi import FACTORY_ABI, ROUTER_ABI, V3_FACTORY_ABI, V3_ROUTER02_ABI
     from sniperbot.utils.evm import has_code
 
     if not has_code(await client.run(lambda w3: w3.eth.get_code(router))):
         raise ValueError("по этому адресу нет кода — это не контракт")
 
-    weth = await client.call(router, ROUTER_ABI, "WETH")
-    factory = await client.call(router, ROUTER_ABI, "factory")
-    # allPairsLength есть у любой фабрики Uniswap V2 — заодно убеждаемся,
-    # что адрес указывает на фабрику, а не на произвольный контракт.
-    pairs = int(await client.call(factory, FACTORY_ABI, "allPairsLength"))
-    return {"router": router, "weth": weth, "factory": factory, "pairs": pairs}
+    try:
+        weth = await client.call(router, ROUTER_ABI, "WETH")
+        factory = await client.call(router, ROUTER_ABI, "factory")
+        pairs = int(await client.call(factory, FACTORY_ABI, "allPairsLength"))
+        return {"kind": "v2", "router": router, "weth": weth, "factory": factory, "pairs": pairs}
+    except Exception as v2_error:  # noqa: BLE001 - пробуем V3
+        try:
+            weth = await client.call(router, V3_ROUTER02_ABI, "WETH9")
+            factory = await client.call(router, V3_ROUTER02_ABI, "factory")
+            # У фабрики V3 есть getPool: вызов не должен реветить (адрес может быть нулевым).
+            await client.call(factory, V3_FACTORY_ABI, "getPool", weth, weth, 3000)
+            return {"kind": "v3", "router": router, "weth": weth, "factory": factory, "pairs": None}
+        except Exception as v3_error:  # noqa: BLE001
+            raise ValueError(f"ни V2 ({v2_error}), ни V3 ({v3_error})") from v3_error
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
@@ -496,12 +535,24 @@ async def _discover(args: argparse.Namespace) -> int:
         await client.close()
 
     prefix = env_prefix(key)
-    print(f"{OK} Это роутер Uniswap V2: фабрика знает о {found['pairs']} парах\n")
-    print("Скопируйте эти строки в .env:\n")
-    print(f"{prefix}_ENABLED=true")
-    print(f"{prefix}_ROUTER={found['router']}")
-    print(f"{prefix}_FACTORY={found['factory']}")
-    print(f"{prefix}_WRAPPED_NATIVE={found['weth']}")
+    if found["kind"] == "v2":
+        print(f"{OK} Это роутер Uniswap V2: фабрика знает о {found['pairs']} парах\n")
+        print("Скопируйте эти строки в .env:\n")
+        print(f"{prefix}_ENABLED=true")
+        print(f"{prefix}_ROUTER={found['router']}")
+        print(f"{prefix}_FACTORY={found['factory']}")
+        print(f"{prefix}_WRAPPED_NATIVE={found['weth']}")
+    else:
+        print(f"{OK} Это роутер Uniswap V3 (SwapRouter)\n")
+        print("Скопируйте эти строки в .env:\n")
+        print(f"{prefix}_ENABLED=true")
+        print(f"{prefix}_V3_ROUTER={found['router']}")
+        print(f"{prefix}_V3_FACTORY={found['factory']}")
+        print(f"{prefix}_WRAPPED_NATIVE={found['weth']}")
+        print(f"{prefix}_V3_QUOTER=0x…            # адрес QuoterV2 из документации DEX")
+        print(f"# {prefix}_V3_FEES=100,500,3000,10000   # тиры комиссий, если у форка свои")
+        print(f"\n{WARN}Без QuoterV2 котировки для V3 недоступны — найдите его адрес там же,")
+        print("   где брали роутер (docs DEX, раздел Deployments).")
     print("\nПосле правки .env выполните: sniper doctor\n")
     return 0
 

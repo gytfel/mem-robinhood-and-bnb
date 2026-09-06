@@ -97,3 +97,60 @@ async def test_cursor_is_persisted(db):
     assert await scanner._load_cursor() == 0
     await scanner._save_cursor(12345)
     assert await scanner._load_cursor() == 12345
+
+
+# ---------------------------------------------------------------- Uniswap V3
+V3_ROUTER = RouterConfig("Uniswap V3", "0xR" + "0" * 39, "0xF3" + "0" * 38, 30, True,
+                         kind="v3", quoter="0xQ" + "0" * 39, fee_tiers=(500, 3000))
+V3_POOL = "0x3333333333333333333333333333333333333333"
+
+
+def pool_log(token0: str, token1: str, pool: str, fee: int = 3000, block: int = 200) -> dict:
+    from sniperbot.chain.abi import POOL_CREATED_TOPIC
+
+    return {
+        "topics": [
+            HexBytes(POOL_CREATED_TOPIC),
+            topic(token0),
+            topic(token1),
+            HexBytes(fee.to_bytes(32, "big")),
+        ],
+        # data: tickSpacing (int24) + адрес пула
+        "data": HexBytes((60).to_bytes(32, "big") + bytes(12) + bytes.fromhex(pool[2:])),
+        "blockNumber": block,
+    }
+
+
+async def test_parses_v3_pool_created():
+    scanner = PairScanner(FakeClient([pool_log(WNATIVE, TOKEN, V3_POOL, fee=500)]),
+                          V3_ROUTER, await collect([]))
+    found = await scanner._fetch(1, 100)
+    assert len(found) == 1
+    event = found[0]
+    assert event.token.lower() == TOKEN.lower()
+    assert event.pair.lower() == V3_POOL.lower()
+    assert event.kind == "v3"
+    assert event.fee == 500
+
+
+async def test_v3_pool_without_native_is_skipped():
+    scanner = PairScanner(FakeClient([pool_log(TOKEN, OTHER, V3_POOL)]), V3_ROUTER, await collect([]))
+    assert await scanner._fetch(1, 100) == []
+
+
+async def test_v3_and_v2_use_different_topics():
+    """Сканер V3 не должен реагировать на события V2 и наоборот."""
+    from sniperbot.chain.abi import PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC
+
+    assert PAIR_CREATED_TOPIC != POOL_CREATED_TOPIC
+    v3_scanner = PairScanner(FakeClient([]), V3_ROUTER, await collect([]))
+    captured: dict = {}
+
+    async def get_logs(params):
+        captured.update(params)
+        return []
+
+    v3_scanner.client.get_logs = get_logs  # type: ignore[method-assign]
+    await v3_scanner._fetch(1, 10)
+    assert captured["topics"] == [POOL_CREATED_TOPIC]
+    assert captured["address"].lower() == V3_ROUTER.factory.lower()

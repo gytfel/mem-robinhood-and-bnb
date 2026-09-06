@@ -57,6 +57,8 @@ def render_report(report: SafetyReport, chain: ChainConfig) -> str:
         f"<code>{token.address}</code>",
         f"🌐 {esc(chain.name)} · <a href='{chain.token_url(token.address)}'>обозреватель</a>",
     ]
+    if report.venue:
+        lines.append(f"🏦 Площадка: {esc(report.venue)}")
     if report.pair_state:
         lines.append(
             f"💧 Ликвидность: <b>{fmt_amount(report.liquidity_native, 4)} {chain.native_symbol}</b>"

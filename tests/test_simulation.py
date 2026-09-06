@@ -6,6 +6,7 @@ import pytest
 from eth_abi import encode as abi_encode
 
 from sniperbot.chain.clients import ChainClient
+from sniperbot.chain.dex_adapter import PoolRef, V2Adapter
 from sniperbot.config import ChainConfig, RouterConfig
 from sniperbot.sniper.safety import HoneypotSimulator, _tax_bps
 from sniperbot.utils.evm import hex32, mapping_slot, nested_mapping_slot
@@ -14,6 +15,7 @@ ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E"
 FACTORY = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
 WNATIVE = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
 TOKEN = "0x55d398326f99059fF775485246999027B3197955"
+PAIR = "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"
 RATE = 1000  # 1 нативная монета = 1000 токенов
 PROBE_VALUE = 0x1234567890
 
@@ -57,6 +59,8 @@ class FakeClient(ChainClient):
 
         to = (tx.get("to") or "").lower()
         data = tx["data"]
+        if to == WNATIVE.lower():
+            return abi_encode(["uint256"], [10**24])   # totalSupply при проверке override
         if to == TOKEN.lower():
             return self._token_call(data, state_override or {})
         if to == ROUTER.lower():
@@ -118,7 +122,8 @@ def _clear_slot_cache():
 
 def make_simulator(**kwargs) -> HoneypotSimulator:
     client = FakeClient(**kwargs)
-    return HoneypotSimulator(client, client.config.routers[0])
+    adapter = V2Adapter(client, client.config.routers[0])
+    return HoneypotSimulator(client, adapter, PoolRef(address=PAIR, kind="v2"))
 
 
 async def test_clean_token_passes():

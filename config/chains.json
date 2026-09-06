@@ -31,6 +31,21 @@
         "factory": "0x858E3312ed3A876947EA49d572A7C42DE08af7EE",
         "fee_bps": 10,
         "default": false
+      },
+      {
+        "name": "Uniswap V3",
+        "kind": "v3",
+        "router": "",
+        "factory": "",
+        "quoter": "",
+        "fee_tiers": [
+          100,
+          500,
+          3000,
+          10000
+        ],
+        "fee_bps": 30,
+        "default": false
       }
     ],
     "lp_burn_addresses": [
@@ -60,12 +75,27 @@
         "factory": "",
         "fee_bps": 30,
         "default": true
+      },
+      {
+        "name": "Uniswap V3",
+        "kind": "v3",
+        "router": "",
+        "factory": "",
+        "quoter": "",
+        "fee_tiers": [
+          100,
+          500,
+          3000,
+          10000
+        ],
+        "fee_bps": 30,
+        "default": false
       }
     ],
     "lp_burn_addresses": [
       "0x0000000000000000000000000000000000000000",
       "0x000000000000000000000000000000000000dEaD"
     ],
-    "_comment": "Robinhood Chain (Arbitrum Orbit L2, mainnet с 01.07.2026, chain_id 4663). RPC и обозреватель заполнены, осталось вписать три адреса Uniswap V2: router, factory и wrapped_native (WETH) — возьмите их из docs.robinhood.com/chain/contracts или developers.uniswap.org/docs/protocols/v2/deployments и проверьте командой `sniper doctor`: она сверит chain_id и то, что router.factory() и router.WETH() совпадают с конфигом. Поддерживаются только пулы Uniswap V2; v3/v4 бот не видит."
+    "_comment": "Robinhood Chain (Arbitrum Orbit L2, mainnet с 01.07.2026, chain_id 4663). RPC и обозреватель заполнены. Для V2 нужны ROUTER, FACTORY и WRAPPED_NATIVE, для V3 — V3_ROUTER, V3_FACTORY и V3_QUOTER (QuoterV2). Адреса берите в docs.robinhood.com/chain/contracts или developers.uniswap.org, затем проверьте командой `sniper discover <адрес роутера>` — она сама определит версию и достанет фабрику с WETH, а `sniper doctor` сверит их с конфигом."
   }
 }

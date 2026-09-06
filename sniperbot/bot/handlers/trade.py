@@ -17,7 +17,7 @@ from sniperbot.bot.ui import reply, safe_edit
 from sniperbot.bot.views import render_report
 from sniperbot.config import ChainConfig
 from sniperbot.db.models import ChainSettings, User
-from sniperbot.sniper.safety import analyze_token
+from sniperbot.sniper.safety import analyze_best
 from sniperbot.utils.evm import extract_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, parse_decimal, to_wei
 
@@ -128,15 +128,13 @@ async def show_token(
         status = message
 
     client = ctx.registry.get(chain.key)
-    router_cfg = chain.default_router
-    if router_cfg is None:
+    if chain.default_router is None:
         await status.edit_text("❌ Для этой сети не настроен DEX-роутер.")
         return
 
     try:
-        report = await analyze_token(
+        report = await analyze_best(
             client,
-            router_cfg,
             token,
             amount_native_wei=to_wei(cfg.buy_amount, chain.native_decimals),
             settings=cfg,

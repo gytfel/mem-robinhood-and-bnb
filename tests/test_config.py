@@ -118,7 +118,7 @@ def test_missing_lists_empty_fields(settings):
     rh = chains["robinhood"]
     # RPC и chain_id уже заполнены в конфиге, адресов DEX ещё нет
     assert "WRAPPED_NATIVE" in rh.missing
-    assert "ROUTER и FACTORY" in rh.missing
+    assert any("ROUTER" in gap for gap in rh.missing)
     assert "RPC_URLS" not in rh.missing
     assert chains["bsc"].missing == []
 
@@ -177,3 +177,40 @@ def test_process_env_beats_env_file(tmp_path, monkeypatch):
     from sniperbot.config import env_values
 
     assert env_values()["RH_ROUTER"] == "0x" + "2" * 40
+
+
+def test_v3_router_from_env(monkeypatch, tmp_path, settings):
+    monkeypatch.setenv("RH_V3_ROUTER", "0x" + "a" * 40)
+    monkeypatch.setenv("RH_V3_FACTORY", "0x" + "b" * 40)
+    monkeypatch.setenv("RH_V3_QUOTER", "0x" + "c" * 40)
+    monkeypatch.setenv("RH_V3_FEES", "100,500,2500,10000")
+
+    chains = load_chains(settings=settings)
+    v3 = [r for r in chains["robinhood"].routers if r.kind == "v3"]
+    assert len(v3) == 1
+    assert v3[0].configured is True
+    assert v3[0].fee_tiers == (100, 500, 2500, 10000)
+    assert v3[0].is_v3 is True
+
+
+def test_v3_without_quoter_is_not_configured(monkeypatch, settings):
+    monkeypatch.setenv("RH_V3_ROUTER", "0x" + "a" * 40)
+    monkeypatch.setenv("RH_V3_FACTORY", "0x" + "b" * 40)
+    monkeypatch.delenv("RH_V3_QUOTER", raising=False)
+
+    v3 = [r for r in load_chains(settings=settings)["robinhood"].routers
+          if r.kind == "v3" and r.router][0]
+    assert v3.configured is False
+    assert v3.missing == ["QUOTER"]
+
+
+def test_default_dex_switches_primary_venue(monkeypatch, settings):
+    monkeypatch.setenv("BSC_V3_ROUTER", "0x" + "a" * 40)
+    monkeypatch.setenv("BSC_V3_FACTORY", "0x" + "b" * 40)
+    monkeypatch.setenv("BSC_V3_QUOTER", "0x" + "c" * 40)
+    monkeypatch.setenv("BSC_DEFAULT_DEX", "v3")
+
+    bsc = load_chains(settings=settings)["bsc"]
+    assert bsc.default_router.kind == "v3"
+    # обе площадки остаются активными: сканер слушает и V2, и V3
+    assert {r.kind for r in bsc.active_routers} == {"v2", "v3"}

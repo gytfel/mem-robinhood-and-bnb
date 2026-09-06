@@ -1,18 +1,18 @@
-"""Анти-honeypot и анти-rug проверки токена.
+"""Анти-honeypot и анти-rug проверки токена (Uniswap V2 и V3).
 
 Ключевая идея: не доверять «глазам», а симулировать реальные покупку и продажу
 через `eth_call` с state override.
 
-* покупка — вызов `swapExactETHForTokensSupportingFeeOnTransferTokens`
-  от имени случайного адреса с подменённым балансом;
-* продажа — тот же роутер, но токены и allowance выдаются адресу
-  через `stateDiff` (слот `balanceOf`/`allowance` ищется перебором);
-* налоги — двоичный поиск по `amountOutMin`: роутер сам проверяет
-  `amountOut >= amountOutMin`, поэтому максимальное проходящее значение
-  и есть реально полученная сумма.
+* покупка — вызов роутера от имени случайного адреса с подменённым балансом;
+* продажа — тот же роутер, но токены и allowance выдаются адресу через
+  `stateDiff` (слот `balanceOf`/`allowance` ищется перебором);
+* налоги — двоичный поиск по минимальной сумме выхода: роутер сам проверяет
+  `amountOut >= amountOutMin`, поэтому максимальное проходящее значение и есть
+  реально полученная сумма.
 
-Если нода не поддерживает state override, проверки помечаются как
-недоступные — решение остаётся за пользователем (`require_simulation`).
+Версия протокола роли не играет: обе кодировки свапа даёт :mod:`chain.dex_adapter`.
+Если нода не поддерживает state override, проверки помечаются как недоступные —
+решение остаётся за пользователем (`require_simulation`).
 """
 
 from __future__ import annotations
@@ -26,13 +26,7 @@ from decimal import Decimal
 from eth_utils import to_checksum_address
 
 from sniperbot.chain.clients import ChainClient
-from sniperbot.chain.dex import (
-    PairState,
-    amounts_out,
-    get_pair_address,
-    lp_burned_pct,
-    read_pair,
-)
+from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, PoolState, find_best_venue, get_adapter
 from sniperbot.chain.erc20 import TokenInfo, fetch_token, trading_limits
 from sniperbot.config import RouterConfig
 from sniperbot.utils.evm import has_code, hex32, mapping_slot, nested_mapping_slot
@@ -85,13 +79,21 @@ class SafetyReport:
     token: TokenInfo
     chain_key: str
     router: str
+    dex: str = ""
+    pool: PoolRef | None = None
     pair: str | None = None
-    pair_state: PairState | None = None
+    pair_state: PoolState | None = None
     liquidity_native: Decimal = Decimal(0)
     lp_burned: Decimal | None = None
     simulation: SimulationResult = field(default_factory=SimulationResult)
     limits: dict = field(default_factory=dict)
     checks: list[Check] = field(default_factory=list)
+
+    @property
+    def venue(self) -> str:
+        if not self.dex:
+            return ""
+        return f"{self.dex} · {self.pool.label}" if self.pool else self.dex
 
     @property
     def buy_tax_pct(self) -> Decimal | None:
@@ -117,12 +119,11 @@ class SafetyReport:
         done = [c for c in self.checks if c.ok is not None]
         if not done:
             return 0
-        weights = {True: 1.0, False: 0.0}
         total = 0.0
         weight_sum = 0.0
         for check in done:
             weight = 2.0 if check.critical else 1.0
-            total += weights[bool(check.ok)] * weight
+            total += (1.0 if check.ok else 0.0) * weight
             weight_sum += weight
         return int(round(100 * total / weight_sum)) if weight_sum else 0
 
@@ -146,20 +147,17 @@ class NodeOverrideUnsupported(RuntimeError):
 class HoneypotSimulator:
     """Симуляция покупки/продажи токена без реальных транзакций."""
 
-    def __init__(self, client: ChainClient, router_cfg: RouterConfig) -> None:
+    def __init__(self, client: ChainClient, adapter: DexAdapter, pool: PoolRef) -> None:
         self.client = client
-        self.router_cfg = router_cfg
-        self.router = to_checksum_address(router_cfg.router)
+        self.adapter = adapter
+        self.pool = pool
+        self.router = to_checksum_address(adapter.router)
         self.wnative = to_checksum_address(client.config.wrapped_native)
 
     # ------------------------------------------------------------ утилиты
     @staticmethod
     def _probe_address() -> str:
         return to_checksum_address("0x" + secrets.token_hex(20))
-
-    def _encode(self, fn_name: str, *args) -> str:
-        contract = self.client.router(self.router)
-        return contract.encode_abi(fn_name, args=list(args))
 
     async def _call(self, tx: dict, overrides: dict) -> bytes | None:
         """eth_call; None — если вызов зареверчен."""
@@ -175,14 +173,15 @@ class HoneypotSimulator:
         probe = self._probe_address()
         try:
             await self.client.raw_call(
-                {"from": probe, "to": self.router, "data": self._encode("WETH")},
+                {"from": probe, "to": self.wnative, "data": "0x18160ddd"},  # totalSupply()
                 {probe: {"balance": hex(PROBE_NATIVE_BALANCE)}},
             )
         except NodeOverrideUnsupported:
             return False
         except Exception as exc:  # noqa: BLE001
             message = str(exc).lower()
-            if any(t in message for t in ("state override", "not supported", "unsupported", "-32601", "invalid argument")):
+            if any(t in message for t in ("state override", "not supported", "unsupported",
+                                          "-32601", "invalid argument")):
                 return False
         return True
 
@@ -281,15 +280,12 @@ class HoneypotSimulator:
             result.available = True
 
             probe = self._probe_address()
-            deadline = 2**32
-            buy_path = [self.wnative, token]
-            sell_path = [token, self.wnative]
 
-            # --- ожидаемый выход по формуле пула ---
+            # --- ожидаемый выход по котировке площадки ---
             try:
-                expected_tokens = (await amounts_out(self.client, self.router, amount_native_wei, buy_path))[-1]
+                expected_tokens = await self.adapter.quote_buy(token, amount_native_wei, self.pool)
             except Exception as exc:  # noqa: BLE001
-                result.error = f"Нет ликвидности для котировки: {exc}"
+                result.error = f"Нет котировки на покупку: {exc}"
                 result.can_buy = False
                 return result
             if expected_tokens <= 0:
@@ -297,29 +293,29 @@ class HoneypotSimulator:
                 result.error = "Пул не отдаёт токены за нативную монету"
                 return result
 
-            # --- покупка ---
+            # --- покупка (заодно определяем рабочую кодировку роутера) ---
+            buy_overrides = {probe: {"balance": hex(PROBE_NATIVE_BALANCE)}}
             buy_tx = {
                 "from": probe,
                 "to": self.router,
                 "value": hex(amount_native_wei),
                 "gas": hex(SIM_GAS),
-                "data": self._encode(
-                    "swapExactETHForTokensSupportingFeeOnTransferTokens", 0, buy_path, probe, deadline
-                ),
+                "data": self.adapter.encode_buy(token, amount_native_wei, 0, probe, self.pool),
             }
-            buy_overrides = {probe: {"balance": hex(PROBE_NATIVE_BALANCE)}}
-            if await self._call(buy_tx, buy_overrides) is None:
-                result.can_buy = False
-                result.error = "Покупка не проходит (торговля закрыта или чёрный список)"
-                return result
+            while await self._call(buy_tx, buy_overrides) is None:
+                if not self.adapter.try_next_variant():
+                    result.can_buy = False
+                    result.error = "Покупка не проходит (торговля закрыта или чёрный список)"
+                    return result
+                buy_tx["data"] = self.adapter.encode_buy(token, amount_native_wei, 0, probe, self.pool)
             result.can_buy = True
+            if hasattr(self.adapter, "remember_variant"):
+                self.adapter.remember_variant()
 
             received = await self._max_passing_min_out(
                 buy_tx,
                 buy_overrides,
-                lambda min_out: self._encode(
-                    "swapExactETHForTokensSupportingFeeOnTransferTokens", min_out, buy_path, probe, deadline
-                ),
+                lambda min_out: self.adapter.encode_buy(token, amount_native_wei, min_out, probe, self.pool),
                 expected_tokens,
             )
             result.buy_tax_bps = _tax_bps(expected_tokens, received)
@@ -334,9 +330,10 @@ class HoneypotSimulator:
             balance_key = mapping_slot(probe, slot[0], vyper_layout=slot[1])
             state_diff = {balance_key: hex32(sell_amount * 2)}
 
-            allowance_slot = await self.find_allowance_slot(token, probe, self.router)
+            spender = to_checksum_address(self.adapter.spender)
+            allowance_slot = await self.find_allowance_slot(token, probe, spender)
             if allowance_slot is not None:
-                state_diff[nested_mapping_slot(probe, self.router, allowance_slot)] = hex32(MAX_UINT256)
+                state_diff[nested_mapping_slot(probe, spender, allowance_slot)] = hex32(MAX_UINT256)
 
             sell_overrides = {
                 probe: {"balance": hex(PROBE_NATIVE_BALANCE)},
@@ -346,10 +343,7 @@ class HoneypotSimulator:
                 "from": probe,
                 "to": self.router,
                 "gas": hex(SIM_GAS),
-                "data": self._encode(
-                    "swapExactTokensForETHSupportingFeeOnTransferTokens",
-                    sell_amount, 0, sell_path, probe, deadline,
-                ),
+                "data": self.adapter.encode_sell(token, sell_amount, 0, probe, self.pool),
             }
             if await self._call(sell_tx, sell_overrides) is None:
                 result.can_sell = False
@@ -358,17 +352,14 @@ class HoneypotSimulator:
             result.can_sell = True
 
             try:
-                expected_native = (await amounts_out(self.client, self.router, sell_amount, sell_path))[-1]
+                expected_native = await self.adapter.quote_sell(token, sell_amount, self.pool)
             except Exception:  # noqa: BLE001
                 expected_native = 0
             if expected_native > 0:
                 got_native = await self._max_passing_min_out(
                     sell_tx,
                     sell_overrides,
-                    lambda min_out: self._encode(
-                        "swapExactTokensForETHSupportingFeeOnTransferTokens",
-                        sell_amount, min_out, sell_path, probe, deadline,
-                    ),
+                    lambda min_out: self.adapter.encode_sell(token, sell_amount, min_out, probe, self.pool),
                     expected_native,
                 )
                 result.sell_tax_bps = _tax_bps(expected_native, got_native)
@@ -394,18 +385,43 @@ def _tax_bps(expected: int, actual: int) -> int:
     return max(0, min(10_000, rounded))
 
 
-async def analyze_token(
+async def analyze_best(
     client: ChainClient,
-    router_cfg: RouterConfig,
     token_address: str,
     *,
     amount_native_wei: int,
     settings=None,
     run_simulation: bool = True,
 ) -> SafetyReport:
-    """Полный отчёт по токену: ликвидность, налоги, honeypot, LP, владелец."""
+    """Проверяет токен на самой ликвидной площадке сети (V2 или V3)."""
     token = await fetch_token(client, token_address)
-    report = SafetyReport(token=token, chain_key=client.config.key, router=router_cfg.router)
+    found = await find_best_venue(client, token.address, token.decimals)
+    if found is None:
+        report = SafetyReport(token=token, chain_key=client.config.key, router="")
+        report.checks.append(Check("pair", "Пул на DEX", False, "пул с ликвидностью не найден", critical=True))
+        return report
+    adapter, pool, _ = found
+    return await analyze_token(
+        client, adapter, token.address, amount_native_wei=amount_native_wei,
+        settings=settings, run_simulation=run_simulation, pool=pool,
+    )
+
+
+async def analyze_token(
+    client: ChainClient,
+    dex: DexAdapter | RouterConfig,
+    token_address: str,
+    *,
+    amount_native_wei: int,
+    settings=None,
+    run_simulation: bool = True,
+    pool: PoolRef | None = None,
+) -> SafetyReport:
+    """Полный отчёт по токену: ликвидность, налоги, honeypot, LP, владелец."""
+    adapter = dex if isinstance(dex, DexAdapter) else get_adapter(client, dex)
+    token = await fetch_token(client, token_address)
+    report = SafetyReport(token=token, chain_key=client.config.key,
+                          router=adapter.router, dex=adapter.name)
     checks = report.checks
 
     code = await client.run(lambda w3: w3.eth.get_code(to_checksum_address(token_address)))
@@ -414,13 +430,14 @@ async def analyze_token(
         return report
     checks.append(Check("contract", "Контракт токена", True, f"{len(code)} байт"))
 
-    pair = await get_pair_address(client, router_cfg, token.address)
-    report.pair = pair
-    if not pair:
-        checks.append(Check("pair", "Пара на DEX", False, "пара не найдена", critical=True))
+    pool = pool or await adapter.find_pool(token.address)
+    if pool is None:
+        checks.append(Check("pair", "Пул на DEX", False, "пул не найден", critical=True))
         return report
+    report.pool = pool
+    report.pair = pool.address
 
-    state = await read_pair(client, pair, token.address, token.decimals)
+    state = await adapter.pool_state(token.address, pool, token.decimals)
     report.pair_state = state
     report.liquidity_native = state.liquidity_native
     symbol = client.config.native_symbol
@@ -435,16 +452,11 @@ async def analyze_token(
     if max_liq and state.liquidity_native > max_liq:
         liq_ok = False
     checks.append(
-        Check(
-            "liquidity",
-            "Ликвидность",
-            liq_ok,
-            f"{from_wei(state.reserve_native):.4f} {symbol}",
-            critical=True,
-        )
+        Check("liquidity", f"Ликвидность ({pool.label})", liq_ok,
+              f"{from_wei(state.reserve_native, client.config.native_decimals):.4f} {symbol}", critical=True)
     )
 
-    report.lp_burned = await lp_burned_pct(client, pair)
+    report.lp_burned = await adapter.lp_burned(pool)
     min_burn = int(getattr(settings, "min_lp_burned_pct", 0) or 0)
     if report.lp_burned is not None:
         if min_burn:
@@ -456,17 +468,16 @@ async def analyze_token(
         checks.append(
             Check("lp_lock", "LP сожжён/заблокирован", lp_ok, f"{report.lp_burned:.1f}%", critical=bool(min_burn))
         )
+    elif min_burn and adapter.kind == "v3":
+        # В V3 ликвидность — это NFT-позиции, «сожжённого LP» не существует.
+        checks.append(Check("lp_lock", "LP сожжён/заблокирован", None,
+                            "в V3 не применимо — правило пропущено"))
 
     require_renounced = bool(getattr(settings, "require_renounced", False))
     owner_ok: bool | None = token.renounced if require_renounced else (True if token.renounced else None)
     checks.append(
-        Check(
-            "owner",
-            "Владелец контракта",
-            owner_ok,
-            "renounced" if token.renounced else (token.owner or "неизвестен"),
-            critical=require_renounced,
-        )
+        Check("owner", "Владелец контракта", owner_ok,
+              "renounced" if token.renounced else (token.owner or "неизвестен"), critical=require_renounced)
     )
 
     report.limits = await trading_limits(client, token.address)
@@ -474,7 +485,7 @@ async def analyze_token(
         checks.append(Check("limits", "Лимиты токена", None, _fmt_limits(report.limits, token.decimals)))
 
     if run_simulation:
-        simulator = HoneypotSimulator(client, router_cfg)
+        simulator = HoneypotSimulator(client, adapter, pool)
         report.simulation = await simulator.simulate(token.address, token.decimals, amount_native_wei)
         _apply_simulation_checks(report, settings)
 
@@ -495,13 +506,9 @@ def _apply_simulation_checks(report: SafetyReport, settings) -> None:
 
     checks.append(Check("buy", "Покупка проходит", sim.can_buy, sim.error or "", critical=True))
     checks.append(
-        Check(
-            "sell",
-            "Продажа проходит (honeypot)",
-            sim.can_sell,
-            "honeypot" if sim.can_sell is False else ("не проверено" if sim.can_sell is None else "ок"),
-            critical=True,
-        )
+        Check("sell", "Продажа проходит (honeypot)", sim.can_sell,
+              "honeypot" if sim.can_sell is False else ("не проверено" if sim.can_sell is None else "ок"),
+              critical=True)
     )
 
     max_buy = int(getattr(settings, "max_buy_tax_bps", 10_000) or 10_000)
@@ -531,7 +538,7 @@ def _fmt_limits(limits: dict, decimals: int) -> str:
 def evaluate_for_settings(report: SafetyReport, cfg) -> tuple[bool, list[str]]:
     """Проверяет готовый отчёт против настроек конкретного пользователя.
 
-    Отчёт строится один раз на пару, а фильтры у всех разные — поэтому
+    Отчёт строится один раз на пул, а фильтры у всех разные — поэтому
     сравнение вынесено отдельно от сбора данных.
     """
     reasons: list[str] = []
@@ -561,8 +568,9 @@ def evaluate_for_settings(report: SafetyReport, cfg) -> tuple[bool, list[str]]:
     if sim.sell_tax_bps is not None and sim.sell_tax_bps > max_sell:
         reasons.append(f"налог на продажу {sim.sell_tax_bps / 100:.1f}% > {max_sell / 100:.0f}%")
 
+    # У V3 нет LP-токенов, поэтому требование к сожжённому LP там не применяется.
     min_burn = int(getattr(cfg, "min_lp_burned_pct", 0) or 0)
-    if min_burn:
+    if min_burn and (report.pool is None or report.pool.kind != "v3"):
         if report.lp_burned is None:
             reasons.append("не удалось проверить блокировку LP")
         elif report.lp_burned < min_burn:

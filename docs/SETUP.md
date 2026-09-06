@@ -130,52 +130,49 @@ Robinhood Chain — L2 на Arbitrum Orbit, mainnet работает с 1 июл
 | Обозреватель | `https://robinhoodchain.blockscout.com` |
 | Газ | ETH |
 
-Не хватает **трёх адресов контрактов Uniswap V2** — их нужно взять из
-первоисточника, а не из статей и чатов:
+Не хватает адресов контрактов DEX. Бот умеет работать и с **Uniswap V2**, и с
+**Uniswap V3** — можно настроить обе площадки сразу, тогда сканер слушает обе, а
+при ручной покупке выбирается пул с наибольшей ликвидностью.
+
+Что нужно для каждой версии:
+
+| Версия | Переменные | Где взять |
+|---|---|---|
+| V2 | `RH_ROUTER`, `RH_FACTORY`, `RH_WRAPPED_NATIVE` | Router02 и Factory форка Uniswap V2 |
+| V3 | `RH_V3_ROUTER`, `RH_V3_FACTORY`, `RH_V3_QUOTER`, `RH_WRAPPED_NATIVE` | SwapRouter, V3 Factory и **QuoterV2** |
+
+Источники адресов:
 
 1. [`docs.robinhood.com/chain/contracts`](https://docs.robinhood.com/chain/contracts) — официальный список контрактов сети (там же адрес WETH);
-2. [`developers.uniswap.org/docs/protocols/v2/deployments`](https://developers.uniswap.org/docs/protocols/v2/deployments) — адреса V2 Router02 и V2 Factory по сетям;
-3. если сомневаетесь — откройте в обозревателе любой своп на Uniswap V2, посмотрите,
-   какому контракту шёл вызов: это и есть роутер.
+2. [`developers.uniswap.org/docs/protocols/v2/deployments`](https://developers.uniswap.org/docs/protocols/v2/deployments) и раздел v3 того же сайта — адреса по сетям;
+3. обозреватель: откройте любой своп на нужном DEX — контракт, которому шёл вызов, и есть роутер.
 
-Фактически найти нужно **только адрес роутера** — два других бот достанет сам:
+Достаточно найти **адрес роутера** — остальное бот достанет сам и заодно определит версию:
 
 ```bash
 cd /opt/memecoin-sniper
 sudo -u sniper .venv/bin/sniper --env-file .env discover 0xАдресРоутера --chain robinhood
 ```
 
-Команда спросит у контракта `factory()` и `WETH()`, убедится, что это
-действительно Uniswap V2 (у фабрики есть `allPairsLength`), и напечатает готовые
-строки для `.env`. Если адрес окажется от Universal Router (v3/v4) или просто
-чужим контрактом — команда откажется, а не выдаст мусор.
+Команда напечатает готовые строки для `.env`. Для V3 останется добавить только
+`RH_V3_QUOTER` — адрес QuoterV2 из той же документации: без него котировки V3
+недоступны, и площадка не включится.
 
-Затем впишите их в `.env`:
+Дополнительные настройки V3 (нужны редко):
 
 ```env
-RH_ENABLED=true
-RH_ROUTER=0x<Uniswap V2 Router02>
-RH_FACTORY=0x<Uniswap V2 Factory>
-RH_WRAPPED_NATIVE=0x<WETH>
-ENABLED_CHAINS=bsc,robinhood
+RH_V3_FEES=100,500,2500,10000   # тиры комиссий, если у форка свои
+RH_V3_VARIANT=router02          # router01 — если у DEX старый SwapRouter с deadline
+RH_DEFAULT_DEX=v3               # какую площадку считать основной
 ```
 
-И обязательно проверьте:
+Вариант роутера бот определяет сам при первой симуляции, так что трогать
+`RH_V3_VARIANT` обычно не нужно.
 
-```bash
-cd /opt/memecoin-sniper
-sudo -u sniper .venv/bin/sniper --env-file .env doctor
-```
-
-`doctor` не просто пингует ноду: он сверяет `chain_id` с конфигом и проверяет,
-что `router.factory()` и `router.WETH()` совпадают с тем, что вы вписали.
-Перепутанный или поддельный адрес роутера будет пойман здесь — **до** того, как
-через него пойдут деньги.
-
-> ⚠️ Бот работает только с пулами **Uniswap V2** (и её форками). Ликвидность
-> Uniswap v3/v4 он не видит: если на Robinhood Chain мемкоины торгуются
-> преимущественно в v4-пулах, автоснайп там ничего не найдёт. Сначала проверьте
-> вручную: `sniper check 0xАдресТокена --chain robinhood`.
+> ⚠️ Uniswap **v4** и Universal Router не поддерживаются — только V2 и V3.
+> Проверить, видит ли бот ликвидность конкретного токена:
+> `sniper check 0xАдресТокена --chain robinhood` — в отчёте будет строка
+> «Площадка», например `Uniswap V3 · V3 0.3%`.
 
 Testnet-адреса (chain_id 46630) для торговли не годятся — там нет реальной
 ликвидности.
@@ -207,7 +204,9 @@ SERVICE_FEE_WALLET=0xВашКошелёк      # куда переводить �
 | `ENABLED_CHAINS` | — | из `chains.json` | какие сети включить: `bsc`, `bsc,robinhood` |
 | `DEFAULT_CHAIN` | — | `bsc` | сеть по умолчанию для новых пользователей |
 | `BSC_RPC_URLS` | — | публичные | свои ноды BSC через запятую |
-| `RH_ENABLED` / `RH_CHAIN_ID` / `RH_RPC_URLS` / `RH_ROUTER` / `RH_FACTORY` / `RH_WRAPPED_NATIVE` / `RH_EXPLORER_URL` / `RH_NATIVE_SYMBOL` | — | пусто | параметры Robinhood Chain |
+| `RH_ENABLED` / `RH_CHAIN_ID` / `RH_RPC_URLS` / `RH_ROUTER` / `RH_FACTORY` / `RH_WRAPPED_NATIVE` / `RH_EXPLORER_URL` / `RH_NATIVE_SYMBOL` | — | пусто | параметры Robinhood Chain (V2) |
+| `<СЕТЬ>_V3_ROUTER` / `_V3_FACTORY` / `_V3_QUOTER` / `_V3_FEES` / `_V3_VARIANT` | — | пусто | Uniswap V3 в этой сети (например `BSC_V3_ROUTER`, `RH_V3_QUOTER`) |
+| `<СЕТЬ>_DEFAULT_DEX` | — | `v2` | какая площадка основная: `v2` или `v3` |
 | `SCANNER_POLL_INTERVAL` | — | `2.0` | период опроса новых пар, сек |
 | `SCANNER_LIQUIDITY_WAIT_BLOCKS` | — | `60` | сколько ждать залив ликвидности |
 | `POSITION_POLL_INTERVAL` | — | `6.0` | период пересчёта позиций (TP/SL), сек |

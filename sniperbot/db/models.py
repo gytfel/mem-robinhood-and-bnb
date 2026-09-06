@@ -158,6 +158,8 @@ class Position(Base):
     token_decimals: Mapped[int] = mapped_column(Integer, default=18)
     pair_address: Mapped[str | None] = mapped_column(String(42))
     router_address: Mapped[str] = mapped_column(String(42))
+    dex_kind: Mapped[str] = mapped_column(String(8), default="v2")   # v2 | v3
+    pool_fee: Mapped[int] = mapped_column(Integer, default=0)        # тир комиссии V3
 
     amount_wei: Mapped[int] = mapped_column(Wei, default=0)           # текущий остаток токенов
     bought_wei: Mapped[int] = mapped_column(Wei, default=0)           # сколько куплено всего
@@ -222,6 +224,8 @@ class SeenPair(Base):
     pair_address: Mapped[str] = mapped_column(String(42))
     token_address: Mapped[str] = mapped_column(String(42), index=True)
     router_address: Mapped[str | None] = mapped_column(String(42))
+    dex_kind: Mapped[str] = mapped_column(String(8), default="v2")
+    pool_fee: Mapped[int] = mapped_column(Integer, default=0)
     block_number: Mapped[int] = mapped_column(BigInteger, default=0)
     status: Mapped[str] = mapped_column(String(16), default="new")  # new|checked|rejected|sniped
     reason: Mapped[str | None] = mapped_column(Text)
