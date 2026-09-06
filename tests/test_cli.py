@@ -181,3 +181,16 @@ def test_discover_rejects_garbage_address(tmp_path):
     env_path.write_text("BOT_TOKEN=t\nMASTER_KEY=" + "k" * 32 + "\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         cli.main(["--env-file", str(env_path), "discover", "не-адрес"])
+
+
+# ------------------------------------------------------ отчёты: разбор аргументов
+def test_report_args_parsing():
+    from sniperbot.bot.handlers.reports import _days_arg
+
+    assert _days_arg(None) == (7, False)
+    assert _days_arg("30") == (30, False)
+    assert _days_arg("test") == (7, True)
+    assert _days_arg("test 14") == (14, True)
+    assert _days_arg("тест 3") == (3, True)
+    assert _days_arg("999999") == (365, False)      # верхняя граница
+    assert _days_arg("мусор") == (7, False)

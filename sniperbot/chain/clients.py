@@ -69,6 +69,8 @@ class ChainClient:
         self._providers: list[AsyncWeb3] = [self._make_w3(url) for url in config.rpc_urls]
         self._index = 0
         self._lock = asyncio.Lock()
+        self.requests = 0        # счётчик запросов — для /usage
+        self.failures = 0
 
     # ------------------------------------------------------------------ setup
     def _make_w3(self, url: str) -> AsyncWeb3:
@@ -88,6 +90,7 @@ class ChainClient:
     async def run(self, fn: Callable[[AsyncWeb3], Awaitable[T]]) -> T:
         """Выполняет запрос, перебирая RPC при транспортных ошибках."""
         last_error: Exception | None = None
+        self.requests += 1
         for offset in range(len(self._providers)):
             index = (self._index + offset) % len(self._providers)
             try:
@@ -98,6 +101,7 @@ class ChainClient:
                 if not is_transport_error(exc):
                     raise
                 last_error = exc
+                self.failures += 1
                 log.debug("RPC %s недоступен: %s", self.config.rpc_urls[index], exc)
                 continue
             else:

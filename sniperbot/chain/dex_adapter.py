@@ -388,11 +388,16 @@ def get_adapter(client: ChainClient, cfg: RouterConfig) -> DexAdapter:
     return V3Adapter(client, cfg) if cfg.is_v3 else V2Adapter(client, cfg)
 
 
-async def find_best_venue(client: ChainClient, token: str, decimals: int = 18):
-    """Самый ликвидный пул токена среди всех DEX сети: (адаптер, пул, состояние)."""
+async def find_best_venue(client: ChainClient, token: str, decimals: int = 18, route: str = "auto"):
+    """Самый ликвидный пул токена среди всех DEX сети: (адаптер, пул, состояние).
+
+    ``route`` ограничивает поиск версией протокола: auto | v2 | v3.
+    """
     best = None
     best_liquidity = Decimal(-1)
     for adapter in adapters_for(client):
+        if route in {"v2", "v3"} and adapter.kind != route:
+            continue
         try:
             pool = await adapter.find_pool(token)
             if pool is None:

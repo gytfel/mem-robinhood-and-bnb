@@ -76,6 +76,8 @@ class User(Base):
     active_chain: Mapped[str] = mapped_column(String(32), default="bsc")
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     notify_deposits: Mapped[bool] = mapped_column(Boolean, default=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)      # бумажная торговля
+    notify_level: Mapped[str] = mapped_column(String(16), default="all")
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -101,11 +103,18 @@ class ChainSettings(Base):
     gas_multiplier_bps: Mapped[int] = mapped_column(Integer, default=12000)   # x1.2 к базовой цене газа
     gas_limit: Mapped[int] = mapped_column(Integer, default=600_000)
     approve_max: Mapped[bool] = mapped_column(Boolean, default=True)
+    gas_mode: Mapped[str] = mapped_column(String(16), default="normal")   # normal|fast|turbo|manual
+    priority_fee_gwei: Mapped[Decimal] = mapped_column(Dec, default=Decimal("1"))
+    dex_route: Mapped[str] = mapped_column(String(8), default="auto")     # auto|v2|v3
 
     # --- автоснайп ---
     auto_snipe: Mapped[bool] = mapped_column(Boolean, default=False)
     max_positions: Mapped[int] = mapped_column(Integer, default=5)
     max_snipes_per_hour: Mapped[int] = mapped_column(Integer, default=10)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    daily_loss_limit: Mapped[Decimal] = mapped_column(Dec, default=Decimal(0))
+    max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
+    risk_reset_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     # --- фильтры безопасности ---
     min_liquidity: Mapped[Decimal] = mapped_column(Dec, default=Decimal("2"))
@@ -172,6 +181,7 @@ class Position(Base):
 
     status: Mapped[str] = mapped_column(String(16), default="open")   # open | closed | failed
     source: Mapped[str] = mapped_column(String(16), default="manual") # manual | auto
+    is_paper: Mapped[bool] = mapped_column(Boolean, default=False)    # сделка в тестовом режиме
     buy_tx: Mapped[str | None] = mapped_column(String(80))
     sell_tx: Mapped[str | None] = mapped_column(String(80))
     error: Mapped[str | None] = mapped_column(Text)

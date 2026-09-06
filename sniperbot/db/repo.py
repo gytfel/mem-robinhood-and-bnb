@@ -256,3 +256,98 @@ def pnl_pct(spent: int, returned: int) -> Decimal | None:
     if spent <= 0:
         return None
     return (Decimal(returned - spent) / Decimal(spent)) * 100
+
+
+# ------------------------------------------------------------------ риск-лимиты
+async def last_position_at(
+    session: AsyncSession, user_id: int, chain: str, source: str | None = None
+) -> dt.datetime | None:
+    stmt = select(func.max(Position.opened_at)).where(
+        Position.user_id == user_id, Position.chain == chain
+    )
+    if source:
+        stmt = stmt.where(Position.source == source)
+    return await session.scalar(stmt)
+
+
+async def realized_pnl_since(
+    session: AsyncSession, user_id: int, chain: str | None, since: dt.datetime,
+    paper: bool | None = None,
+) -> int:
+    """Реализованный P&L (в wei) по закрытым позициям с момента `since`."""
+    stmt = select(Position).where(
+        Position.user_id == user_id,
+        Position.status == "closed",
+        Position.closed_at >= since,
+    )
+    if chain:
+        stmt = stmt.where(Position.chain == chain)
+    if paper is not None:
+        stmt = stmt.where(Position.is_paper.is_(paper))
+    positions = list((await session.scalars(stmt)).all())
+    return sum(p.native_returned_wei - p.native_spent_wei for p in positions)
+
+
+async def consecutive_losses(
+    session: AsyncSession, user_id: int, chain: str, since: dt.datetime | None = None
+) -> int:
+    """Сколько последних закрытых сделок подряд оказались убыточными."""
+    stmt = (
+        select(Position)
+        .where(Position.user_id == user_id, Position.chain == chain, Position.status == "closed")
+        .order_by(Position.closed_at.desc().nullslast(), Position.id.desc())
+        .limit(50)
+    )
+    if since is not None:
+        stmt = stmt.where(Position.closed_at >= since)
+    streak = 0
+    for position in (await session.scalars(stmt)).all():
+        if position.native_returned_wei >= position.native_spent_wei:
+            break
+        streak += 1
+    return streak
+
+
+async def closed_between(
+    session: AsyncSession, user_id: int, since: dt.datetime, *, paper: bool = False,
+    chain: str | None = None,
+) -> list[Position]:
+    stmt = (
+        select(Position)
+        .where(
+            Position.user_id == user_id,
+            Position.status == "closed",
+            Position.closed_at >= since,
+            Position.is_paper.is_(paper),
+        )
+        .order_by(Position.closed_at.asc())
+    )
+    if chain:
+        stmt = stmt.where(Position.chain == chain)
+    return list((await session.scalars(stmt)).all())
+
+
+async def pairs_since(session: AsyncSession, chain: str, since: dt.datetime) -> list[SeenPair]:
+    stmt = (
+        select(SeenPair)
+        .where(SeenPair.chain == chain, SeenPair.created_at >= since)
+        .order_by(SeenPair.created_at.desc())
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def user_count(session: AsyncSession) -> int:
+    return int(await session.scalar(select(func.count()).select_from(User)) or 0)
+
+
+async def list_users(session: AsyncSession, limit: int = 50) -> list[User]:
+    stmt = select(User).order_by(User.created_at.desc()).limit(limit)
+    return list((await session.scalars(stmt)).all())
+
+
+async def set_blocked(session: AsyncSession, user_id: int, blocked: bool) -> bool:
+    user = await session.get(User, user_id)
+    if user is None:
+        return False
+    user.is_blocked = blocked
+    return True

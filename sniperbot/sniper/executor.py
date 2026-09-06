@@ -21,6 +21,7 @@ from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, Position, User, utcnow
+from sniperbot.settings_registry import effective_gas_multiplier
 from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import from_wei, to_wei
 
@@ -57,10 +58,18 @@ class Trader:
         self.wallets = wallets
         self.settings = settings
 
+    async def gas_fees(self, client, cfg: ChainSettings) -> dict:
+        """Цена газа по выбранному режиму (normal/fast/turbo/manual)."""
+        return await client.gas_fees(
+            float(effective_gas_multiplier(cfg)),
+            float(getattr(cfg, "priority_fee_gwei", 1) or 1),
+        )
+
     # ------------------------------------------------------- выбор площадки
-    async def best_venue(self, chain_key: str, token: str) -> tuple[DexAdapter, PoolRef] | None:
-        """Самый ликвидный пул токена среди всех DEX сети (V2 и V3)."""
-        found = await find_best_venue(self.registry.get(chain_key), token)
+    async def best_venue(self, chain_key: str, token: str,
+                         route: str = "auto") -> tuple[DexAdapter, PoolRef] | None:
+        """Самый ликвидный пул токена. route=v2|v3 ограничивает площадку."""
+        found = await find_best_venue(self.registry.get(chain_key), token, route=route)
         return (found[0], found[1]) if found else None
 
     def adapter_for_position(self, position: Position) -> DexAdapter:
@@ -92,7 +101,8 @@ class Trader:
         chain = client.config
         token_address = to_checksum(token_address)
 
-        venue = venue or await self.best_venue(chain_key, token_address)
+        venue = venue or await self.best_venue(chain_key, token_address,
+                                               getattr(cfg, "dex_route", "auto") or "auto")
         if venue is None:
             return TradeResult(False, "buy", error="Не нашёл пул с ликвидностью ни на одном DEX этой сети")
         adapter, pool = venue
@@ -105,11 +115,11 @@ class Trader:
         fee_wei = int(amount_wei * self.settings.service_fee_rate) if self.settings.service_fee_bps else 0
         spend_wei = amount_wei - fee_wei
 
-        gas_fees = await client.gas_fees(float(cfg.gas_multiplier))
+        gas_fees = await self.gas_fees(client, cfg)
         gas_price = int(gas_fees.get("gasPrice") or gas_fees.get("maxFeePerGas") or 0)
         balance = await client.native_balance(account.address)
         needed = amount_wei + gas_price * cfg.gas_limit
-        if balance < needed:
+        if balance < needed and not getattr(user, "dry_run", False):
             return TradeResult(
                 False, "buy",
                 error=(f"Недостаточно {chain.native_symbol}: нужно ~{from_wei(needed):.6f}, "
@@ -124,6 +134,10 @@ class Trader:
         if expected <= 0:
             return TradeResult(False, "buy", error="Пул не отдаёт токены за эту сумму")
         amount_out_min = apply_slippage(expected, cfg.slippage_bps)
+
+        if getattr(user, "dry_run", False):
+            return await self._paper_buy(user, chain_key, token, adapter, pool,
+                                         spend_wei, expected, source, cfg)
 
         nonce = await self.wallets.next_nonce(client, account.address)
 
@@ -203,10 +217,13 @@ class Trader:
         pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
                        fee=position.pool_fee or 0)
 
-        account = self.wallets.account(user)
         token_address = to_checksum(position.token_address)
         percent = max(1, min(100, percent))
 
+        if position.is_paper:
+            return await self._paper_sell(position, adapter, percent)
+
+        account = self.wallets.account(user)
         on_chain_balance = await balance_of(client, token_address, account.address)
         if on_chain_balance <= 0:
             async with session_scope() as session:
@@ -222,7 +239,7 @@ class Trader:
         if amount <= 0:
             return TradeResult(False, "sell", error="Слишком маленький объём для продажи")
 
-        gas_fees = await client.gas_fees(float(cfg.gas_multiplier))
+        gas_fees = await self.gas_fees(client, cfg)
         await self._ensure_allowance(client, adapter, account, token_address, amount, cfg, gas_fees)
 
         try:
@@ -297,6 +314,62 @@ class Trader:
             position_id=position.id, token_symbol=position.token_symbol,
             token_decimals=position.token_decimals, explorer_url=chain.tx_url(sent.tx_hash),
             dex=adapter.name,
+        )
+
+    # -------------------------------------------------------- тестовый режим
+    async def _paper_buy(self, user, chain_key, token, adapter, pool, spend_wei,
+                         expected, source, cfg) -> TradeResult:
+        """Покупка «на бумаге»: позиция создаётся, деньги не тратятся."""
+        chain = self.registry.config(chain_key)
+        async with session_scope() as session:
+            position = Position(
+                user_id=user.id, chain=chain_key, token_address=token.address,
+                token_symbol=token.symbol, token_decimals=token.decimals,
+                pair_address=pool.address, router_address=adapter.router,
+                dex_kind=adapter.kind, pool_fee=pool.fee, source=source, is_paper=True,
+                amount_wei=expected, bought_wei=expected, native_spent_wei=spend_wei,
+                take_profit_pct=cfg.take_profit_pct, stop_loss_pct=cfg.stop_loss_pct,
+                trailing_stop_pct=cfg.trailing_stop_pct, auto_sell=cfg.auto_sell,
+                sell_percent=cfg.sell_percent,
+            )
+            entry = from_wei(spend_wei, chain.native_decimals) / from_wei(expected, token.decimals)
+            position.entry_price = entry
+            position.last_price = entry
+            position.peak_price = entry
+            session.add(position)
+            await session.flush()
+            position_id = position.id
+        log.info("PAPER BUY %s %s: %s", token.symbol, chain_key, from_wei(spend_wei))
+        return TradeResult(
+            True, "buy", amount_in=spend_wei, amount_out=expected, position_id=position_id,
+            token_symbol=token.symbol, token_decimals=token.decimals,
+            dex=f"{adapter.name} ({pool.label})", tx_hash=None,
+        )
+
+    async def _paper_sell(self, position: Position, adapter: DexAdapter, percent: int) -> TradeResult:
+        """Продажа «на бумаге» по текущей котировке пула."""
+        pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
+                       fee=position.pool_fee or 0)
+        amount = position.amount_wei if percent >= 100 else position.amount_wei * percent // 100
+        try:
+            received = await adapter.quote_sell(position.token_address, amount, pool)
+        except Exception as exc:  # noqa: BLE001
+            return TradeResult(False, "sell", error=f"Нет котировки на продажу: {exc}",
+                               token_symbol=position.token_symbol)
+
+        async with session_scope() as session:
+            stored = await session.get(Position, position.id)
+            if stored is not None:
+                stored.amount_wei = max(0, stored.amount_wei - amount)
+                stored.native_returned_wei += received
+                if stored.amount_wei == 0 or percent >= 100:
+                    stored.status = "closed"
+                    stored.closed_at = utcnow()
+        log.info("PAPER SELL %s: %s", position.token_symbol, from_wei(received))
+        return TradeResult(
+            True, "sell", amount_in=amount, amount_out=received, position_id=position.id,
+            token_symbol=position.token_symbol, token_decimals=position.token_decimals,
+            dex=adapter.name, tx_hash=None,
         )
 
     # ------------------------------------------------------------ служебное

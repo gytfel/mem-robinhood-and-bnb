@@ -39,6 +39,10 @@ class SetCB(CallbackData, prefix="s"):
     field: str = ""
 
 
+class GroupCB(CallbackData, prefix="g"):
+    group: str
+
+
 def main_menu(chain_name: str, auto_snipe: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="💼 Кошелёк", callback_data=MenuCB(section="wallet"))
@@ -126,37 +130,36 @@ def position_actions(position_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def settings_menu(cfg, native: str) -> InlineKeyboardMarkup:
+def settings_menu(cfg, native: str, user=None) -> InlineKeyboardMarkup:
+    """Корень настроек: группы из реестра."""
+    from sniperbot.settings_registry import GROUPS
+
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"💰 Сумма покупки: {cfg.buy_amount} {native}", callback_data=SetCB(action="edit", field="buy_amount"))
-    kb.button(text=f"📉 Проскальзывание: {cfg.slippage_bps / 100:g}%", callback_data=SetCB(action="edit", field="slippage_bps"))
-    kb.button(text=f"⛽️ Газ ×{cfg.gas_multiplier:g}", callback_data=SetCB(action="edit", field="gas_multiplier_bps"))
-    kb.button(text=f"🎯 Тейк-профит: +{cfg.take_profit_pct}%", callback_data=SetCB(action="edit", field="take_profit_pct"))
-    kb.button(text=f"🛑 Стоп-лосс: −{cfg.stop_loss_pct}%", callback_data=SetCB(action="edit", field="stop_loss_pct"))
-    kb.button(text=f"📉 Трейлинг: {cfg.trailing_stop_pct or '—'}%", callback_data=SetCB(action="edit", field="trailing_stop_pct"))
-    kb.button(text=f"🤖 Автопродажа: {_onoff(cfg.auto_sell)}", callback_data=SetCB(action="toggle", field="auto_sell"))
-    kb.button(text=f"🎯 Автоснайп: {_onoff(cfg.auto_snipe)}", callback_data=SetCB(action="toggle", field="auto_snipe"))
-    kb.button(text="🛡 Фильтры безопасности", callback_data=MenuCB(section="filters"))
+    for key, title in GROUPS.items():
+        kb.button(text=title, callback_data=GroupCB(group=key))
     kb.button(text="⬅️ Назад", callback_data=MenuCB(section="main"))
-    kb.adjust(1, 2, 3, 2, 1, 1)
+    kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
 
-def filters_menu(cfg, native: str) -> InlineKeyboardMarkup:
+def group_menu(group: str, cfg, native: str, user=None) -> InlineKeyboardMarkup:
+    """Настройки одной группы: значение прямо на кнопке."""
+    from sniperbot.settings_registry import by_group
+
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"💧 Мин. ликвидность: {cfg.min_liquidity} {native}", callback_data=SetCB(action="edit", field="min_liquidity"))
-    kb.button(text=f"💧 Макс. ликвидность: {cfg.max_liquidity or '—'}", callback_data=SetCB(action="edit", field="max_liquidity"))
-    kb.button(text=f"🧾 Макс. налог покупки: {cfg.max_buy_tax_bps / 100:g}%", callback_data=SetCB(action="edit", field="max_buy_tax_bps"))
-    kb.button(text=f"🧾 Макс. налог продажи: {cfg.max_sell_tax_bps / 100:g}%", callback_data=SetCB(action="edit", field="max_sell_tax_bps"))
-    kb.button(text=f"🍯 Проверка honeypot: {_onoff(cfg.honeypot_check)}", callback_data=SetCB(action="toggle", field="honeypot_check"))
-    kb.button(text=f"🔬 Требовать симуляцию: {_onoff(cfg.require_simulation)}", callback_data=SetCB(action="toggle", field="require_simulation"))
-    kb.button(text=f"👑 Только renounced: {_onoff(cfg.require_renounced)}", callback_data=SetCB(action="toggle", field="require_renounced"))
-    kb.button(text=f"🔥 Мин. сожжённый LP: {cfg.min_lp_burned_pct}%", callback_data=SetCB(action="edit", field="min_lp_burned_pct"))
-    kb.button(text=f"📦 Макс. позиций: {cfg.max_positions}", callback_data=SetCB(action="edit", field="max_positions"))
-    kb.button(text=f"⏱ Снайпов в час: {cfg.max_snipes_per_hour}", callback_data=SetCB(action="edit", field="max_snipes_per_hour"))
+    for setting in by_group().get(group, []):
+        action = "toggle" if setting.kind == "bool" else "edit"
+        kb.button(
+            text=f"{setting.title}: {setting.display(cfg, user, native)}",
+            callback_data=SetCB(action=action, field=setting.name),
+        )
     kb.button(text="⬅️ Настройки", callback_data=MenuCB(section="settings"))
-    kb.adjust(2, 2, 1, 1, 1, 1, 2, 1)
+    kb.adjust(1)
     return kb.as_markup()
+
+
+def filters_menu(cfg, native: str, user=None) -> InlineKeyboardMarkup:
+    return group_menu("filters", cfg, native, user)
 
 
 def cancel_kb(section: str = "main") -> InlineKeyboardMarkup:

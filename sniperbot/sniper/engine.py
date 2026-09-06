@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 from decimal import Decimal
 
@@ -60,6 +61,18 @@ class SniperEngine:
                 self._scanners.append(scanner)
                 self._tasks.append(asyncio.create_task(scanner.run(), name=f"scanner-{key}-{router_cfg.name}"))
         log.info("Запущено сканеров: %s", len(self._tasks))
+
+    def status(self) -> list[dict]:
+        """Состояние сканеров — для команды /health."""
+        return [
+            {
+                "name": task.get_name(),
+                "running": not task.done(),
+                "error": str(task.exception()) if task.done() and not task.cancelled()
+                and task.exception() else None,
+            }
+            for task in self._tasks
+        ]
 
     async def stop(self) -> None:
         for scanner in self._scanners:
@@ -123,7 +136,9 @@ class SniperEngine:
             if not ok:
                 reject_reason = reject_reason or "; ".join(reasons)
                 continue
-            if await self._limits_hit(user.id, event.chain, cfg):
+            blocked = await self._limits_hit(user.id, event.chain, cfg)
+            if blocked:
+                reject_reason = reject_reason or blocked
                 continue
             async with session_scope() as session:
                 if await repo.is_blacklisted(session, event.chain, event.token, user.id):
@@ -150,13 +165,36 @@ class SniperEngine:
             elapsed += step
         return False
 
-    async def _limits_hit(self, user_id: int, chain: str, cfg) -> bool:
+    async def _limits_hit(self, user_id: int, chain: str, cfg) -> str | None:
+        """Проверяет риск-лимиты пользователя. Возвращает причину отказа или None."""
+        now = dt.datetime.now(dt.UTC)
         async with session_scope() as session:
             if cfg.max_positions and await repo.count_open_positions(session, user_id, chain) >= cfg.max_positions:
-                return True
+                return f"достигнут лимит открытых позиций ({cfg.max_positions})"
             if cfg.max_snipes_per_hour and await repo.snipes_last_hour(session, user_id, chain) >= cfg.max_snipes_per_hour:
-                return True
-        return False
+                return f"достигнут лимит покупок в час ({cfg.max_snipes_per_hour})"
+
+            cooldown = int(getattr(cfg, "cooldown_seconds", 0) or 0)
+            if cooldown:
+                last = await repo.last_position_at(session, user_id, chain, source="auto")
+                if last is not None and (now - _aware(last)).total_seconds() < cooldown:
+                    return f"пауза между покупками ({cooldown} c)"
+
+            day_limit = Decimal(str(getattr(cfg, "daily_loss_limit", 0) or 0))
+            if day_limit > 0:
+                since = now - dt.timedelta(days=1)
+                pnl = await repo.realized_pnl_since(session, user_id, chain, since)
+                if pnl < 0 and abs(pnl) >= to_wei(day_limit):
+                    return f"дневной лимит убытка исчерпан ({from_wei(abs(pnl)):.4f})"
+
+            max_losses = int(getattr(cfg, "max_consecutive_losses", 0) or 0)
+            if max_losses:
+                streak = await repo.consecutive_losses(
+                    session, user_id, chain, _aware(cfg.risk_reset_at) if cfg.risk_reset_at else None
+                )
+                if streak >= max_losses:
+                    return f"{streak} убыточных сделок подряд — автоснайп на паузе, включите /on"
+        return None
 
     async def _snipe(self, user, cfg, event: PairEvent, report, venue) -> None:
         chain = self.registry.config(event.chain)
@@ -193,6 +231,13 @@ class SniperEngine:
             return
         async with session_scope() as session:
             await repo.mark_pair(session, pair_id, status, reason)
+
+
+def _aware(value):  # noqa: ANN001 - SQLite отдаёт наивные даты
+    """Приводит время из БД к UTC-aware, иначе вычитание падает."""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=dt.UTC)
 
 
 def _tax(value) -> str:
