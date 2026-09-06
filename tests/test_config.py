@@ -137,3 +137,43 @@ def test_chain_without_chain_id_is_not_configured(tmp_path, settings):
     assert chain.missing == ["CHAIN_ID"]
     assert chain.configured is False
     assert chain.enabled is False  # ненастроенную сеть бот не запускает
+
+
+def test_chain_overrides_are_read_from_env_file(tmp_path, monkeypatch):
+    """RH_* из .env должны применяться без export в окружение (регресс)."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "BOT_TOKEN=t\n"
+        "MASTER_KEY=" + "k" * 32 + "\n"
+        "ENABLED_CHAINS=bsc, robinhood\n"
+        "RH_ENABLED=true\n"
+        "RH_CHAIN_ID=4663\n"
+        "RH_RPC_URLS=https://rpc.mainnet.chain.robinhood.com\n"
+        "RH_ROUTER=0x89e5db8b5aa49aa85ac63f691524311aeb649eba\n"
+        "RH_FACTORY=0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f\n"
+        "RH_WRAPPED_NATIVE=0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SNIPER_ENV_FILE", str(env_file))
+    for name in ("RH_ENABLED", "RH_ROUTER", "RH_FACTORY", "RH_WRAPPED_NATIVE", "RH_RPC_URLS"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings(_env_file=str(env_file))  # type: ignore[call-arg]
+    rh = load_chains(settings=settings)["robinhood"]
+
+    assert rh.missing == []
+    assert rh.configured is True
+    assert rh.enabled is True
+    assert rh.default_router.router.endswith("649eba")
+    assert rh.wrapped_native.endswith("EAcAD73")
+
+
+def test_process_env_beats_env_file(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("RH_ROUTER=0x" + "1" * 40 + "\n", encoding="utf-8")
+    monkeypatch.setenv("SNIPER_ENV_FILE", str(env_file))
+    monkeypatch.setenv("RH_ROUTER", "0x" + "2" * 40)
+
+    from sniperbot.config import env_values
+
+    assert env_values()["RH_ROUTER"] == "0x" + "2" * 40

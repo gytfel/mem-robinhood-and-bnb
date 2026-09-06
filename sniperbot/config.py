@@ -9,6 +9,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
+from dotenv import dotenv_values
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -197,12 +198,28 @@ def env_prefix(chain_key: str) -> str:
     return ENV_PREFIXES.get(chain_key, chain_key.upper())
 
 
-def _apply_env_overrides(key: str, raw: dict) -> dict:
-    """Позволяет переопределить параметры сети через переменные окружения."""
+def env_values() -> dict[str, str]:
+    """Значения из .env плюс переменные окружения (окружение приоритетнее).
+
+    Настройки сетей не объявлены полями Settings, поэтому pydantic их не читает —
+    файл .env приходится разбирать самостоятельно, иначе RH_ROUTER и подобные
+    работали бы только через export в шелле.
+    """
+    path = Path(os.getenv("SNIPER_ENV_FILE", ".env"))
+    values: dict[str, str] = {}
+    if path.exists():
+        values.update({k: v for k, v in dotenv_values(path).items() if v is not None})
+    values.update(os.environ)
+    return values
+
+
+def _apply_env_overrides(key: str, raw: dict, source: dict[str, str] | None = None) -> dict:
+    """Позволяет переопределить параметры сети через .env или переменные окружения."""
     prefix = env_prefix(key)
+    source = env_values() if source is None else source
 
     def env(name: str) -> str | None:
-        value = os.getenv(f"{prefix}_{name}")
+        value = source.get(f"{prefix}_{name}")
         return value.strip() if value and value.strip() else None
 
     if (rpc := env("RPC_URLS")) is not None:
@@ -242,12 +259,13 @@ def load_chains(path: str | Path | None = None, settings: Settings | None = None
 
     data = json.loads(path.read_text(encoding="utf-8"))
     wanted = set(settings.enabled_chains)
+    source = env_values()
     chains: dict[str, ChainConfig] = {}
 
     for key, raw in data.items():
         if key.startswith("_"):
             continue
-        raw = _apply_env_overrides(key, dict(raw))
+        raw = _apply_env_overrides(key, dict(raw), source)
         routers = [
             RouterConfig(
                 name=r.get("name", "DEX"),
