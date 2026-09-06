@@ -1,0 +1,192 @@
+"""Оркестратор автоснайпа: новая пара -> проверки -> покупка для подписчиков."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from decimal import Decimal
+
+from sniperbot.chain.clients import ChainRegistry
+from sniperbot.chain.dex import read_pair
+from sniperbot.chain.wallet import WalletService
+from sniperbot.config import Settings
+from sniperbot.db import repo
+from sniperbot.db.base import session_scope
+from sniperbot.notify import Notifier
+from sniperbot.sniper.executor import Trader
+from sniperbot.sniper.safety import analyze_token, evaluate_for_settings
+from sniperbot.sniper.scanner import PairEvent, PairScanner
+from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr, to_wei
+
+log = logging.getLogger(__name__)
+
+MAX_PARALLEL_PAIRS = 4
+MAX_SIM_AMOUNT = Decimal("0.05")  # верхняя граница суммы для симуляции налогов
+
+
+class SniperEngine:
+    """Запускает сканеры по всем активным сетям и обрабатывает найденные пары."""
+
+    def __init__(
+        self,
+        registry: ChainRegistry,
+        trader: Trader,
+        wallets: WalletService,
+        notifier: Notifier,
+        settings: Settings,
+    ) -> None:
+        self.registry = registry
+        self.trader = trader
+        self.wallets = wallets
+        self.notifier = notifier
+        self.settings = settings
+        self._tasks: list[asyncio.Task] = []
+        self._scanners: list[PairScanner] = []
+        self._semaphore = asyncio.Semaphore(MAX_PARALLEL_PAIRS)
+        self._inflight: set[asyncio.Task] = set()
+
+    # ------------------------------------------------------------- lifecycle
+    def start(self) -> None:
+        for key, config in self.registry.configs.items():
+            if not config.enabled or not config.configured:
+                continue
+            client = self.registry.get(key)
+            for router_cfg in config.routers:
+                if not router_cfg.configured:
+                    continue
+                scanner = PairScanner(
+                    client, router_cfg, self._on_pair, self.settings.scanner_poll_interval
+                )
+                self._scanners.append(scanner)
+                self._tasks.append(asyncio.create_task(scanner.run(), name=f"scanner-{key}-{router_cfg.name}"))
+        log.info("Запущено сканеров: %s", len(self._tasks))
+
+    async def stop(self) -> None:
+        for scanner in self._scanners:
+            scanner.stop()
+        for task in [*self._tasks, *self._inflight]:
+            task.cancel()
+        await asyncio.gather(*self._tasks, *self._inflight, return_exceptions=True)
+        self._tasks.clear()
+        self._inflight.clear()
+
+    # ------------------------------------------------------------- обработка
+    async def _on_pair(self, event: PairEvent) -> None:
+        task = asyncio.create_task(self._process_pair(event))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _process_pair(self, event: PairEvent) -> None:
+        async with self._semaphore:
+            try:
+                await self._process_pair_inner(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Ошибка обработки пары %s: %s", event.pair, exc)
+
+    async def _process_pair_inner(self, event: PairEvent) -> None:
+        client = self.registry.get(event.chain)
+        chain = client.config
+
+        async with session_scope() as session:
+            subscribers = await repo.users_with_autosnipe(session, event.chain)
+        pair_id = event.pair_id
+
+        if not subscribers:
+            return
+
+        if not await self._wait_for_liquidity(client, event):
+            await self._mark(pair_id, "rejected", "ликвидность не появилась")
+            return
+
+        # Симулируем на самой крупной сумме подписчиков: так налоги и
+        # проскальзывание оцениваются по худшему сценарию.
+        sim_amount = min(max((cfg.buy_amount for _, cfg in subscribers), default=Decimal("0.01")), MAX_SIM_AMOUNT)
+        report = await analyze_token(
+            client,
+            event.router,
+            event.token,
+            amount_native_wei=to_wei(sim_amount, chain.native_decimals),
+            settings=None,
+            run_simulation=True,
+        )
+
+        sniped = 0
+        reject_reason = ""
+        for user, cfg in subscribers:
+            ok, reasons = evaluate_for_settings(report, cfg)
+            if not ok:
+                reject_reason = reject_reason or "; ".join(reasons)
+                continue
+            if await self._limits_hit(user.id, event.chain, cfg):
+                continue
+            async with session_scope() as session:
+                if await repo.is_blacklisted(session, event.chain, event.token, user.id):
+                    continue
+            await self._snipe(user, cfg, event, report)
+            sniped += 1
+
+        await self._mark(pair_id, "sniped" if sniped else "rejected", reject_reason or None)
+
+    async def _wait_for_liquidity(self, client, event: PairEvent) -> bool:
+        """Ждём, пока в пару зальют ликвидность (обычно это отдельная транзакция)."""
+        deadline = self.settings.scanner_liquidity_wait_blocks * max(client.config.block_time, 0.2)
+        elapsed = 0.0
+        step = max(client.config.block_time, 0.5)
+        while elapsed < deadline:
+            try:
+                state = await read_pair(client, event.pair, event.token)
+                if state.has_liquidity:
+                    return True
+            except Exception as exc:  # noqa: BLE001
+                log.debug("read_pair(%s): %s", event.pair, exc)
+            await asyncio.sleep(step)
+            elapsed += step
+        return False
+
+    async def _limits_hit(self, user_id: int, chain: str, cfg) -> bool:
+        async with session_scope() as session:
+            if cfg.max_positions and await repo.count_open_positions(session, user_id, chain) >= cfg.max_positions:
+                return True
+            if cfg.max_snipes_per_hour and await repo.snipes_last_hour(session, user_id, chain) >= cfg.max_snipes_per_hour:
+                return True
+        return False
+
+    async def _snipe(self, user, cfg, event: PairEvent, report) -> None:
+        chain = self.registry.config(event.chain)
+        symbol = esc(report.token.symbol)
+        await self.notifier.send(
+            user.id,
+            f"🎯 <b>Новый токен</b> {symbol} в сети {esc(chain.name)}\n"
+            f"<code>{event.token}</code>\n"
+            f"Ликвидность: {fmt_amount(report.liquidity_native, 4)} {chain.native_symbol}\n"
+            f"Налоги: покупка {_tax(report.buy_tax_pct)} / продажа {_tax(report.sell_tax_pct)}\n"
+            f"Покупаю на {fmt_amount(cfg.buy_amount)} {chain.native_symbol}…",
+        )
+        result = await self.trader.buy(
+            user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source="auto", pair_address=event.pair
+        )
+        if result.ok:
+            await self.notifier.send(
+                user.id,
+                f"✅ <b>Куплено</b> {esc(result.token_symbol)}\n"
+                f"Потрачено: {fmt_amount(from_wei(result.amount_in))} {chain.native_symbol}\n"
+                f"Получено: {fmt_amount(from_wei(result.amount_out, result.token_decimals), 4)} {esc(result.token_symbol)}\n"
+                f"<a href='{result.explorer_url}'>Транзакция</a> · позиция #{result.position_id}",
+            )
+        else:
+            await self.notifier.send(
+                user.id,
+                f"❌ Покупка {symbol} ({short_addr(event.token)}) не удалась:\n{esc(result.error)}",
+            )
+
+    async def _mark(self, pair_id: int | None, status: str, reason: str | None) -> None:
+        if pair_id is None:
+            return
+        async with session_scope() as session:
+            await repo.mark_pair(session, pair_id, status, reason)
+
+
+def _tax(value) -> str:
+    return "—" if value is None else f"{value:.1f}%"

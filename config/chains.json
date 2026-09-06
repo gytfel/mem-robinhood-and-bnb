@@ -1,0 +1,69 @@
+{
+  "bsc": {
+    "name": "BNB Smart Chain",
+    "chain_id": 56,
+    "native_symbol": "BNB",
+    "native_decimals": 18,
+    "enabled": true,
+    "poa": true,
+    "eip1559": false,
+    "block_time": 0.75,
+    "rpc_urls": [
+      "https://bsc-dataseed.bnbchain.org",
+      "https://bsc-dataseed1.defibit.io",
+      "https://rpc.ankr.com/bsc",
+      "https://binance.llamarpc.com"
+    ],
+    "explorer_url": "https://bscscan.com",
+    "wrapped_native": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    "stable_token": "0x55d398326f99059fF775485246999027B3197955",
+    "routers": [
+      {
+        "name": "PancakeSwap V2",
+        "router": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
+        "factory": "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73",
+        "fee_bps": 25,
+        "default": true
+      },
+      {
+        "name": "Biswap",
+        "router": "0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8",
+        "factory": "0x858E3312ed3A876947EA49d572A7C42DE08af7EE",
+        "fee_bps": 10,
+        "default": false
+      }
+    ],
+    "lp_burn_addresses": [
+      "0x0000000000000000000000000000000000000000",
+      "0x000000000000000000000000000000000000dEaD"
+    ]
+  },
+  "robinhood": {
+    "name": "Robinhood Chain",
+    "chain_id": 0,
+    "native_symbol": "ETH",
+    "native_decimals": 18,
+    "enabled": false,
+    "poa": true,
+    "eip1559": true,
+    "block_time": 0.25,
+    "rpc_urls": [],
+    "explorer_url": "",
+    "wrapped_native": "",
+    "stable_token": "",
+    "routers": [
+      {
+        "name": "Robinhood DEX (Uniswap V2 fork)",
+        "router": "",
+        "factory": "",
+        "fee_bps": 30,
+        "default": true
+      }
+    ],
+    "lp_burn_addresses": [
+      "0x0000000000000000000000000000000000000000",
+      "0x000000000000000000000000000000000000dEaD"
+    ],
+    "_comment": "Robinhood Chain (Arbitrum Orbit L2). Заполните адреса/RPC через .env (RH_*) или прямо здесь, когда сеть и DEX будут доступны. Любая EVM-сеть с Uniswap V2-совместимым роутером работает без изменений кода."
+  }
+}

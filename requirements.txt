@@ -1,0 +1,11 @@
+aiogram>=3.13,<4
+web3>=7.6,<8
+eth-account>=0.13
+SQLAlchemy[asyncio]>=2.0.30
+aiosqlite>=0.20
+cryptography>=42.0
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+tenacity>=8.3
+aiohttp>=3.9
