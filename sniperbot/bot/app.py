@@ -62,7 +62,7 @@ async def run_bot() -> None:
     if problems:
         raise SystemExit("Конфигурация неполная:\n- " + "\n- ".join(problems))
 
-    await init_db(settings.database_url)
+    await init_db(settings.resolved_database_url)
     registry = build_registry(settings)
     await registry.healthcheck_all()
 

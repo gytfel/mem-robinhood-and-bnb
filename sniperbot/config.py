@@ -141,6 +141,23 @@ class Settings(BaseSettings):
         return [c.lower() for c in _split(self.enabled_chains_raw)]
 
     @property
+    def resolved_database_url(self) -> str:
+        """URL базы с абсолютным путём.
+
+        Относительный путь в DATABASE_URL считается от каталога с .env, а не от
+        текущего каталога: иначе запуск из другого места создал бы вторую пустую
+        базу, и кошельки пользователей «пропали» бы.
+        """
+        marker = "sqlite+aiosqlite:///"
+        if not self.database_url.startswith(marker):
+            return self.database_url
+        raw = self.database_url[len(marker) :]
+        if not raw or raw == ":memory:" or raw.startswith("/"):
+            return self.database_url
+        base = Path(os.getenv("SNIPER_ENV_FILE", ".env")).resolve().parent
+        return marker + str((base / raw).resolve())
+
+    @property
     def service_fee_rate(self) -> Decimal:
         return Decimal(self.service_fee_bps) / Decimal(10_000)
 

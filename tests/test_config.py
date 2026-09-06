@@ -82,3 +82,32 @@ def test_service_fee_limits():
     settings = Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32, SERVICE_FEE_BPS=100)
     assert float(settings.service_fee_rate) == 0.01
     assert any("SERVICE_FEE_WALLET" in p for p in settings.validate_runtime())
+
+
+def test_relative_sqlite_path_anchored_to_env_dir(monkeypatch, tmp_path):
+    """Относительный путь к базе не должен зависеть от текущего каталога."""
+    env_file = tmp_path / "server" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SNIPER_ENV_FILE", str(env_file))
+
+    settings = Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32,
+                        DATABASE_URL="sqlite+aiosqlite:///data/sniper.db")
+    assert settings.resolved_database_url == (
+        f"sqlite+aiosqlite:///{tmp_path / 'server' / 'data' / 'sniper.db'}"
+    )
+
+
+def test_absolute_and_memory_database_urls_untouched(monkeypatch, tmp_path):
+    monkeypatch.setenv("SNIPER_ENV_FILE", str(tmp_path / ".env"))
+    absolute = "sqlite+aiosqlite:////var/lib/sniper.db"
+    assert Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32,
+                    DATABASE_URL=absolute).resolved_database_url == absolute
+
+    memory = "sqlite+aiosqlite:///:memory:"
+    assert Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32,
+                    DATABASE_URL=memory).resolved_database_url == memory
+
+    postgres = "postgresql+asyncpg://user:pass@localhost/sniper"
+    assert Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32,
+                    DATABASE_URL=postgres).resolved_database_url == postgres

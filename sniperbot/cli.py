@@ -197,8 +197,9 @@ async def _doctor(args: argparse.Namespace) -> int:
             print(f"  {BAD} MASTER_KEY: {exc}")
             problems += 1
 
-    db_ok, db_note = _check_database(settings.database_url)
-    print(f"  {OK if db_ok else BAD} База данных: {settings.database_url} — {db_note}")
+    database_url = settings.resolved_database_url
+    db_ok, db_note = _check_database(database_url)
+    print(f"  {OK if db_ok else BAD} База данных: {database_url} — {db_note}")
     problems += 0 if db_ok else 1
 
     if settings.allowed_user_ids:
@@ -452,7 +453,7 @@ async def _wallets(args: argparse.Namespace) -> int:
     from sniperbot.utils.fmt import fmt_amount, from_wei
 
     settings = get_settings()
-    await init_db(settings.database_url)
+    await init_db(settings.resolved_database_url)
     clients: dict = {}
     try:
         async with session_scope() as session:

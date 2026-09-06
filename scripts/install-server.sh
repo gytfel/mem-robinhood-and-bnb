@@ -67,7 +67,7 @@ systemctl enable "$SERVICE_NAME" >/dev/null
 
 say "Проверяю конфигурацию"
 sudo -u "$APP_USER" env HOME="/home/$APP_USER" \
-    "$APP_DIR/.venv/bin/sniper" --env-file "$APP_DIR/.env" doctor || \
+    sh -c "cd '$APP_DIR' && '$APP_DIR/.venv/bin/sniper' --env-file '$APP_DIR/.env' doctor" || \
     printf '\033[33mДиагностика нашла проблемы — исправьте их и запустите:\n  sudo -u %s %s/.venv/bin/sniper --env-file %s/.env doctor\033[0m\n' \
         "$APP_USER" "$APP_DIR" "$APP_DIR"
 
@@ -85,8 +85,8 @@ cat <<INFO
   systemctl restart $SERVICE_NAME      перезапуск
   systemctl stop $SERVICE_NAME         остановить
 
-  sudo -u $APP_USER $APP_DIR/.venv/bin/sniper --env-file $APP_DIR/.env doctor
-  sudo -u $APP_USER $APP_DIR/.venv/bin/sniper --env-file $APP_DIR/.env wallets
+  cd $APP_DIR && sudo -u $APP_USER .venv/bin/sniper --env-file .env doctor
+  cd $APP_DIR && sudo -u $APP_USER .venv/bin/sniper --env-file .env wallets
 
 Файл с ключами: $APP_DIR/.env   (сделайте резервную копию MASTER_KEY!)
 База кошельков: $APP_DIR/data/sniper.db
