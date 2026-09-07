@@ -194,3 +194,17 @@ def test_report_args_parsing():
     assert _days_arg("тест 3") == (3, True)
     assert _days_arg("999999") == (365, False)      # верхняя граница
     assert _days_arg("мусор") == (7, False)
+
+
+def test_optimizer_picks_the_better_exit_pair():
+    """Проверяем сам расчёт: цель, стоп или фактический исход."""
+    from decimal import Decimal
+
+    from sniperbot.bot.handlers.reports import _simulate
+
+    # дошла до +250% — при цели +100% зафиксировали бы прибыль
+    assert _simulate(Decimal(250), Decimal(-90), 100, 50) == Decimal(100)
+    # максимум был +10%, итог −80% — сработал бы стоп на −50%
+    assert _simulate(Decimal(10), Decimal(-80), 100, 50) == Decimal(-50)
+    # ни цель, ни стоп не достигнуты — берём фактический результат
+    assert _simulate(Decimal(30), Decimal(15), 100, 50) == Decimal(15)

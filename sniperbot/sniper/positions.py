@@ -1,9 +1,19 @@
-"""Монитор открытых позиций: take-profit, stop-loss и трейлинг-стоп."""
+"""Монитор позиций: лестница фиксаций, безубыток, защита от слива и стопы.
+
+Правила выхода вынесены в чистую функцию :func:`decide_exit` — её легко
+проверить тестами на всех сценариях, не поднимая ни ноды, ни базы.
+
+Порядок важен: сначала спасаем деньги (слив ликвидности, стоп, безубыток),
+и только потом фиксируем прибыль.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
+import math
+from dataclasses import dataclass
 from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
@@ -13,6 +23,7 @@ from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import Position, User
 from sniperbot.notify import Notifier
+from sniperbot.settings_registry import ladder_steps
 from sniperbot.sniper.executor import Trader
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 
@@ -21,10 +32,99 @@ log = logging.getLogger(__name__)
 MAX_QUOTE_FAILURES = 20
 
 
+@dataclass(slots=True)
+class Rule:
+    key: str
+    title: str
+    icon: str
+
+
+@dataclass(slots=True)
+class ExitContext:
+    """Всё, что нужно знать о позиции, чтобы решить — выходить или держать."""
+
+    change: Decimal                      # текущий результат в процентах от входа
+    peak_change: Decimal                 # лучший результат за жизнь позиции
+    price: Decimal
+    peak_price: Decimal
+    liquidity: Decimal | None = None
+    peak_liquidity: Decimal | None = None
+    age_minutes: float = 0.0
+
+
+RULE_RUG = Rule("rug", "Ликвидность уходит из пула", "🚨")
+RULE_STOP = Rule("stop_loss", "Стоп-лосс", "🛑")
+RULE_BREAKEVEN = Rule("breakeven", "Выход в безубыток", "🟡")
+RULE_LADDER = Rule("ladder", "Ступень фиксации", "🪜")
+RULE_TAKE = Rule("take_profit", "Тейк-профит", "🎉")
+RULE_TRAIL = Rule("trailing", "Трейлинг-стоп", "📉")
+RULE_DEAD = Rule("dead", "Позиция не растёт", "🥱")
+
+
+def ladder_percent(position: Position, share: int) -> int:
+    """Доля ступени считается от исходного объёма, а продаём от остатка."""
+    bought = position.bought_wei or position.amount_wei
+    current = position.amount_wei
+    if current <= 0 or bought <= 0:
+        return 100
+    wanted = bought * share // 100
+    if wanted >= current:
+        return 100
+    return max(1, min(100, math.ceil(wanted * 100 / current)))
+
+
+def decide_exit(position: Position, ctx: ExitContext) -> tuple[Rule | None, int, str]:
+    """Решение о выходе: (правило, процент продажи, метка сработавшей ступени)."""
+    if not position.auto_sell or position.amount_wei <= 0:
+        return None, 0, ""
+
+    # 1. Из пула вынимают ликвидность — выходим не раздумывая.
+    rug = int(position.rug_guard_pct or 0)
+    if rug and ctx.liquidity is not None and ctx.peak_liquidity and ctx.peak_liquidity > 0:
+        drop = (ctx.peak_liquidity - ctx.liquidity) / ctx.peak_liquidity * 100
+        if drop >= rug:
+            return RULE_RUG, 100, ""
+
+    # 2. Стоп-лосс.
+    if position.stop_loss_pct and ctx.change <= -Decimal(position.stop_loss_pct):
+        return RULE_STOP, 100, ""
+
+    # 3. Безубыток: цель уже была достигнута, теперь не даём уйти в минус.
+    if position.breakeven_armed and ctx.change <= 0:
+        return RULE_BREAKEVEN, 100, ""
+
+    # 4. Лестница фиксаций — по одной ступени за проверку.
+    done = {step.strip() for step in (position.tp_done or "").split(",") if step.strip()}
+    for growth, share in ladder_steps(position.tp_ladder):
+        marker = str(growth)
+        if marker in done:
+            continue
+        if ctx.change >= growth:
+            return RULE_LADDER, ladder_percent(position, share), marker
+
+    # 5. Обычный тейк-профит (если лестница не задана).
+    if not position.tp_ladder and position.take_profit_pct and ctx.change >= position.take_profit_pct:
+        return RULE_TAKE, max(1, min(100, position.sell_percent or 100)), ""
+
+    # 6. Трейлинг-стоп от максимума.
+    if position.trailing_stop_pct and ctx.peak_price > 0:
+        drop = (ctx.peak_price - ctx.price) / ctx.peak_price * 100
+        if drop >= Decimal(position.trailing_stop_pct) and ctx.change > 0:
+            return RULE_TRAIL, 100, ""
+
+    # 7. Позиция висит и не растёт — освобождаем деньги.
+    timeout = int(position.dead_timeout_min or 0)
+    if timeout and ctx.age_minutes >= timeout and ctx.peak_change < Decimal(position.dead_min_pct or 0):
+        return RULE_DEAD, 100, ""
+
+    return None, 0, ""
+
+
 class PositionMonitor:
     """Периодически переоценивает позиции и закрывает их по правилам выхода."""
 
-    def __init__(self, registry: ChainRegistry, trader: Trader, notifier: Notifier, settings: Settings) -> None:
+    def __init__(self, registry: ChainRegistry, trader: Trader, notifier: Notifier,
+                 settings: Settings) -> None:
         self.registry = registry
         self.trader = trader
         self.notifier = notifier
@@ -58,20 +158,35 @@ class PositionMonitor:
             except Exception as exc:  # noqa: BLE001
                 log.debug("Позиция #%s: %s", position.id, exc)
 
-    # --------------------------------------------------------------- логика
+    # --------------------------------------------------------------- оценка
+    def _pool_of(self, position: Position) -> PoolRef:
+        return PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
+                       fee=position.pool_fee or 0)
+
     async def current_price(self, position: Position) -> Decimal | None:
         """Цена выхода: сколько нативной монеты дадут за весь остаток позиции."""
         if position.amount_wei <= 0:
             return None
         client = self.registry.get(position.chain)
         adapter = self.trader.adapter_for_position(position)
-        pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
-                       fee=position.pool_fee or 0)
-        native_out = await adapter.quote_sell(position.token_address, position.amount_wei, pool)
+        native_out = await adapter.quote_sell(position.token_address, position.amount_wei,
+                                              self._pool_of(position))
         tokens = from_wei(position.amount_wei, position.token_decimals)
         if tokens <= 0:
             return None
         return from_wei(native_out, client.config.native_decimals) / tokens
+
+    async def _liquidity(self, position: Position) -> Decimal | None:
+        if not position.rug_guard_pct or not position.pair_address:
+            return None
+        try:
+            adapter = self.trader.adapter_for_position(position)
+            state = await adapter.pool_state(position.token_address, self._pool_of(position),
+                                             position.token_decimals)
+        except Exception as exc:  # noqa: BLE001 - пул мог исчезнуть
+            log.debug("Ликвидность позиции #%s недоступна: %s", position.id, exc)
+            return Decimal(0)
+        return state.liquidity_native
 
     async def check_position(self, position: Position) -> None:
         if position.amount_wei <= 0 or not position.entry_price:
@@ -94,20 +209,43 @@ class PositionMonitor:
 
         entry = position.entry_price
         change = (price / entry - 1) * 100 if entry > 0 else Decimal(0)
-        peak = max(position.peak_price or price, price)
+        peak_price = max(position.peak_price or price, price)
+        peak_change = (peak_price / entry - 1) * 100 if entry > 0 else Decimal(0)
+        liquidity = await self._liquidity(position)
+        peak_liquidity = max(from_wei(position.peak_liquidity_wei or 0), liquidity or Decimal(0))
+        age = (dt.datetime.now(dt.UTC) - _aware(position.opened_at)).total_seconds() / 60
+
+        armed = position.breakeven_armed or bool(
+            position.breakeven_pct and change >= Decimal(position.breakeven_pct)
+        )
+        newly_armed = armed and not position.breakeven_armed
 
         async with session_scope() as session:
             stored = await session.get(Position, position.id)
             if stored is None or stored.status != "open":
                 return
             stored.last_price = price
-            stored.peak_price = peak
+            stored.peak_price = peak_price
+            stored.breakeven_armed = armed
+            if liquidity is not None:
+                from sniperbot.utils.fmt import to_wei
 
-        if not position.auto_sell:
-            return
+                stored.peak_liquidity_wei = to_wei(peak_liquidity)
+        position.breakeven_armed = armed
 
-        trigger, percent = self._exit_rule(position, change, price, peak)
-        if trigger is None:
+        if newly_armed:
+            await self.notifier.send(
+                position.user_id,
+                f"🟡 {esc(position.token_symbol)}: +{change:.0f}% — стоп переведён в безубыток. "
+                "Дальше эта сделка уже не может стать убыточной.",
+            )
+
+        rule, percent, marker = decide_exit(
+            position,
+            ExitContext(change=change, peak_change=peak_change, price=price, peak_price=peak_price,
+                        liquidity=liquidity, peak_liquidity=peak_liquidity, age_minutes=age),
+        )
+        if rule is None:
             return
 
         async with session_scope() as session:
@@ -119,48 +257,43 @@ class PositionMonitor:
 
         await self.notifier.send(
             position.user_id,
-            f"{trigger.icon} <b>{trigger.title}</b> по {esc(position.token_symbol)} "
-            f"({change:+.1f}%)\nПродаю {percent}% позиции…",
+            f"{rule.icon} <b>{rule.title}</b> по {esc(position.token_symbol)} ({change:+.1f}%)\n"
+            f"Продаю {percent}% позиции…",
         )
-        result = await self.trader.sell(user, fresh, cfg=cfg, percent=percent, reason=trigger.key)
+        result = await self.trader.sell(user, fresh, cfg=cfg, percent=percent, reason=rule.key)
         symbol = self.registry.config(position.chain).native_symbol
-        if result.ok:
-            await self.notifier.send(
-                position.user_id,
-                f"✅ Продано {percent}% {esc(position.token_symbol)}\n"
-                f"Получено: {fmt_amount(from_wei(result.amount_out))} {symbol}\n"
-                f"<a href='{result.explorer_url}'>Транзакция</a>",
-            )
-            if percent < 100:
-                # После частичной фиксации отключаем повторный тейк-профит,
-                # дальше позицией управляют стоп-лосс и трейлинг.
-                async with session_scope() as session:
-                    stored = await session.get(Position, position.id)
-                    if stored is not None:
-                        stored.take_profit_pct = 0
-        else:
+
+        if not result.ok:
             await self.notifier.send(
                 position.user_id,
                 f"❌ Не удалось продать {esc(position.token_symbol)}: {esc(result.error)}",
             )
+            return
 
-    def _exit_rule(self, position: Position, change: Decimal, price: Decimal, peak: Decimal):
-        """Возвращает (правило, процент продажи) или (None, 0)."""
-        if position.stop_loss_pct and change <= -Decimal(position.stop_loss_pct):
-            return _Rule("stop_loss", "Стоп-лосс", "🛑"), 100
-        if position.take_profit_pct and change >= Decimal(position.take_profit_pct):
-            return _Rule("take_profit", "Тейк-профит", "🎉"), max(1, min(100, position.sell_percent or 100))
-        if position.trailing_stop_pct and peak > 0:
-            drop = (peak - price) / peak * 100
-            if drop >= Decimal(position.trailing_stop_pct) and price > 0 and change > 0:
-                return _Rule("trailing", "Трейлинг-стоп", "📉"), 100
-        return None, 0
+        await self.notifier.send(
+            position.user_id,
+            f"✅ Продано {percent}% {esc(position.token_symbol)}\n"
+            f"Получено: {fmt_amount(from_wei(result.amount_out))} {symbol}"
+            + (f"\n<a href='{result.explorer_url}'>Транзакция</a>" if result.explorer_url else ""),
+        )
+
+        if marker:
+            await self._mark_ladder_step(position.id, marker)
+
+    async def _mark_ladder_step(self, position_id: int, marker: str) -> None:
+        """Помечает ступень как сработавшую, чтобы она не повторилась."""
+        async with session_scope() as session:
+            stored = await session.get(Position, position_id)
+            if stored is None:
+                return
+            done = [step for step in (stored.tp_done or "").split(",") if step]
+            if marker not in done:
+                done.append(marker)
+            stored.tp_done = ",".join(done)
+            # После первой фиксации прибыль уже снята — защищаем остаток.
+            if not stored.breakeven_armed:
+                stored.breakeven_armed = True
 
 
-class _Rule:
-    __slots__ = ("key", "title", "icon")
-
-    def __init__(self, key: str, title: str, icon: str) -> None:
-        self.key = key
-        self.title = title
-        self.icon = icon
+def _aware(value):  # noqa: ANN001 - SQLite отдаёт наивные даты
+    return value if value and value.tzinfo else (value or dt.datetime.now(dt.UTC)).replace(tzinfo=dt.UTC)

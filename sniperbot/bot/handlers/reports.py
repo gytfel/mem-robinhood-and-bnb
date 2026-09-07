@@ -198,3 +198,60 @@ async def cmd_blacklist(message: Message, command: CommandObject, user: User, ch
         "<code>/blacklist del 0xТокен</code> — снять запрет\n\n"
         "Список действует в текущей сети и учитывается автоснайпом.",
     )
+
+
+@router.message(Command("optimize"))
+async def cmd_optimize(message: Message, command: CommandObject, user: User, chain) -> None:
+    """Подбирает TP/SL, которые дали бы лучший результат на ваших же сделках."""
+    days, paper = _days_arg(command.args, default=30)
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+    async with session_scope() as session:
+        positions = await repo.closed_between(session, user.id, since, paper=paper)
+
+    usable = [p for p in positions if p.entry_price and p.entry_price > 0 and p.peak_price]
+    if len(usable) < 5:
+        await reply(
+            message,
+            f"Для подбора нужно хотя бы 5 закрытых сделок с историей цены, есть {len(usable)}.\n"
+            "Погоняйте бота в тестовом режиме (/dry) — данные накопятся быстрее и бесплатно.",
+        )
+        return
+
+    trades = []
+    for position in usable:
+        peak = (position.peak_price / position.entry_price - 1) * 100
+        spent = from_wei(position.native_spent_wei)
+        final = ((from_wei(position.native_returned_wei) / spent - 1) * 100) if spent else Decimal(0)
+        trades.append((peak, final))
+
+    best = None
+    for take_profit in (50, 75, 100, 150, 200, 300, 500):
+        for stop_loss in (20, 30, 40, 50, 60, 70):
+            total = sum(_simulate(peak, final, take_profit, stop_loss) for peak, final in trades)
+            wins = sum(1 for peak, final in trades if _simulate(peak, final, take_profit, stop_loss) > 0)
+            average = total / len(trades)
+            if best is None or average > best[0]:
+                best = (average, take_profit, stop_loss, wins)
+
+    average, take_profit, stop_loss, wins = best
+    current = sum(final for _peak, final in trades) / len(trades)
+    await reply(
+        message,
+        f"🔧 <b>Подбор выходов</b> по {len(trades)} сделкам за {days} дн."
+        + (" (бумажным)" if paper else "") + "\n\n"
+        f"Сейчас средний результат: <b>{current:+.1f}%</b> на сделку\n"
+        f"Лучшая пара из перебранных: <b>TP +{take_profit}% / SL −{stop_loss}%</b>\n"
+        f"Дала бы <b>{average:+.1f}%</b> на сделку, прибыльных {wins} из {len(trades)}\n\n"
+        f"Применить: <code>/set tp {take_profit}</code> и <code>/set sl {stop_loss}</code>\n\n"
+        "<i>Это прикидка на прошлых данных: считается по записанному максимуму цены, "
+        "без учёта проскальзывания и того, что рынок меняется. Не гарантия.</i>",
+    )
+
+
+def _simulate(peak: Decimal, final: Decimal, take_profit: int, stop_loss: int) -> Decimal:
+    """Что дала бы сделка при заданных TP/SL: цель, стоп или фактический исход."""
+    if peak >= take_profit:
+        return Decimal(take_profit)
+    if final <= -stop_loss:
+        return Decimal(-stop_loss)
+    return final

@@ -38,6 +38,9 @@ def cfg(**overrides) -> ChainSettings:
         "max_buy_tax_bps": 1000, "max_sell_tax_bps": 1000,
         "honeypot_check": True, "require_simulation": True,
         "require_renounced": False, "min_lp_burned_pct": 0,
+        "block_mintable": False, "block_blacklist_fn": False, "block_pausable": False,
+        "block_proxy": False, "max_owner_share_pct": 0, "min_pool_share_pct": 0,
+        "min_edge_pct": 0, "take_profit_pct": 100,
     }
     defaults.update(overrides)
     return ChainSettings(user_id=1, chain="bsc", **defaults)
@@ -120,3 +123,69 @@ def test_verdict_and_score():
     assert report.verdict == "danger"
     assert report.blocking[0].key == "c"
     assert report.score < 100
+
+
+# ------------------------------------------- статические проверки контракта
+def make_profile_report(**profile_kwargs):
+    from sniperbot.sniper.analysis import ContractProfile
+
+    report = make_report()
+    report.profile = ContractProfile(**profile_kwargs)
+    return report
+
+
+def test_mintable_token_is_rejected():
+    report = make_profile_report(powers={"mint"})
+    ok, reasons = evaluate_for_settings(report, cfg(block_mintable=True))
+    assert ok is False
+    assert any("допечатать" in reason for reason in reasons)
+    # с выключенной проверкой токен проходит
+    assert evaluate_for_settings(report, cfg(block_mintable=False))[0] is True
+
+
+def test_blacklist_function_is_rejected():
+    report = make_profile_report(powers={"blacklist"})
+    ok, reasons = evaluate_for_settings(report, cfg(block_blacklist_fn=True))
+    assert ok is False
+    assert any("чёрный список" in reason for reason in reasons)
+
+
+def test_proxy_token_is_rejected():
+    report = make_profile_report(is_proxy=True)
+    ok, reasons = evaluate_for_settings(report, cfg(block_proxy=True))
+    assert ok is False
+    assert any("прокси" in reason for reason in reasons)
+
+
+def test_owner_holding_too_much_is_rejected():
+    report = make_profile_report(owner_share=Decimal(40))
+    ok, reasons = evaluate_for_settings(report, cfg(max_owner_share_pct=15))
+    assert ok is False
+    assert any("владельца" in reason for reason in reasons)
+    assert evaluate_for_settings(report, cfg(max_owner_share_pct=50))[0] is True
+
+
+def test_thin_pool_share_is_rejected():
+    report = make_profile_report(pool_share=Decimal(5))
+    ok, reasons = evaluate_for_settings(report, cfg(min_pool_share_pct=30))
+    assert ok is False
+    assert any("в пуле" in reason for reason in reasons)
+
+
+def test_costs_must_leave_room_for_the_target():
+    """Цель +40% при налогах 2×20% и комиссиях DEX не оставляет прибыли."""
+    report = make_report(buy_tax=2000, sell_tax=2000)
+    report.dex_fee_pct = Decimal("0.3")
+    assert report.round_trip_cost_pct == Decimal("40.6")
+
+    ok, reasons = evaluate_for_settings(
+        report, cfg(max_buy_tax_bps=5000, max_sell_tax_bps=5000, take_profit_pct=40, min_edge_pct=20)
+    )
+    assert ok is False
+    assert any("издержки" in reason for reason in reasons)
+
+    # та же сделка с целью +200% запас прибыли имеет
+    ok2, _ = evaluate_for_settings(
+        report, cfg(max_buy_tax_bps=5000, max_sell_tax_bps=5000, take_profit_pct=200, min_edge_pct=20)
+    )
+    assert ok2 is True

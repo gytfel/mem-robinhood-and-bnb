@@ -58,11 +58,14 @@ class Trader:
         self.wallets = wallets
         self.settings = settings
 
-    async def gas_fees(self, client, cfg: ChainSettings) -> dict:
-        """Цена газа по выбранному режиму (normal/fast/turbo/manual)."""
+    async def gas_fees(self, client, cfg: ChainSettings, *, exit_mode: bool = False) -> dict:
+        """Цена газа по режиму; на выходе применяется отдельный множитель."""
+        multiplier = effective_gas_multiplier(cfg)
+        if exit_mode:
+            boost = Decimal(int(getattr(cfg, "exit_gas_boost_bps", 10_000) or 10_000)) / 10_000
+            multiplier = max(multiplier, boost)
         return await client.gas_fees(
-            float(effective_gas_multiplier(cfg)),
-            float(getattr(cfg, "priority_fee_gwei", 1) or 1),
+            float(multiplier), float(getattr(cfg, "priority_fee_gwei", 1) or 1)
         )
 
     # ------------------------------------------------------- выбор площадки
@@ -189,6 +192,15 @@ class Trader:
             source, cfg, receipt, pair_address,
         )
 
+        if getattr(cfg, "pre_approve", False):
+            # Разрешение выдаём сразу: в момент стоп-лосса лишняя транзакция
+            # стоит дороже, чем сейчас.
+            try:
+                await self._ensure_allowance(client, adapter, account, token_address,
+                                             received, cfg, gas_fees)
+            except Exception as exc:  # noqa: BLE001 - покупка уже состоялась
+                log.warning("Предварительный approve не удался: %s", exc)
+
         if fee_wei > 0 and self.settings.service_fee_wallet:
             await self._send_service_fee(client, account, fee_wei)
 
@@ -239,7 +251,8 @@ class Trader:
         if amount <= 0:
             return TradeResult(False, "sell", error="Слишком маленький объём для продажи")
 
-        gas_fees = await self.gas_fees(client, cfg)
+        # Выходить важнее, чем экономить: газ и проскальзывание для продажи свои.
+        gas_fees = await self.gas_fees(client, cfg, exit_mode=True)
         await self._ensure_allowance(client, adapter, account, token_address, amount, cfg, gas_fees)
 
         try:
@@ -247,19 +260,27 @@ class Trader:
         except Exception as exc:  # noqa: BLE001
             return TradeResult(False, "sell", error=f"Нет котировки на продажу: {exc}",
                                token_symbol=position.token_symbol)
-        amount_out_min = apply_slippage(expected_native, cfg.slippage_bps)
 
         nonce = await self.wallets.next_nonce(client, account.address)
+        slippage = int(getattr(cfg, "exit_slippage_bps", 0) or cfg.slippage_bps)
 
-        async def build(nonce_value: int) -> dict:
-            tx = await adapter.build_sell_tx(
-                token_address, account.address, amount, amount_out_min, pool,
-                nonce=nonce_value, gas_limit=cfg.gas_limit, gas_fees=gas_fees,
-            )
-            tx["gas"] = await self._gas_limit(client, tx, cfg.gas_limit)
-            return tx
+        tx, error = None, ""
+        for attempt_slippage in (slippage, min(9_000, slippage * 2)):
+            amount_out_min = apply_slippage(expected_native, attempt_slippage)
 
-        tx, error = await self._prepare(client, adapter, build, nonce)
+            async def build(nonce_value: int, minimum: int = amount_out_min) -> dict:
+                built = await adapter.build_sell_tx(
+                    token_address, account.address, amount, minimum, pool,
+                    nonce=nonce_value, gas_limit=cfg.gas_limit, gas_fees=gas_fees,
+                )
+                built["gas"] = await self._gas_limit(client, built, cfg.gas_limit)
+                return built
+
+            tx, error = await self._prepare(client, adapter, build, nonce)
+            if tx is not None:
+                break
+            log.info("Продажа %s не проходит при slippage %.1f%% — пробую шире",
+                     position.token_symbol, attempt_slippage / 100)
         if tx is None:
             return TradeResult(False, "sell", token_symbol=position.token_symbol,
                                error=f"Продажа не пройдёт: {error}")
@@ -474,6 +495,12 @@ class Trader:
             position.trailing_stop_pct = cfg.trailing_stop_pct
             position.auto_sell = cfg.auto_sell
             position.sell_percent = cfg.sell_percent
+            position.tp_ladder = cfg.tp_ladder or ""
+            position.breakeven_pct = cfg.breakeven_pct
+            position.rug_guard_pct = cfg.rug_guard_pct
+            position.dead_timeout_min = cfg.dead_timeout_min
+            position.dead_min_pct = cfg.dead_min_pct
+            position.token_owner = token.owner
             await session.flush()
             position_id = position.id
             await repo.log_trade(

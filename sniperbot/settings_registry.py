@@ -59,6 +59,8 @@ class Setting:
             return f"{fmt_amount(value)} {self.unit or native}".strip()
         if self.kind == "choice":
             return str(value)
+        if self.kind == "ladder":
+            return format_ladder(str(value)) if value else "выключена"
         return f"{value}{self.unit}"
 
     def parse(self, raw: str):
@@ -75,6 +77,9 @@ class Setting:
             if value not in self.choices:
                 raise ValueError("допустимо: " + ", ".join(self.choices))
             return value
+
+        if self.kind == "ladder":
+            return parse_ladder(text)
 
         number = parse_decimal(text)
         if number is None:
@@ -141,6 +146,31 @@ SETTINGS: tuple[Setting, ...] = (
             "exits", unit="%", minimum=Decimal(1), maximum=Decimal(100)),
     Setting("autosell", "auto_sell", "chain", "bool", "Автопродажа",
             "Закрывать позиции по правилам без участия человека", "exits"),
+    Setting("ladder", "tp_ladder", "chain", "ladder", "Лестница фиксаций",
+            "Ступени тейк-профита «рост:доля», например 100:50,300:30 — "
+            "продать половину на +100% и ещё треть на +300%. Пусто — обычный TP",
+            "exits"),
+    Setting("breakeven", "breakeven_pct", "chain", "int", "Стоп в безубыток",
+            "После роста на N% стоп-лосс переносится в точку входа. 0 — выключено",
+            "exits", unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
+    Setting("rugguard", "rug_guard_pct", "chain", "int", "Защита от слива ликвидности",
+            "Выйти, если ликвидность пула упала на N% от максимума. 0 — выключено",
+            "exits", unit="%", minimum=Decimal(0), maximum=Decimal(99)),
+    Setting("deadtime", "dead_timeout_min", "chain", "int", "Выход из мёртвой позиции",
+            "Через сколько минут закрыть позицию, если она так и не выросла. 0 — выключено",
+            "exits", unit=" мин", minimum=Decimal(0), maximum=Decimal(1440)),
+    Setting("deadpct", "dead_min_pct", "chain", "int", "Порог «не мёртвая»",
+            "Какой рост считается признаком жизни для таймера выше",
+            "exits", unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
+    Setting("exitgas", "exit_gas_boost_bps", "chain", "mult", "Газ на выходе",
+            "Множитель газа при продаже: выходить важнее, чем экономить",
+            "exits", minimum=Decimal(1), maximum=Decimal(5)),
+    Setting("exitslip", "exit_slippage_bps", "chain", "pct", "Проскальзывание на выходе",
+            "Отдельное проскальзывание для продажи — обычно выше входного",
+            "exits", minimum=Decimal("0.1"), maximum=Decimal(99)),
+    Setting("preapprove", "pre_approve", "chain", "bool", "Approve сразу после покупки",
+            "Разрешение роутеру выдаётся заранее, чтобы продажа не ждала лишнюю транзакцию",
+            "exits"),
 
     # ---------------------------------------------------------------- фильтры
     Setting("minliq", "min_liquidity", "chain", "decimal", "Мин. ликвидность",
@@ -159,6 +189,26 @@ SETTINGS: tuple[Setting, ...] = (
             "Не покупать, если нода не поддерживает симуляцию", "filters"),
     Setting("renounced", "require_renounced", "chain", "bool", "Только renounced",
             "Покупать лишь токены без владельца", "filters"),
+    Setting("ownershare", "max_owner_share_pct", "chain", "int", "Макс. доля у владельца",
+            "Сколько процентов предложения может держать владелец. 0 — не проверять",
+            "filters", unit="%", minimum=Decimal(0), maximum=Decimal(100)),
+    Setting("poolshare", "min_pool_share_pct", "chain", "int", "Мин. доля в пуле",
+            "Сколько процентов предложения должно лежать в пуле. 0 — не проверять",
+            "filters", unit="%", minimum=Decimal(0), maximum=Decimal(100)),
+    Setting("nomint", "block_mintable", "chain", "bool", "Запрет чеканки",
+            "Не покупать токены, где владелец может допечатать себе токенов", "filters"),
+    Setting("noblacklist", "block_blacklist_fn", "chain", "bool", "Запрет чёрных списков",
+            "Не покупать токены, где вам могут запретить продавать", "filters"),
+    Setting("nopause", "block_pausable", "chain", "bool", "Запрет остановки торгов",
+            "Не покупать токены с функцией паузы (часто это обычный запуск торгов)", "filters"),
+    Setting("noproxy", "block_proxy", "chain", "bool", "Запрет прокси",
+            "Не покупать обновляемые контракты: их код могут подменить после вашей покупки",
+            "filters"),
+    Setting("nobadcreators", "avoid_bad_creators", "chain", "bool", "Помнить плохих создателей",
+            "Не покупать токены владельцев, на которых вы уже теряли деньги", "filters"),
+    Setting("minedge", "min_edge_pct", "chain", "int", "Мин. запас прибыли",
+            "Минимальная прибыль после налогов, комиссий DEX и газа. 0 — не проверять",
+            "filters", unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
     Setting("lpburn", "min_lp_burned_pct", "chain", "int", "Мин. сожжённый LP",
             "Доля LP в burn-адресах. 0 — не проверять. В V3 не применяется",
             "filters", unit="%", minimum=Decimal(0), maximum=Decimal(100)),
@@ -192,6 +242,62 @@ SETTINGS: tuple[Setting, ...] = (
 
 BY_NAME = {setting.name: setting for setting in SETTINGS}
 GAS_MODE_MULTIPLIERS = {"normal": 11_000, "fast": 15_000, "turbo": 25_000}
+
+
+def parse_ladder(text: str) -> str:
+    """Разбирает «100:50,300:30» в нормализованную строку ступеней.
+
+    Пустая строка выключает лестницу. Суммарная доля не может превышать 100%.
+    """
+    text = (text or "").strip().lower()
+    if text in {"", "off", "выкл", "нет", "0"}:
+        return ""
+    steps: list[tuple[int, int]] = []
+    total = 0
+    for chunk in text.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" not in chunk:
+            raise ValueError("формат: рост:доля, например 100:50,300:30")
+        growth_raw, share_raw = chunk.split(":", 1)
+        growth = parse_decimal(growth_raw)
+        share = parse_decimal(share_raw)
+        if growth is None or share is None:
+            raise ValueError("формат: рост:доля, например 100:50,300:30")
+        if growth <= 0 or share <= 0 or share > 100:
+            raise ValueError("рост > 0, доля от 1 до 100")
+        total += int(share)
+        if total > 100:
+            raise ValueError("сумма долей больше 100%")
+        steps.append((int(growth), int(share)))
+    if not steps:
+        return ""
+    steps.sort()
+    return ",".join(f"{growth}:{share}" for growth, share in steps)
+
+
+def ladder_steps(value: str | None) -> list[tuple[int, int]]:
+    """Ступени лестницы как список (рост %, доля %)."""
+    if not value:
+        return []
+    steps = []
+    for chunk in str(value).split(","):
+        if ":" not in chunk:
+            continue
+        growth, share = chunk.split(":", 1)
+        try:
+            steps.append((int(growth), int(share)))
+        except ValueError:
+            continue
+    return sorted(steps)
+
+
+def format_ladder(value: str) -> str:
+    steps = ladder_steps(value)
+    if not steps:
+        return "выключена"
+    return " · ".join(f"+{growth}% → {share}%" for growth, share in steps)
 
 
 def find(name: str) -> Setting | None:

@@ -203,3 +203,43 @@ async def test_profitable_trade_breaks_the_losing_streak(db):
 
     async with session_scope() as session:
         assert await repo.consecutive_losses(session, 1, "bsc") == 0
+
+
+# ------------------------------------------------- репутация создателей токенов
+OWNER_BAD = "0xBAD0000000000000000000000000000000000001"
+OWNER_GOOD = "0x9000000000000000000000000000000000000001"
+
+
+async def test_bad_owners_collects_only_losing_creators(db):
+    async with session_scope() as session:
+        await repo.get_or_create_user(session, 1)
+        # на токене плохого владельца потеряли
+        session.add(Position(user_id=1, chain="bsc", token_address="0xa", router_address="0x1",
+                             status="closed", token_owner=OWNER_BAD,
+                             native_spent_wei=to_wei("0.2"), native_returned_wei=to_wei("0.05"),
+                             closed_at=utcnow()))
+        # на токене хорошего — заработали
+        session.add(Position(user_id=1, chain="bsc", token_address="0xb", router_address="0x1",
+                             status="closed", token_owner=OWNER_GOOD,
+                             native_spent_wei=to_wei("0.1"), native_returned_wei=to_wei("0.4"),
+                             closed_at=utcnow()))
+
+    async with session_scope() as session:
+        bad = await repo.bad_owners(session, 1, "bsc")
+
+    assert OWNER_BAD.lower() in bad
+    assert OWNER_GOOD.lower() not in bad
+
+
+async def test_owner_with_net_profit_is_forgiven(db):
+    """Один убыток и одна крупная прибыль у того же владельца — не блокируем."""
+    async with session_scope() as session:
+        await repo.get_or_create_user(session, 1)
+        for spent, returned in (("0.1", "0.02"), ("0.1", "0.9")):
+            session.add(Position(user_id=1, chain="bsc", token_address="0xa", router_address="0x1",
+                                 status="closed", token_owner=OWNER_BAD,
+                                 native_spent_wei=to_wei(spent), native_returned_wei=to_wei(returned),
+                                 closed_at=utcnow()))
+
+    async with session_scope() as session:
+        assert await repo.bad_owners(session, 1, "bsc") == set()

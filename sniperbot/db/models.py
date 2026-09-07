@@ -126,12 +126,30 @@ class ChainSettings(Base):
     min_lp_burned_pct: Mapped[int] = mapped_column(Integer, default=0)
     honeypot_check: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # --- статические проверки контракта ---
+    max_owner_share_pct: Mapped[int] = mapped_column(Integer, default=15)
+    min_pool_share_pct: Mapped[int] = mapped_column(Integer, default=0)
+    block_mintable: Mapped[bool] = mapped_column(Boolean, default=True)
+    block_blacklist_fn: Mapped[bool] = mapped_column(Boolean, default=True)
+    block_pausable: Mapped[bool] = mapped_column(Boolean, default=False)
+    block_proxy: Mapped[bool] = mapped_column(Boolean, default=True)
+    avoid_bad_creators: Mapped[bool] = mapped_column(Boolean, default=True)
+    min_edge_pct: Mapped[int] = mapped_column(Integer, default=0)
+
     # --- автопродажа ---
     auto_sell: Mapped[bool] = mapped_column(Boolean, default=True)
     take_profit_pct: Mapped[int] = mapped_column(Integer, default=100)   # +100% => x2
     stop_loss_pct: Mapped[int] = mapped_column(Integer, default=50)      # -50%
     trailing_stop_pct: Mapped[int] = mapped_column(Integer, default=0)   # 0 = выключен
     sell_percent: Mapped[int] = mapped_column(Integer, default=100)      # доля позиции при TP
+    tp_ladder: Mapped[str] = mapped_column(String(64), default="")       # «100:50,300:30»
+    breakeven_pct: Mapped[int] = mapped_column(Integer, default=50)      # стоп в безубыток после +N%
+    rug_guard_pct: Mapped[int] = mapped_column(Integer, default=50)      # выход при сливе ликвидности
+    dead_timeout_min: Mapped[int] = mapped_column(Integer, default=0)    # выход из «мёртвой» позиции
+    dead_min_pct: Mapped[int] = mapped_column(Integer, default=20)
+    exit_gas_boost_bps: Mapped[int] = mapped_column(Integer, default=15_000)
+    exit_slippage_bps: Mapped[int] = mapped_column(Integer, default=3_000)
+    pre_approve: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # --- служебное ---
     last_native_balance: Mapped[int] = mapped_column(Wei, default=0)
@@ -192,6 +210,15 @@ class Position(Base):
     trailing_stop_pct: Mapped[int] = mapped_column(Integer, default=0)
     auto_sell: Mapped[bool] = mapped_column(Boolean, default=True)
     sell_percent: Mapped[int] = mapped_column(Integer, default=100)
+    tp_ladder: Mapped[str] = mapped_column(String(64), default="")
+    tp_done: Mapped[str] = mapped_column(String(64), default="")          # сработавшие ступени
+    breakeven_pct: Mapped[int] = mapped_column(Integer, default=0)
+    breakeven_armed: Mapped[bool] = mapped_column(Boolean, default=False)
+    rug_guard_pct: Mapped[int] = mapped_column(Integer, default=0)
+    dead_timeout_min: Mapped[int] = mapped_column(Integer, default=0)
+    dead_min_pct: Mapped[int] = mapped_column(Integer, default=0)
+    peak_liquidity_wei: Mapped[int] = mapped_column(Wei, default=0)
+    token_owner: Mapped[str | None] = mapped_column(String(42))           # для репутации создателя
 
     opened_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

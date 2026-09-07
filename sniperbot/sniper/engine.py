@@ -142,6 +142,12 @@ class SniperEngine:
                 continue
             async with session_scope() as session:
                 if await repo.is_blacklisted(session, event.chain, event.token, user.id):
+                    reject_reason = reject_reason or "токен в чёрном списке"
+                    continue
+                owner = (report.token.owner or "").lower()
+                avoid = owner and getattr(cfg, "avoid_bad_creators", False)
+                if avoid and owner in await repo.bad_owners(session, user.id, event.chain):
+                    reject_reason = reject_reason or "владелец уже приводил к убытку"
                     continue
             await self._snipe(user, cfg, event, report, (adapter, pool))
             sniped += 1

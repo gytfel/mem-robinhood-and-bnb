@@ -29,6 +29,7 @@ from sniperbot.chain.clients import ChainClient
 from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, PoolState, find_best_venue, get_adapter
 from sniperbot.chain.erc20 import TokenInfo, fetch_token, trading_limits
 from sniperbot.config import RouterConfig
+from sniperbot.sniper.analysis import RISK_TITLES, ContractProfile, profile_token
 from sniperbot.utils.evm import has_code, hex32, mapping_slot, nested_mapping_slot
 from sniperbot.utils.fmt import from_wei
 
@@ -86,8 +87,20 @@ class SafetyReport:
     liquidity_native: Decimal = Decimal(0)
     lp_burned: Decimal | None = None
     simulation: SimulationResult = field(default_factory=SimulationResult)
+    profile: ContractProfile = field(default_factory=ContractProfile)
     limits: dict = field(default_factory=dict)
     checks: list[Check] = field(default_factory=list)
+
+    @property
+    def round_trip_cost_pct(self) -> Decimal | None:
+        """Во сколько процентов обходится вход и выход: налоги + комиссии DEX."""
+        buy_tax = self.buy_tax_pct
+        sell_tax = self.sell_tax_pct
+        if buy_tax is None or sell_tax is None:
+            return None
+        return buy_tax + sell_tax + self.dex_fee_pct * 2
+
+    dex_fee_pct: Decimal = Decimal("0.3")
 
     @property
     def venue(self) -> str:
@@ -480,6 +493,10 @@ async def analyze_token(
               "renounced" if token.renounced else (token.owner or "неизвестен"), critical=require_renounced)
     )
 
+    report.dex_fee_pct = Decimal(adapter.cfg.fee_bps) / 100
+    report.profile = await profile_token(client, token, code=code, pool_address=pool.address)
+    _apply_profile_checks(report, settings)
+
     report.limits = await trading_limits(client, token.address)
     if report.limits:
         checks.append(Check("limits", "Лимиты токена", None, _fmt_limits(report.limits, token.decimals)))
@@ -490,6 +507,50 @@ async def analyze_token(
         _apply_simulation_checks(report, settings)
 
     return report
+
+
+def _apply_profile_checks(report: SafetyReport, settings) -> None:
+    """Права владельца и распределение предложения — самые частые причины слива."""
+    profile = report.profile
+    checks = report.checks
+
+    rules = (
+        ("proxy", "block_proxy", profile.is_proxy, "Обновляемый прокси",
+         "код контракта можно заменить после покупки"),
+        ("mint", "block_mintable", "mint" in profile.powers, "Чеканка токенов",
+         "владелец может допечатать себе токенов"),
+        ("blacklist_fn", "block_blacklist_fn", "blacklist" in profile.powers, "Чёрный список в контракте",
+         "вам могут запретить продавать"),
+        ("pausable", "block_pausable", "pause" in profile.powers, "Остановка торгов",
+         "торговлю можно выключить в любой момент"),
+    )
+    for key, flag, present, title, danger in rules:
+        blocking = bool(getattr(settings, flag, False))
+        if present:
+            checks.append(Check(key, title, False if blocking else None, danger, critical=blocking))
+        else:
+            checks.append(Check(key, title, True, "не найдено"))
+
+    soft = sorted(profile.powers & {"fees", "limits"})
+    if soft:
+        checks.append(Check("owner_powers", "Права владельца", None,
+                            ", ".join(RISK_TITLES[key] for key in soft)))
+
+    max_owner = int(getattr(settings, "max_owner_share_pct", 0) or 0)
+    if profile.owner_share is not None:
+        checks.append(
+            Check("owner_share", "Доля владельца",
+                  (profile.owner_share <= max_owner) if max_owner else None,
+                  f"{profile.owner_share:.1f}% предложения", critical=bool(max_owner))
+        )
+
+    min_pool = int(getattr(settings, "min_pool_share_pct", 0) or 0)
+    if profile.pool_share is not None:
+        checks.append(
+            Check("pool_share", "Доля предложения в пуле",
+                  (profile.pool_share >= min_pool) if min_pool else None,
+                  f"{profile.pool_share:.1f}%", critical=bool(min_pool))
+        )
 
 
 def _apply_simulation_checks(report: SafetyReport, settings) -> None:
@@ -523,6 +584,18 @@ def _apply_simulation_checks(report: SafetyReport, settings) -> None:
             Check("sell_tax", "Налог на продажу", sim.sell_tax_bps <= max_sell,
                   f"{sim.sell_tax_bps / 100:.1f}% (лимит {max_sell / 100:.0f}%)", critical=True)
         )
+
+    cost = report.round_trip_cost_pct
+    min_edge = int(getattr(settings, "min_edge_pct", 0) or 0)
+    target = int(getattr(settings, "take_profit_pct", 0) or 0)
+    if cost is not None:
+        detail = f"вход+выход стоят {cost:.1f}%"
+        if min_edge and target:
+            edge = Decimal(target) - cost
+            checks.append(Check("edge", "Запас прибыли", edge >= min_edge,
+                                f"{edge:.1f}% при цели +{target}% ({detail})", critical=True))
+        else:
+            checks.append(Check("edge", "Стоимость сделки", None, detail))
 
 
 def _fmt_limits(limits: dict, decimals: int) -> str:
@@ -578,5 +651,29 @@ def evaluate_for_settings(report: SafetyReport, cfg) -> tuple[bool, list[str]]:
 
     if getattr(cfg, "require_renounced", False) and not report.token.renounced:
         reasons.append("владелец контракта не отказался от прав")
+
+    profile = report.profile
+    if getattr(cfg, "block_proxy", False) and profile.is_proxy:
+        reasons.append("обновляемый прокси: код могут подменить после покупки")
+    if getattr(cfg, "block_mintable", False) and "mint" in profile.powers:
+        reasons.append("владелец может допечатать токены")
+    if getattr(cfg, "block_blacklist_fn", False) and "blacklist" in profile.powers:
+        reasons.append("в контракте есть чёрный список кошельков")
+    if getattr(cfg, "block_pausable", False) and "pause" in profile.powers:
+        reasons.append("торговлю можно остановить из контракта")
+
+    max_owner = int(getattr(cfg, "max_owner_share_pct", 0) or 0)
+    if max_owner and profile.owner_share is not None and profile.owner_share > max_owner:
+        reasons.append(f"у владельца {profile.owner_share:.1f}% предложения > {max_owner}%")
+
+    min_pool = int(getattr(cfg, "min_pool_share_pct", 0) or 0)
+    if min_pool and profile.pool_share is not None and profile.pool_share < min_pool:
+        reasons.append(f"в пуле лишь {profile.pool_share:.1f}% предложения < {min_pool}%")
+
+    min_edge = int(getattr(cfg, "min_edge_pct", 0) or 0)
+    target = int(getattr(cfg, "take_profit_pct", 0) or 0)
+    cost = report.round_trip_cost_pct
+    if min_edge and target and cost is not None and (Decimal(target) - cost) < min_edge:
+        reasons.append(f"издержки {cost:.1f}% съедают цель +{target}%")
 
     return (not reasons), reasons

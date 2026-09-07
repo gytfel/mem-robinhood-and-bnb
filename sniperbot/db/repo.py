@@ -351,3 +351,25 @@ async def set_blocked(session: AsyncSession, user_id: int, blocked: bool) -> boo
         return False
     user.is_blocked = blocked
     return True
+
+
+async def bad_owners(session: AsyncSession, user_id: int, chain: str, limit: int = 200) -> set[str]:
+    """Владельцы контрактов, на токенах которых пользователь уже терял деньги."""
+    stmt = (
+        select(Position)
+        .where(
+            Position.user_id == user_id,
+            Position.chain == chain,
+            Position.status == "closed",
+            Position.token_owner.is_not(None),
+        )
+        .order_by(Position.closed_at.desc().nullslast())
+        .limit(limit)
+    )
+    totals: dict[str, int] = {}
+    for position in (await session.scalars(stmt)).all():
+        owner = (position.token_owner or "").lower()
+        if not owner:
+            continue
+        totals[owner] = totals.get(owner, 0) + (position.native_returned_wei - position.native_spent_wei)
+    return {owner for owner, pnl in totals.items() if pnl < 0}
