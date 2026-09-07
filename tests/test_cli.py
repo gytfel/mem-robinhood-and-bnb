@@ -185,15 +185,20 @@ def test_discover_rejects_garbage_address(tmp_path):
 
 # ------------------------------------------------------ отчёты: разбор аргументов
 def test_report_args_parsing():
-    from sniperbot.bot.handlers.reports import _days_arg
+    """Без числа отчёт строится за всё время — данные копятся и не теряются."""
+    from sniperbot.bot.handlers.reports import _days_arg, _since
 
-    assert _days_arg(None) == (7, False)
+    assert _days_arg(None) == (None, False)
+    assert _days_arg("") == (None, False)
     assert _days_arg("30") == (30, False)
-    assert _days_arg("test") == (7, True)
+    assert _days_arg("test") == (None, True)
     assert _days_arg("test 14") == (14, True)
     assert _days_arg("тест 3") == (3, True)
-    assert _days_arg("999999") == (365, False)      # верхняя граница
-    assert _days_arg("мусор") == (7, False)
+    assert _days_arg("999999") == (3650, False)     # верхняя граница
+    assert _days_arg("мусор") == (None, False)
+
+    assert _since(None) is None
+    assert _since(7) is not None
 
 
 def test_optimizer_picks_the_better_exit_pair():

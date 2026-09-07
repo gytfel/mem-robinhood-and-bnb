@@ -29,6 +29,15 @@ log = logging.getLogger(__name__)
 router = Router(name="lab")
 
 WORD_RE = re.compile(r"[a-zA-Zа-яА-Я][a-zA-Zа-яА-Я0-9]{2,}")
+
+
+def _window(args: str | None) -> tuple[int | None, str]:
+    """«12» → последние 12 часов; без аргумента — за всё время."""
+    raw = (args or "").strip()
+    if raw.isdigit():
+        hours = max(1, min(8760, int(raw)))
+        return hours, f"за {hours} ч"
+    return None, "за всё время"
 STOP_WORDS = {"token", "coin", "the", "inu", "finance", "protocol", "network", "official"}
 
 
@@ -84,9 +93,8 @@ async def cmd_ab(message: Message, command: CommandObject, user: User,
 
     # --- статус и сравнение ---
     variant = parse_variant(cfg.ab_variant)
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=30)
     async with session_scope() as session:
-        stats = await repo.ab_stats(session, user.id, chain.key, since)
+        stats = await repo.ab_stats(session, user.id, chain.key)
 
     lines = [f"🧬 <b>A/B-тест настроек</b> — {esc(chain.name)}\n"]
     lines.append(f"Состояние: <b>{'включён' if cfg.ab_enabled and variant else 'выключен'}</b>")
@@ -170,9 +178,8 @@ async def cmd_creators(message: Message, user: User, chain: ChainConfig) -> None
 @router.message(Command("trends"))
 async def cmd_trends(message: Message, command: CommandObject, ctx: BotContext,
                      chain: ChainConfig) -> None:
-    hours = int(command.args) if (command.args or "").strip().isdigit() else 24
-    hours = max(1, min(720, hours))
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)
+    hours, window = _window(command.args)
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours) if hours else None
 
     async with session_scope() as session:
         pairs = await repo.pairs_since(session, chain.key, since)
@@ -181,7 +188,7 @@ async def cmd_trends(message: Message, command: CommandObject, ctx: BotContext,
     if not named:
         await reply(
             message,
-            f"🔥 <b>Тренды</b> за {hours} ч\n\nНазвания токенов пока не собраны. "
+            f"🔥 <b>Тренды</b> {window}\n\nНазвания токенов пока не собраны. "
             "Они появляются, когда автоснайп разбирает новые пулы — включите /on "
             "(можно в тестовом режиме /dry).",
         )
@@ -194,7 +201,7 @@ async def cmd_trends(message: Message, command: CommandObject, ctx: BotContext,
             if word not in STOP_WORDS and len(word) >= 3:
                 words[word] += 1
 
-    lines = [f"🔥 <b>Горячие темы</b> за {hours} ч — {esc(chain.name)}",
+    lines = [f"🔥 <b>Горячие темы</b> {window} — {esc(chain.name)}",
              f"Разобрано новых токенов: {len(named)} из {len(pairs)}\n"]
     for word, count in words.most_common(12):
         if count < 2:
@@ -202,15 +209,15 @@ async def cmd_trends(message: Message, command: CommandObject, ctx: BotContext,
         lines.append(f"• <b>{esc(word)}</b> — {count}")
     if len(lines) == 3:
         lines.append("Повторяющихся тем нет — поток разрозненный.")
+    lines.append("\nСузить период: <code>/trends 24</code> (часы)")
     await reply(message, "\n".join(lines))
 
 
 # ------------------------------------------------------ конкуренция за вход
 @router.message(Command("bundles", "competition"))
 async def cmd_bundles(message: Message, command: CommandObject, chain: ChainConfig) -> None:
-    hours = int(command.args) if (command.args or "").strip().isdigit() else 24
-    hours = max(1, min(720, hours))
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)
+    hours, window = _window(command.args)
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours) if hours else None
 
     async with session_scope() as session:
         pairs = await repo.pairs_since(session, chain.key, since)
@@ -219,7 +226,7 @@ async def cmd_bundles(message: Message, command: CommandObject, chain: ChainConf
     if not measured:
         await reply(
             message,
-            f"🏁 <b>Конкуренция за вход</b> за {hours} ч\n\nЗамеров пока нет: "
+            f"🏁 <b>Конкуренция за вход</b> {window}\n\nЗамеров пока нет: "
             "число сделок в первых блоках считается при разборе новых пулов автоснайпом.",
         )
         return
@@ -230,7 +237,7 @@ async def cmd_bundles(message: Message, command: CommandObject, chain: ChainConf
 
     await reply(
         message,
-        f"🏁 <b>Конкуренция за вход</b> за {hours} ч — {esc(chain.name)}\n\n"
+        f"🏁 <b>Конкуренция за вход</b> {window} — {esc(chain.name)}\n\n"
         f"Замерено пулов: <b>{len(measured)}</b>\n"
         f"В среднем сделок в первых блоках: <b>{average:.1f}</b>\n"
         f"С толпой (5+ сделок сразу): <b>{len(crowded)}</b> "

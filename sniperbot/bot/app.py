@@ -41,7 +41,7 @@ COMMANDS = [
     BotCommand(command="sell", description="Продать позицию"),
     BotCommand(command="check", description="Проверить токен"),
     BotCommand(command="positions", description="Открытые позиции"),
-    BotCommand(command="report", description="Отчёт: боевые и тестовые + файл"),
+    BotCommand(command="report", description="Отчёт за всё время + файл"),
     BotCommand(command="pnl", description="Сделки одного режима + файл"),
     BotCommand(command="edge", description="Есть ли преимущество"),
     BotCommand(command="optimize", description="Подобрать TP/SL по истории"),

@@ -16,7 +16,15 @@ from sniperbot.bot.ui import reply
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import User
-from sniperbot.reports import render_report, render_summary, summarize, to_rows, trades_csv
+from sniperbot.reports import (
+    period_breakdown,
+    period_label,
+    render_report,
+    render_summary,
+    summarize,
+    to_rows,
+    trades_csv,
+)
 from sniperbot.utils.evm import extract_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 
@@ -25,49 +33,55 @@ log = logging.getLogger(__name__)
 router = Router(name="reports")
 
 
-def _days_arg(args: str | None, default: int = 7) -> tuple[int, bool]:
-    """Разбирает «[test] [дней]» из аргументов команды."""
+def _days_arg(args: str | None) -> tuple[int | None, bool]:
+    """Разбирает «[test] [дней]». Без числа — за всё время (None)."""
     parts = (args or "").split()
     paper = bool(parts) and parts[0].lower() in {"test", "тест", "paper"}
     if paper:
         parts = parts[1:]
-    days = int(parts[0]) if parts and parts[0].isdigit() else default
-    return max(1, min(365, days)), paper
+    if parts and parts[0].isdigit():
+        return max(1, min(3650, int(parts[0]))), paper
+    return None, paper
+
+
+def _since(days: int | None) -> dt.datetime | None:
+    return None if days is None else dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
 
 
 @router.message(Command("pnl"))
 async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, user: User,
                   chain) -> None:
     """Отчёт по одному режиму: боевому или тестовому."""
-    days, paper = _days_arg(command.args, default=7)
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+    days, paper = _days_arg(command.args)
 
     async with session_scope() as session:
-        positions = await repo.closed_between(session, user.id, since, paper=paper)
+        positions = await repo.closed_between(session, user.id, _since(days), paper=paper)
         open_positions = await repo.open_positions(session, user_id=user.id)
 
     label = "🧪 Тестовые сделки" if paper else "💰 Реальные сделки"
     summary = summarize(positions, label, chain.native_decimals)
+    period = period_label(days, summary.rows)
     if not summary.count:
-        await reply(message, f"{label} за {days} дн.: сделок не было.")
+        await reply(message, f"{label} {period}: сделок не было.")
         return
 
-    text = f"🧾 <b>Отчёт</b> за {days} дн.\n\n" + render_summary(summary, chain.native_symbol)
+    text = f"🧾 <b>Отчёт</b> {period}\n\n" + render_summary(summary, chain.native_symbol)
+    windows = period_breakdown(summary.rows, chain.native_symbol)
+    if windows and days is None:
+        text += "\n\n📅 <b>По периодам</b>\n" + "\n".join(windows)
     if open_positions:
         text += f"\n\nОткрытых позиций сейчас: <b>{len(open_positions)}</b> (/positions)"
     await reply(message, text)
     await _send_file(message, summary.rows, [], f"pnl-{'test-' if paper else ''}{dt.date.today()}",
-                     f"Сделки за {days} дн.")
+                     f"Сделки {period}")
 
 
 @router.message(Command("report"))
 async def cmd_report(message: Message, command: CommandObject, ctx: BotContext, user: User,
                      chain) -> None:
     """Сводный отчёт: боевые и тестовые сделки рядом, плюс файл со всеми."""
-    raw = (command.args or "").strip()
-    days = int(raw) if raw.isdigit() else 30
-    days = max(1, min(365, days))
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+    days, _ = _days_arg(command.args)
+    since = _since(days)
 
     async with session_scope() as session:
         real_positions = await repo.closed_between(session, user.id, since, paper=False)
@@ -80,7 +94,7 @@ async def cmd_report(message: Message, command: CommandObject, ctx: BotContext, 
     if not real.count and not paper.count:
         await reply(
             message,
-            f"🧾 Отчёт за {days} дн.: закрытых сделок нет.\n\n"
+            f"🧾 Отчёт {period_label(days)}: закрытых сделок нет.\n\n"
             "Наберите статистику бесплатно: /dry включает тестовый режим, "
             "сделки считаются по реальным котировкам без трат.",
         )
@@ -92,7 +106,7 @@ async def cmd_report(message: Message, command: CommandObject, ctx: BotContext, 
         [*real.rows, *paper.rows],
         to_rows(open_positions, chain.native_decimals),
         f"сделки-{dt.date.today()}",
-        f"Все сделки за {days} дн. + открытые позиции",
+        f"Все сделки {period_label(days, [*real.rows, *paper.rows])} + открытые позиции",
     )
 
 
@@ -107,13 +121,12 @@ async def _send_file(message: Message, rows, open_rows, name: str, caption: str)
 
 @router.message(Command("edge"))
 async def cmd_edge(message: Message, command: CommandObject, user: User) -> None:
-    days, paper = _days_arg(command.args, default=30)
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+    days, paper = _days_arg(command.args)
     async with session_scope() as session:
-        positions = await repo.closed_between(session, user.id, since, paper=paper)
+        positions = await repo.closed_between(session, user.id, _since(days), paper=paper)
 
     if len(positions) < 2:
-        await reply(message, f"Мало данных: сделок за {days} дн. — {len(positions)}. "
+        await reply(message, f"Мало данных: сделок {period_label(days)} — {len(positions)}. "
                              "Оценка появится, когда наберётся хотя бы десяток.")
         return
 
@@ -136,7 +149,8 @@ async def cmd_edge(message: Message, command: CommandObject, user: User) -> None
 
     await reply(
         message,
-        f"{'🧪 Бумажные' if paper else '💰 Реальные'} сделки за {days} дн.\n\n"
+        f"{'🧪 Бумажные' if paper else '💰 Реальные'} сделки "
+        f"{period_label(days, to_rows(positions))}\n\n"
         f"Сделок: <b>{len(results)}</b>\n"
         f"Винрейт: <b>{winrate:.0f}%</b>\n"
         f"Средняя прибыльная: {fmt_amount(avg_win)}\n"
@@ -149,11 +163,11 @@ async def cmd_edge(message: Message, command: CommandObject, user: User) -> None
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, user: User) -> None:
-    hours = int(command.args) if (command.args or "").strip().isdigit() else 24
-    hours = max(1, min(720, hours))
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)
+    hours = int(command.args) if (command.args or "").strip().isdigit() else None
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours) if hours else None
+    window = f"за {hours} ч" if hours else "за всё время"
 
-    lines = [f"📈 <b>Поток токенов</b> за {hours} ч\n"]
+    lines = [f"📈 <b>Поток токенов</b> {window}\n"]
     total = 0
     for chain_key in ctx.active_chain_keys:
         async with session_scope() as session:
@@ -177,7 +191,8 @@ async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, u
     if not total:
         lines.append("\nПусто. Либо сеть тихая, либо сканер не видит фабрику — проверьте /health.")
     else:
-        lines.append("\nСлишком строгие фильтры видно по частым причинам отказа: /config")
+        lines.append("\nСлишком строгие фильтры видно по частым причинам отказа: /config\n"
+                     "Сузить период: <code>/stats 24</code>")
     await reply(message, "\n".join(lines))
 
 
@@ -213,10 +228,9 @@ async def cmd_blacklist(message: Message, command: CommandObject, user: User, ch
 @router.message(Command("optimize"))
 async def cmd_optimize(message: Message, command: CommandObject, user: User, chain) -> None:
     """Подбирает TP/SL, которые дали бы лучший результат на ваших же сделках."""
-    days, paper = _days_arg(command.args, default=30)
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+    days, paper = _days_arg(command.args)
     async with session_scope() as session:
-        positions = await repo.closed_between(session, user.id, since, paper=paper)
+        positions = await repo.closed_between(session, user.id, _since(days), paper=paper)
 
     usable = [p for p in positions if p.entry_price and p.entry_price > 0 and p.peak_price]
     if len(usable) < 5:
@@ -247,7 +261,7 @@ async def cmd_optimize(message: Message, command: CommandObject, user: User, cha
     current = sum(final for _peak, final in trades) / len(trades)
     await reply(
         message,
-        f"🔧 <b>Подбор выходов</b> по {len(trades)} сделкам за {days} дн."
+        f"🔧 <b>Подбор выходов</b> по {len(trades)} сделкам {period_label(days, to_rows(usable))}"
         + (" (бумажным)" if paper else "") + "\n\n"
         f"Сейчас средний результат: <b>{current:+.1f}%</b> на сделку\n"
         f"Лучшая пара из перебранных: <b>TP +{take_profit}% / SL −{stop_loss}%</b>\n"

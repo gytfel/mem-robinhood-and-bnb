@@ -309,31 +309,34 @@ async def consecutive_losses(
 
 
 async def closed_between(
-    session: AsyncSession, user_id: int, since: dt.datetime, *, paper: bool = False,
-    chain: str | None = None,
+    session: AsyncSession, user_id: int, since: dt.datetime | None = None, *,
+    paper: bool = False, chain: str | None = None,
 ) -> list[Position]:
+    """Закрытые сделки пользователя. since=None — за всё время."""
     stmt = (
         select(Position)
         .where(
             Position.user_id == user_id,
             Position.status == "closed",
-            Position.closed_at >= since,
             Position.is_paper.is_(paper),
         )
         .order_by(Position.closed_at.asc())
     )
+    if since is not None:
+        stmt = stmt.where(Position.closed_at >= since)
     if chain:
         stmt = stmt.where(Position.chain == chain)
     return list((await session.scalars(stmt)).all())
 
 
-async def pairs_since(session: AsyncSession, chain: str, since: dt.datetime) -> list[SeenPair]:
-    stmt = (
-        select(SeenPair)
-        .where(SeenPair.chain == chain, SeenPair.created_at >= since)
-        .order_by(SeenPair.created_at.desc())
-    )
-    return list((await session.scalars(stmt)).all())
+async def pairs_since(
+    session: AsyncSession, chain: str, since: dt.datetime | None = None, limit: int = 5_000
+) -> list[SeenPair]:
+    """Замеченные пулы. since=None — за всё время (с ограничением по количеству)."""
+    stmt = select(SeenPair).where(SeenPair.chain == chain).order_by(SeenPair.created_at.desc())
+    if since is not None:
+        stmt = stmt.where(SeenPair.created_at >= since)
+    return list((await session.scalars(stmt.limit(limit))).all())
 
 
 async def user_count(session: AsyncSession) -> int:
@@ -415,15 +418,17 @@ async def creator_stats(
     return sorted(buckets.values(), key=lambda item: item["pnl"])
 
 
-async def ab_stats(session: AsyncSession, user_id: int, chain: str, since: dt.datetime) -> dict:
+async def ab_stats(session: AsyncSession, user_id: int, chain: str,
+                   since: dt.datetime | None = None) -> dict:
     """Результаты A/B-теста по группам."""
     stmt = select(Position).where(
         Position.user_id == user_id,
         Position.chain == chain,
         Position.status == "closed",
-        Position.closed_at >= since,
         Position.ab_group.in_(["A", "B"]),
     )
+    if since is not None:
+        stmt = stmt.where(Position.closed_at >= since)
     groups: dict[str, dict] = {
         "A": {"trades": 0, "wins": 0, "pnl": 0, "spent": 0},
         "B": {"trades": 0, "wins": 0, "pnl": 0, "spent": 0},

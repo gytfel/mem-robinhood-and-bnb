@@ -178,3 +178,65 @@ def test_every_exit_reason_has_a_human_title(reason):
     row = to_rows([trade("X", "0.1", "0.2", reason=reason)])[0]
     assert row.exit_title
     assert not row.exit_title.startswith("take_")     # в отчёте только по-русски
+
+
+# ------------------------------------------------------ период и накопление
+def test_period_label_for_explicit_days():
+    from sniperbot.reports import period_label
+
+    assert period_label(30) == "за 30 дн."
+
+
+def test_period_label_shows_span_of_all_data():
+    from sniperbot.reports import period_label
+
+    old = trade("OLD", "0.1", "0.2", closed_at=NOW - dt.timedelta(days=26))
+    rows = to_rows([old, trade("NEW", "0.1", "0.3")])
+
+    label = period_label(None, rows, now=NOW)
+    assert "за всё время" in label
+    assert "27 дн." in label            # 26 дней назад + сегодня
+    assert (NOW - dt.timedelta(days=26)).strftime("%d.%m.%Y") in label
+
+
+def test_period_label_without_data():
+    from sniperbot.reports import period_label
+
+    assert period_label(None, []) == "за всё время"
+
+
+def test_period_breakdown_splits_recent_windows():
+    from sniperbot.reports import period_breakdown
+
+    rows = to_rows([
+        trade("TODAY", "0.1", "0.3", closed_at=NOW - dt.timedelta(hours=2)),
+        trade("WEEK", "0.1", "0.05", closed_at=NOW - dt.timedelta(days=3)),
+        trade("MONTH", "0.1", "0.4", closed_at=NOW - dt.timedelta(days=20)),
+        trade("OLD", "0.1", "9.0", closed_at=NOW - dt.timedelta(days=200)),
+    ])
+
+    lines = period_breakdown(rows, "BNB", now=NOW)
+    assert len(lines) == 3
+    assert "24 часа: 1 сдел." in lines[0]
+    assert "7 дней: 2 сдел." in lines[1]
+    assert "30 дней: 3 сдел." in lines[2]
+    # старая сделка не попала ни в одно окно, но остаётся в общем итоге
+    assert all("4 сдел." not in line for line in lines)
+
+
+def test_breakdown_is_empty_without_recent_trades():
+    from sniperbot.reports import period_breakdown
+
+    rows = to_rows([trade("OLD", "0.1", "0.2", closed_at=NOW - dt.timedelta(days=100))])
+    assert period_breakdown(rows, "BNB", now=NOW) == []
+
+
+def test_all_time_report_includes_period_block():
+    real = summarize([trade("W", "0.1", "0.5", closed_at=NOW - dt.timedelta(hours=1))],
+                     "💰 Боевой режим")
+    text = render_report(real, summarize([], "🧪 Тестовый"), days=None, symbol="BNB", now=NOW)
+
+    assert "за всё время" in text
+    assert "Боевые по периодам" in text
+    assert "24 часа" in text
+    assert "/report 7" in text

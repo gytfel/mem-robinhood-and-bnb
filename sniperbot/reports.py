@@ -171,10 +171,43 @@ def render_summary(summary: Summary, symbol: str, top: int = 5) -> str:
     return "\n".join(lines)
 
 
-def render_report(real: Summary, paper: Summary, days: int, symbol: str,
-                  open_positions: int = 0) -> str:
+def period_label(days: int | None, rows: list[TradeRow] | None = None,
+                 now: dt.datetime | None = None) -> str:
+    """«за всё время (с 12.08, 27 дн.)» либо «за 30 дн.»."""
+    if days is not None:
+        return f"за {days} дн."
+    stamps = [row.position.closed_at or row.position.opened_at for row in (rows or [])]
+    stamps = [stamp for stamp in stamps if stamp]
+    if not stamps:
+        return "за всё время"
+    first = min(_aware(stamp) for stamp in stamps)
+    span = ((now or dt.datetime.now(dt.UTC)) - first).days + 1
+    return f"за всё время (с {first:%d.%m.%Y}, {span} дн.)"
+
+
+def period_breakdown(rows: list[TradeRow], symbol: str,
+                     now: dt.datetime | None = None) -> list[str]:
+    """Как менялись результаты в последние окна — при накопленных данных полезнее всего."""
+    now = now or dt.datetime.now(dt.UTC)
+    lines = []
+    for title, days in (("24 часа", 1), ("7 дней", 7), ("30 дней", 30)):
+        since = now - dt.timedelta(days=days)
+        window = [row for row in rows
+                  if row.position.closed_at and _aware(row.position.closed_at) >= since]
+        if not window:
+            continue
+        summary = Summary(label=title, rows=window)
+        icon = "🟢" if summary.pnl >= 0 else "🔴"
+        lines.append(f"{icon} {title}: {summary.count} сдел. · {summary.winrate}% плюсовых · "
+                     f"{fmt_amount(summary.pnl)} {symbol}")
+    return lines
+
+
+def render_report(real: Summary, paper: Summary, days: int | None, symbol: str,
+                  open_positions: int = 0, now: dt.datetime | None = None) -> str:
     """Полный отчёт: боевой режим и тестовый рядом."""
-    parts = [f"🧾 <b>Отчёт по сделкам</b> за {days} дн.\n"]
+    label = period_label(days, [*real.rows, *paper.rows], now)
+    parts = [f"🧾 <b>Отчёт по сделкам</b> {label}\n"]
     parts.append(render_summary(real, symbol))
     parts.append("\n" + render_summary(paper, symbol))
 
@@ -184,11 +217,21 @@ def render_report(real: Summary, paper: Summary, days: int, symbol: str,
             f"\nНа сделку: боевые {fmt_amount(real.average)} {symbol} · "
             f"тестовые {fmt_amount(paper.average)} {symbol} → лучше идут <b>{better}</b>."
         )
+    if real.count:
+        windows = period_breakdown(real.rows, symbol, now)
+        if windows:
+            parts.append("\n📅 <b>Боевые по периодам</b>\n" + "\n".join(windows))
+
     if open_positions:
         parts.append(f"\nОткрытых позиций сейчас: <b>{open_positions}</b> "
                      "(в расчёт не входят — /positions)")
-    parts.append("\nПолный список сделок — в файле ниже.")
+    parts.append("\nПолный список сделок — в файле ниже. "
+                 "Сузить период: <code>/report 7</code>")
     return "\n".join(parts)
+
+
+def _aware(value: dt.datetime) -> dt.datetime:
+    return value if value.tzinfo else value.replace(tzinfo=dt.UTC)
 
 
 def trades_csv(rows: list[TradeRow], open_rows: list[TradeRow] | None = None) -> str:
