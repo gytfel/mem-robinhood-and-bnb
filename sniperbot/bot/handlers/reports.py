@@ -172,14 +172,20 @@ async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, u
     for chain_key in ctx.active_chain_keys:
         async with session_scope() as session:
             pairs = await repo.pairs_since(session, chain_key, since)
+            counts = await repo.pair_status_counts(session, chain_key, since)
         if not pairs:
             lines.append(f"{esc(ctx.chain(chain_key).name)}: новых пулов нет")
             continue
         total += len(pairs)
-        statuses = Counter(pair.status for pair in pairs)
+
+        checked = [pair for pair in pairs if pair.analysis_ms > 0]
+        average = sum(pair.analysis_ms for pair in checked) / len(checked) / 1000 if checked else 0
         lines.append(
-            f"<b>{esc(ctx.chain(chain_key).name)}</b>: найдено {len(pairs)}, "
-            f"куплено {statuses.get('sniped', 0)}, отсеяно {statuses.get('rejected', 0)}"
+            f"<b>{esc(ctx.chain(chain_key).name)}</b>: найдено {len(pairs)}\n"
+            f"   ✅ куплено {counts.get('sniped', 0)} · "
+            f"⏳ ждут ликвидность {counts.get('waiting', 0)} · "
+            f"⛔️ отсеяно {counts.get('rejected', 0)}"
+            + (f"\n   ⏱ проверка токена: {average:.1f} с в среднем" if checked else "")
         )
         reasons = Counter(
             (pair.reason or "без причины").split(";")[0].strip()[:60]
@@ -191,8 +197,12 @@ async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, u
     if not total:
         lines.append("\nПусто. Либо сеть тихая, либо сканер не видит фабрику — проверьте /health.")
     else:
-        lines.append("\nСлишком строгие фильтры видно по частым причинам отказа: /config\n"
-                     "Сузить период: <code>/stats 24</code>")
+        lines.append(
+            "\n<i>«Ждут ликвидность» — пары созданы, но денег в пул ещё не залили; "
+            "бот вернётся к ним сам.</i>\n"
+            "Частые причины отказа подскажут, какой фильтр слишком строгий: /config\n"
+            "Сузить период: <code>/stats 24</code>"
+        )
     await reply(message, "\n".join(lines))
 
 

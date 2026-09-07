@@ -40,7 +40,8 @@ PROBE_NATIVE_BALANCE = 100 * 10**18   # 100 монет пробнику на г�
 SIM_GAS = 3_000_000
 SLOT_PROBE_VALUE = 0x1234567890
 MAX_SLOT_SCAN = 24
-BINARY_SEARCH_STEPS = 16
+SEARCH_PROBES = 7        # сколько точек проверяем за один раунд
+SEARCH_ROUNDS = 5        # 8^5 ≈ 32 000 делений — та же точность, что 15 шагов пополам
 
 # Кэш найденных слотов хранилища: {(chain, token): (balance_slot, vyper, allowance_slot)}
 _slot_cache: dict[tuple[str, str], tuple[int, bool, int | None]] = {}
@@ -266,21 +267,41 @@ class HoneypotSimulator:
 
     # ------------------------------------------------------------ симуляция
     async def _max_passing_min_out(self, tx: dict, overrides: dict, build, upper: int) -> int:
-        """Двоичный поиск максимального amountOutMin, при котором свап проходит."""
+        """Максимальный amountOutMin, при котором свап ещё проходит.
+
+        Вместо деления пополам проверяем несколько точек одновременно: на
+        публичной ноде задержка ответа важнее числа запросов, и семь
+        параллельных проб за раунд дают ту же точность за пять раундов вместо
+        пятнадцати последовательных шагов.
+        """
         if upper <= 0:
             return 0
         low, high, best = 0, upper, 0
-        for _ in range(BINARY_SEARCH_STEPS):
-            if low > high:
+        for _ in range(SEARCH_ROUNDS):
+            if high <= low:
                 break
-            mid = (low + high) // 2
-            probe_tx = dict(tx)
-            probe_tx["data"] = build(mid)
-            if await self._call(probe_tx, overrides) is not None:
-                best = mid
-                low = mid + 1
+            step = (high - low) / (SEARCH_PROBES + 1)
+            if step < 1:
+                candidates = list(range(low + 1, min(high, low + SEARCH_PROBES) + 1))
             else:
-                high = mid - 1
+                candidates = sorted({int(low + step * (index + 1)) for index in range(SEARCH_PROBES)})
+            candidates = [value for value in candidates if low < value <= high]
+            if not candidates:
+                break
+
+            results = await asyncio.gather(
+                *(self._call({**tx, "data": build(value)}, overrides) for value in candidates)
+            )
+            passed = [value for value, result in zip(candidates, results, strict=True) if result is not None]
+            failed = [value for value, result in zip(candidates, results, strict=True) if result is None]
+
+            if passed:
+                best = max(best, max(passed))
+                low = best
+            if failed:
+                high = min(failed) - 1
+            elif not passed:
+                break
         return best
 
     async def simulate(self, token: str, decimals: int, amount_native_wei: int) -> SimulationResult:

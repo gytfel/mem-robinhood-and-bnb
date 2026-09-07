@@ -180,3 +180,44 @@ async def test_node_without_override_degrades_gracefully():
 )
 def test_tax_bps(expected, actual, bps):
     assert _tax_bps(expected, actual) == bps
+
+
+# ------------------------------------------- скорость измерения налога
+async def test_min_out_search_is_parallel_and_accurate():
+    """Пробы идут пачками: на медленной ноде это главный источник задержки."""
+    import asyncio
+
+    from sniperbot.sniper.safety import SEARCH_PROBES, SEARCH_ROUNDS
+
+    simulator = make_simulator()
+    threshold = 8_123_456              # всё, что выше, не проходит
+    state = {"active": 0, "peak": 0, "calls": 0, "waves": 0}
+
+    async def fake_call(tx, overrides):
+        state["calls"] += 1
+        state["active"] += 1
+        state["peak"] = max(state["peak"], state["active"])
+        await asyncio.sleep(0)          # даём другим пробам стартовать
+        state["active"] -= 1
+        value = int(tx["data"])
+        return None if value > threshold else b"ok"
+
+    simulator._call = fake_call         # type: ignore[method-assign]
+    best = await simulator._max_passing_min_out({}, {}, lambda value: str(value), 10_000_000)
+
+    assert best <= threshold                       # никогда не завышаем
+    assert threshold - best < threshold * 0.01     # точность лучше 1%
+    assert state["peak"] > 1                       # пробы шли параллельно
+    assert state["calls"] <= SEARCH_PROBES * SEARCH_ROUNDS
+
+
+async def test_min_out_search_handles_hopeless_case():
+    """Если не проходит даже минимум — возвращаем ноль, а не зависаем."""
+    simulator = make_simulator()
+
+    async def always_revert(tx, overrides):
+        return None
+
+    simulator._call = always_revert     # type: ignore[method-assign]
+    assert await simulator._max_passing_min_out({}, {}, lambda value: str(value), 1_000) == 0
+    assert await simulator._max_passing_min_out({}, {}, lambda value: str(value), 0) == 0

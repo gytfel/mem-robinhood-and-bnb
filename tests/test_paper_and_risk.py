@@ -243,3 +243,106 @@ async def test_owner_with_net_profit_is_forgiven(db):
 
     async with session_scope() as session:
         assert await repo.bad_owners(session, 1, "bsc") == set()
+
+
+# ------------------------------------------- пулы, ждущие заливки ликвидности
+async def test_waiting_pairs_are_returned_and_expired(db):
+    old = utcnow() - dt.timedelta(hours=5)
+    async with session_scope() as session:
+        fresh = await repo.add_seen_pair(session, chain="bsc", pair_address="0xFRESH",
+                                         token_address="0xT1", status="waiting")
+        stale = await repo.add_seen_pair(session, chain="bsc", pair_address="0xSTALE",
+                                         token_address="0xT2", status="waiting")
+        stale.created_at = old
+
+    since = utcnow() - dt.timedelta(hours=3)
+    async with session_scope() as session:
+        pending = await repo.waiting_pairs(session, "bsc", since)
+    assert [row.pair_address for row in pending] == ["0xFRESH"]
+
+    async with session_scope() as session:
+        expired = await repo.expire_waiting_pairs(session, "bsc", since)
+    assert expired == 1
+
+    async with session_scope() as session:
+        stale_row = await session.get(type(fresh), stale.id)
+        assert stale_row.status == "rejected"
+        assert "не появилась" in stale_row.reason
+        assert (await repo.waiting_pairs(session, "bsc", since))[0].pair_address == "0xFRESH"
+
+
+async def test_pair_status_counts(db):
+    async with session_scope() as session:
+        for address, status in (("0x1", "sniped"), ("0x2", "waiting"),
+                                ("0x3", "waiting"), ("0x4", "rejected")):
+            await repo.add_seen_pair(session, chain="bsc", pair_address=address,
+                                     token_address=address, status=status)
+
+    async with session_scope() as session:
+        counts = await repo.pair_status_counts(session, "bsc")
+
+    assert counts == {"sniped": 1, "waiting": 2, "rejected": 1}
+
+
+async def test_watch_tick_processes_pair_once_liquidity_arrives(db, monkeypatch):
+    """Пул без ликвидности не выбрасывается: бот вернётся к нему сам."""
+    from decimal import Decimal
+
+    from sniperbot.chain.dex_adapter import PoolState
+    from sniperbot.config import ChainConfig, RouterConfig
+    from sniperbot.db.models import SeenPair
+    from sniperbot.sniper import engine as engine_module
+
+    router = RouterConfig("DEX", "0x" + "r" * 40, "0x" + "f" * 40, 25, True)
+    chain_config = ChainConfig(key="bsc", name="BNB", chain_id=56, enabled=True,
+                               rpc_urls=["http://localhost"], wrapped_native="0x" + "b" * 40,
+                               routers=[router])
+
+    class FakeClient:
+        config = chain_config
+
+    class FakeRegistryWithConfig:
+        configs = {"bsc": chain_config}
+
+        def get(self, key):  # noqa: ANN001
+            return FakeClient()
+
+        def config(self, key):  # noqa: ANN001
+            return chain_config
+
+    liquid = {"value": False}
+
+    class StubAdapter:
+        kind = "v2"
+        name = "DEX"
+
+        async def pool_state(self, token, pool, decimals=18):  # noqa: ANN001
+            return PoolState(pool=pool, liquidity_native=Decimal(5) if liquid["value"] else Decimal(0),
+                             reserve_native=10**18 if liquid["value"] else 0)
+
+    monkeypatch.setattr(engine_module, "get_adapter", lambda client, cfg: StubAdapter())
+
+    processed: list = []
+    engine = SniperEngine(FakeRegistryWithConfig(), None, None, None,  # type: ignore[arg-type]
+                          engine_module.Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32))
+    async def capture(event):  # noqa: ANN001
+        processed.append(event)
+
+    engine._process_pair = capture  # type: ignore[assignment]
+
+    async with session_scope() as session:
+        row = await repo.add_seen_pair(session, chain="bsc", pair_address="0xPOOL",
+                                       token_address="0xTOKEN", router_address=router.router,
+                                       status="waiting", block_number=100)
+        row_id = row.id
+
+    await engine.watch_tick()
+    assert processed == []                       # ликвидности ещё нет — ждём дальше
+
+    liquid["value"] = True
+    await engine.watch_tick()
+    assert len(processed) == 1
+    assert processed[0].token == "0xTOKEN"
+
+    async with session_scope() as session:
+        assert (await session.get(SeenPair, row_id)).status == "checking"

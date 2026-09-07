@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import time
 from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
@@ -46,6 +47,7 @@ class SniperEngine:
         self.settings = settings
         self._tasks: list[asyncio.Task] = []
         self._scanners: list[PairScanner] = []
+        self._watching = False
         self._semaphore = asyncio.Semaphore(MAX_PARALLEL_PAIRS)
         self._inflight: set[asyncio.Task] = set()
 
@@ -63,7 +65,8 @@ class SniperEngine:
                 )
                 self._scanners.append(scanner)
                 self._tasks.append(asyncio.create_task(scanner.run(), name=f"scanner-{key}-{router_cfg.name}"))
-        log.info("Запущено сканеров: %s", len(self._tasks))
+        self._tasks.append(asyncio.create_task(self.watch_pending(), name="liquidity-watcher"))
+        log.info("Запущено сканеров: %s (+ наблюдение за ликвидностью)", len(self._tasks) - 1)
 
     def status(self) -> list[dict]:
         """Состояние сканеров — для команды /health."""
@@ -77,7 +80,71 @@ class SniperEngine:
             for task in self._tasks
         ]
 
+    async def watch_pending(self) -> None:
+        """Возвращается к пулам без ликвидности, пока не истечёт окно наблюдения.
+
+        Разработчики часто создают пару заранее, а ликвидность заливают через
+        минуты или часы. Без этого цикла такие запуски терялись бы навсегда.
+        """
+        self._watching = True
+        window = self.settings.scanner_liquidity_watch_minutes
+        log.info("Наблюдение за пулами без ликвидности: окно %s мин", window)
+        while self._watching:
+            try:
+                await self.watch_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Наблюдение за пулами: %s", exc)
+            await asyncio.sleep(self.settings.scanner_watch_interval)
+
+    async def watch_tick(self) -> None:
+        now = dt.datetime.now(dt.UTC)
+        window = dt.timedelta(minutes=self.settings.scanner_liquidity_watch_minutes)
+        for chain_key, config in self.registry.configs.items():
+            if not (config.enabled and config.configured):
+                continue
+            async with session_scope() as session:
+                expired = await repo.expire_waiting_pairs(session, chain_key, now - window)
+                pending = await repo.waiting_pairs(session, chain_key, now - window)
+            if expired:
+                log.info("Сеть %s: снято с ожидания пулов — %s", chain_key, expired)
+            for row in pending:
+                await self._recheck(chain_key, row)
+
+    async def _recheck(self, chain_key: str, row) -> None:  # noqa: ANN001 - SeenPair
+        """Проверяет, появилась ли ликвидность, и если да — запускает разбор."""
+        client = self.registry.get(chain_key)
+        router_cfg = client.config.router_by_address(row.router_address or "")
+        if router_cfg is None:
+            router_cfg = client.config.default_router
+        if router_cfg is None:
+            return
+
+        adapter = get_adapter(client, router_cfg)
+        pool = PoolRef(address=row.pair_address, kind=row.dex_kind or "v2", fee=row.pool_fee or 0)
+        try:
+            state = await adapter.pool_state(row.token_address, pool)
+        except Exception as exc:  # noqa: BLE001 - пул мог быть удалён
+            log.debug("Пул %s ещё не готов: %s", row.pair_address, exc)
+            return
+        if not state.has_liquidity:
+            return
+
+        async with session_scope() as session:
+            await repo.mark_pair(session, row.id, "checking", "ликвидность появилась")
+
+        log.info("Сеть %s: в пул %s залили ликвидность — проверяю токен", chain_key, row.pair_address)
+        event = PairEvent(
+            chain=chain_key, pair=row.pair_address, token=row.token_address,
+            quote=client.config.wrapped_native, block=row.block_number,
+            router=router_cfg, kind=row.dex_kind or "v2", fee=row.pool_fee or 0,
+            pair_id=row.id,
+        )
+        await self._process_pair(event)
+
     async def stop(self) -> None:
+        self._watching = False
         for scanner in self._scanners:
             scanner.stop()
         for task in [*self._tasks, *self._inflight]:
@@ -116,12 +183,23 @@ class SniperEngine:
         pool = PoolRef(address=event.pair, kind=event.kind, fee=event.fee)
 
         if not await self._wait_for_liquidity(adapter, event, pool):
-            await self._mark(pair_id, "rejected", "ликвидность не появилась")
+            # Ликвидность часто заливают позже создания пары — берём пул на карандаш
+            # и возвращаемся к нему, пока не истечёт окно наблюдения.
+            await self._mark(pair_id, "waiting", "ждём заливку ликвидности")
             return
 
         # Симулируем на самой крупной сумме подписчиков: так налоги и
         # проскальзывание оцениваются по худшему сценарию.
         sim_amount = min(max((cfg.buy_amount for _, cfg in subscribers), default=Decimal("0.01")), MAX_SIM_AMOUNT)
+        # Пыльный пул не имеет смысла проверять симуляцией: она дорогая по времени.
+        floor = min((Decimal(str(cfg.min_liquidity or 0)) for _, cfg in subscribers), default=Decimal(0))
+        state = await adapter.pool_state(event.token, pool)
+        if floor and state.liquidity_native < floor:
+            await self._mark(pair_id, "rejected",
+                             f"ликвидность {state.liquidity_native:.3f} < минимума {floor}")
+            return
+
+        started = time.perf_counter()
         report = await analyze_token(
             client,
             adapter,
@@ -131,8 +209,9 @@ class SniperEngine:
             run_simulation=True,
             pool=pool,
         )
+        analysis_ms = int((time.perf_counter() - started) * 1000)
 
-        await self._record_pair_details(client, event, report, pair_id)
+        await self._record_pair_details(client, event, report, pair_id, analysis_ms)
 
         sniped = 0
         reject_reason = ""
@@ -219,7 +298,8 @@ class SniperEngine:
             group = await repo.next_ab_group(session, user_id, chain)
         return group, (variant_overlay(cfg, variant) if group == "B" else cfg)
 
-    async def _record_pair_details(self, client, event: PairEvent, report, pair_id) -> None:
+    async def _record_pair_details(self, client, event: PairEvent, report, pair_id,
+                                   analysis_ms: int = 0) -> None:
         """Дописывает в историю пулов то, что понадобится отчётам."""
         swaps = await self._count_early_swaps(client, event)
         async with session_scope() as session:
@@ -229,6 +309,7 @@ class SniperEngine:
                 token_name=(report.token.name or "")[:64],
                 token_owner=report.token.owner,
                 first_block_swaps=swaps,
+                analysis_ms=analysis_ms,
             )
 
     async def _count_early_swaps(self, client, event: PairEvent) -> int:

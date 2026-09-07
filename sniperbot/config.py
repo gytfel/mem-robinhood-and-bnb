@@ -161,7 +161,9 @@ class Settings(BaseSettings):
     default_chain: str = Field(default="bsc", alias="DEFAULT_CHAIN")
 
     scanner_poll_interval: float = Field(default=2.0, alias="SCANNER_POLL_INTERVAL")
-    scanner_liquidity_wait_blocks: int = Field(default=60, alias="SCANNER_LIQUIDITY_WAIT_BLOCKS")
+    scanner_liquidity_wait_blocks: int = Field(default=40, alias="SCANNER_LIQUIDITY_WAIT_BLOCKS")
+    scanner_liquidity_watch_minutes: int = Field(default=180, alias="SCANNER_LIQUIDITY_WATCH_MINUTES")
+    scanner_watch_interval: float = Field(default=12.0, alias="SCANNER_WATCH_INTERVAL")
     position_poll_interval: float = Field(default=6.0, alias="POSITION_POLL_INTERVAL")
     deposit_poll_interval: float = Field(default=30.0, alias="DEPOSIT_POLL_INTERVAL")
 

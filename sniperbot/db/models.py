@@ -275,7 +275,9 @@ class SeenPair(Base):
     token_name: Mapped[str] = mapped_column(String(64), default="")
     token_owner: Mapped[str | None] = mapped_column(String(42))
     first_block_swaps: Mapped[int] = mapped_column(Integer, default=-1)  # -1 = не измеряли
-    status: Mapped[str] = mapped_column(String(16), default="new")  # new|checked|rejected|sniped
+    analysis_ms: Mapped[int] = mapped_column(Integer, default=0)         # сколько заняла проверка
+    status: Mapped[str] = mapped_column(String(16), default="new")
+    # new | waiting (ждём ликвидность) | checking | sniped | rejected
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 

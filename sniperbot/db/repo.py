@@ -471,3 +471,39 @@ async def recent_trades(session: AsyncSession, user_id: int | None = None,
     if user_id is not None:
         stmt = stmt.where(TradeLog.user_id == user_id)
     return list((await session.scalars(stmt)).all())
+
+
+async def waiting_pairs(
+    session: AsyncSession, chain: str, since: dt.datetime, limit: int = 200
+) -> list[SeenPair]:
+    """Пулы, где ликвидности ещё не было: их проверяем повторно."""
+    stmt = (
+        select(SeenPair)
+        .where(
+            SeenPair.chain == chain,
+            SeenPair.status == "waiting",
+            SeenPair.created_at >= since,
+        )
+        .order_by(SeenPair.created_at.desc())
+        .limit(limit)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def expire_waiting_pairs(session: AsyncSession, chain: str, before: dt.datetime) -> int:
+    """Снимает с ожидания пулы, куда ликвидность так и не залили."""
+    result = await session.execute(
+        update(SeenPair)
+        .where(SeenPair.chain == chain, SeenPair.status == "waiting", SeenPair.created_at < before)
+        .values(status="rejected", reason="ликвидность так и не появилась")
+    )
+    return int(result.rowcount or 0)
+
+
+async def pair_status_counts(session: AsyncSession, chain: str,
+                             since: dt.datetime | None = None) -> dict[str, int]:
+    stmt = select(SeenPair.status, func.count()).where(SeenPair.chain == chain)
+    if since is not None:
+        stmt = stmt.where(SeenPair.created_at >= since)
+    rows = (await session.execute(stmt.group_by(SeenPair.status))).all()
+    return {str(status): int(count) for status, count in rows}
