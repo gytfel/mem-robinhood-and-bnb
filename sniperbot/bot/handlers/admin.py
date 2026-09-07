@@ -36,7 +36,22 @@ def _deny(is_admin: bool) -> bool:
 async def cmd_health(message: Message, ctx: BotContext, is_admin: bool = False) -> None:
     if _deny(is_admin):
         return
-    lines = ["🩺 <b>Здоровье бота</b>\n", "<b>Сканеры</b>"]
+    from sniperbot.bot.startup import human_duration
+    from sniperbot.db.models import BotRun
+    from sniperbot.version import build_info
+
+    async with session_scope() as session:
+        runs = list((await session.scalars(
+            select(BotRun).order_by(BotRun.id.desc()).limit(3))).all())
+
+    lines = [f"🩺 <b>Здоровье бота</b>\n{esc(build_info().short())}"]
+    if runs:
+        current = runs[0]
+        uptime = dt.datetime.now(dt.UTC) - _aware(current.started_at)
+        unclean = sum(1 for run in runs[1:] if not run.clean_shutdown)
+        lines.append(f"Аптайм: <b>{human_duration(uptime)}</b>"
+                     + (f" · аварийных завершений подряд: {unclean}" if unclean else ""))
+    lines.append("\n<b>Сканеры</b>")
     statuses = ctx.engine.status()
     if not statuses:
         lines.append("  ⛔️ ни один сканер не запущен — проверьте настройки сетей")

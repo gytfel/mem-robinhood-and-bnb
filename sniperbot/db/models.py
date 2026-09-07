@@ -78,6 +78,7 @@ class User(Base):
     notify_deposits: Mapped[bool] = mapped_column(Boolean, default=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=False)      # бумажная торговля
     notify_level: Mapped[str] = mapped_column(String(16), default="all")
+    notify_restart: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -310,3 +311,19 @@ class ScannerState(Base):
     factory: Mapped[str] = mapped_column(String(42))
     last_block: Mapped[int] = mapped_column(BigInteger, default=0)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class BotRun(Base):
+    """История запусков бота — чтобы понимать, обновился он или просто упал."""
+
+    __tablename__ = "bot_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    stopped_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[str] = mapped_column(String(32), default="")
+    commit: Mapped[str] = mapped_column(String(32), default="")
+    branch: Mapped[str] = mapped_column(String(64), default="")
+    build_date: Mapped[str] = mapped_column(String(32), default="")
+    clean_shutdown: Mapped[bool] = mapped_column(Boolean, default=False)
+    host: Mapped[str] = mapped_column(String(64), default="")

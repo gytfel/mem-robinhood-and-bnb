@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 
 from aiogram import F, Router
@@ -223,6 +224,36 @@ async def _delete(message: Message) -> None:
         await message.delete()
     except Exception as exc:  # noqa: BLE001 - у бота может не быть прав
         log.debug("Не удалил сообщение с ключом: %s", exc)
+
+
+@router.message(Command("version"))
+async def cmd_version(message: Message, ctx: BotContext) -> None:
+    from sqlalchemy import select
+
+    from sniperbot.bot.startup import human_duration
+    from sniperbot.db.models import BotRun
+    from sniperbot.version import build_info
+
+    info = build_info()
+    lines = [f"🤖 <b>Сборка</b>\n{esc(info.short())}"]
+    if info.branch:
+        lines.append(f"Ветка: <code>{esc(info.branch)}</code>")
+
+    async with session_scope() as session:
+        runs = list((await session.scalars(
+            select(BotRun).order_by(BotRun.id.desc()).limit(5))).all())
+    if runs:
+        current = runs[0]
+        uptime = utcnow() - (current.started_at if current.started_at.tzinfo
+                             else current.started_at.replace(tzinfo=dt.UTC))
+        lines.append(f"Работает без перерыва: <b>{human_duration(uptime)}</b>")
+        lines.append("\n<b>Последние запуски</b>")
+        for run in runs:
+            mark = "▸" if run is current else "·"
+            status = "" if run.clean_shutdown or run is current else " ⚠️ аварийно"
+            lines.append(f"{mark} {run.started_at:%d.%m %H:%M} · "
+                         f"<code>{esc(run.commit or '—')}</code>{status}")
+    await reply(message, "\n".join(lines))
 
 
 # ----------------------------------------------------------------- сводка

@@ -18,3 +18,4 @@ data/
 *.log
 keys/
 backups/
+BUILD

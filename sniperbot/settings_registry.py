@@ -238,6 +238,8 @@ SETTINGS: tuple[Setting, ...] = (
             "ux", choices=("all", "trades", "errors")),
     Setting("deposits", "notify_deposits", "user", "bool", "Уведомления о пополнении",
             "Сообщать о приходе средств на кошелёк", "ux"),
+    Setting("restart", "notify_restart", "user", "bool", "Уведомления о перезапуске",
+            "Сообщать, когда бот перезапустился и обновился ли при этом код", "ux"),
 )
 
 BY_NAME = {setting.name: setting for setting in SETTINGS}

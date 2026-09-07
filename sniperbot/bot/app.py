@@ -14,16 +14,18 @@ from aiogram.types import BotCommand, ErrorEvent
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.handlers import build_router
 from sniperbot.bot.middlewares import AccessMiddleware, UserMiddleware
+from sniperbot.bot.startup import collect_stats, record_start, record_stop, render_restart
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import Settings, get_chains, get_settings
-from sniperbot.db.base import close_db, init_db
+from sniperbot.db.base import close_db, init_db, session_scope
 from sniperbot.notify import TelegramNotifier
 from sniperbot.security.keyvault import KeyVault
 from sniperbot.sniper.deposits import DepositWatcher
 from sniperbot.sniper.engine import SniperEngine
 from sniperbot.sniper.executor import Trader
 from sniperbot.sniper.positions import PositionMonitor
+from sniperbot.version import build_info
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +53,30 @@ COMMANDS = [
     BotCommand(command="withdraw", description="Вывод средств"),
     BotCommand(command="history", description="История сделок"),
     BotCommand(command="chain", description="Переключить сеть"),
+    BotCommand(command="version", description="Версия и перезапуски"),
     BotCommand(command="help", description="Помощь"),
 ]
+
+
+async def announce_restart(ctx: BotContext, text: str) -> None:
+    """Рассылает сообщение о перезапуске тем, кто должен о нём знать."""
+    from sniperbot.db import repo
+
+    admins = ctx.settings.admin_ids
+    async with session_scope() as session:
+        users = await repo.all_users(session, with_wallet=False)
+
+    # Есть админы — пишем им; иначе это личный бот, и знать должен владелец.
+    recipients = [user for user in users if user.id in admins] if admins else users
+    sent = 0
+    for user in recipients:
+        if not getattr(user, "notify_restart", True):
+            continue
+        await ctx.notifier.send(user.id, text)
+        sent += 1
+    if not sent:
+        log.info("Уведомление о перезапуске никому не отправлено "
+                 "(нет получателей или отключено настройкой)")
 
 
 def build_registry(settings: Settings) -> ChainRegistry:
@@ -113,13 +137,21 @@ async def run_bot() -> None:
     ]
     engine.start()
 
+    report = await record_start(build_info())
+    log.info("Сборка: %s (%s)", report.info.short(), report.info.source)
+
     try:
         await bot.set_my_commands(COMMANDS)
         me = await bot.get_me()
         log.info("Бот @%s запущен", me.username)
+
+        report.stats = await collect_stats(registry, ctx.active_chain_keys)
+        await announce_restart(ctx, render_restart(report))
+
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         log.info("Останавливаюсь…")
+        await record_stop(report.run_id)
         monitor.stop()
         deposits.stop()
         await engine.stop()

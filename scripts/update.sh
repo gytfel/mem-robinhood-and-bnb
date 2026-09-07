@@ -10,6 +10,19 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "запустите через sudo" >&2; exit 1; }
 
+write_build_stamp() {
+    # Отпечаток сборки: в /opt каталога .git нет, поэтому версию фиксируем здесь.
+    local commit date branch
+    commit="$(git -C "$SRC_DIR" rev-parse --short=8 HEAD 2>/dev/null || true)"
+    [ -n "$commit" ] || return 0
+    date="$(git -C "$SRC_DIR" log -1 --format=%cd --date=format:'%d.%m %H:%M' 2>/dev/null || true)"
+    branch="$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    printf '{"version":"1.0.0","commit":"%s","date":"%s","branch":"%s"}\n' \
+        "$commit" "$date" "$branch" > "$SRC_DIR/BUILD"
+}
+
+write_build_stamp
+
 echo "==> Резервная копия базы"
 bash "$SRC_DIR/scripts/backup.sh" || true
 

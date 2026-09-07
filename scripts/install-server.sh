@@ -29,6 +29,20 @@ if ! id -u "$APP_USER" >/dev/null 2>&1; then
     useradd --system --create-home --home-dir "/home/$APP_USER" --shell /usr/sbin/nologin "$APP_USER"
 fi
 
+
+write_build_stamp() {
+    # Отпечаток сборки: в /opt каталога .git нет, поэтому версию фиксируем здесь.
+    local commit date branch
+    commit="$(git -C "$SRC_DIR" rev-parse --short=8 HEAD 2>/dev/null || true)"
+    [ -n "$commit" ] || return 0
+    date="$(git -C "$SRC_DIR" log -1 --format=%cd --date=format:'%d.%m %H:%M' 2>/dev/null || true)"
+    branch="$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    printf '{"version":"1.0.0","commit":"%s","date":"%s","branch":"%s"}\n' \
+        "$commit" "$date" "$branch" > "$SRC_DIR/BUILD"
+}
+
+write_build_stamp
+
 say "Копирую код в $APP_DIR"
 mkdir -p "$APP_DIR"
 if [ "$SRC_DIR" != "$APP_DIR" ]; then
