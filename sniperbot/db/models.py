@@ -208,6 +208,7 @@ class Position(Base):
     ab_group: Mapped[str] = mapped_column(String(1), default="")      # A | B при включённом тесте
     buy_tx: Mapped[str | None] = mapped_column(String(80))
     sell_tx: Mapped[str | None] = mapped_column(String(80))
+    exit_reason: Mapped[str] = mapped_column(String(24), default="")   # почему закрыли позицию
     error: Mapped[str | None] = mapped_column(Text)
 
     # снимок правил выхода на момент покупки

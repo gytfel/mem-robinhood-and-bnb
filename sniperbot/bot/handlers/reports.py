@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import csv
 import datetime as dt
-import io
 import logging
 from collections import Counter
 from decimal import Decimal
@@ -18,6 +16,7 @@ from sniperbot.bot.ui import reply
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import User
+from sniperbot.reports import render_report, render_summary, summarize, to_rows, trades_csv
 from sniperbot.utils.evm import extract_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 
@@ -37,7 +36,9 @@ def _days_arg(args: str | None, default: int = 7) -> tuple[int, bool]:
 
 
 @router.message(Command("pnl"))
-async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, user: User) -> None:
+async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, user: User,
+                  chain) -> None:
+    """Отчёт по одному режиму: боевому или тестовому."""
     days, paper = _days_arg(command.args, default=7)
     since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
 
@@ -45,53 +46,62 @@ async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, use
         positions = await repo.closed_between(session, user.id, since, paper=paper)
         open_positions = await repo.open_positions(session, user_id=user.id)
 
-    title = "🧪 Бумажные сделки" if paper else "💰 Реальные сделки"
-    if not positions:
-        await reply(message, f"{title} за {days} дн.: сделок не было.")
+    label = "🧪 Тестовые сделки" if paper else "💰 Реальные сделки"
+    summary = summarize(positions, label, chain.native_decimals)
+    if not summary.count:
+        await reply(message, f"{label} за {days} дн.: сделок не было.")
         return
 
-    spent = sum(p.native_spent_wei for p in positions)
-    returned = sum(p.native_returned_wei for p in positions)
-    net = returned - spent
-    wins = [p for p in positions if p.native_returned_wei > p.native_spent_wei]
-    best = max(positions, key=lambda p: p.native_returned_wei - p.native_spent_wei)
-    worst = min(positions, key=lambda p: p.native_returned_wei - p.native_spent_wei)
-    pct = (Decimal(net) / Decimal(spent) * 100) if spent else Decimal(0)
-    icon = "🟢" if net >= 0 else "🔴"
-
-    lines = [
-        f"{title} за {days} дн.\n",
-        f"Сделок: <b>{len(positions)}</b> · прибыльных: <b>{len(wins)}</b> "
-        f"({len(wins) * 100 // len(positions)}%)",
-        f"Вложено: {fmt_amount(from_wei(spent))} · возвращено: {fmt_amount(from_wei(returned))}",
-        f"{icon} Итог: <b>{fmt_amount(from_wei(net))}</b> ({pct:+.1f}%)",
-        f"Лучшая: {esc(best.token_symbol)} {fmt_amount(from_wei(best.native_returned_wei - best.native_spent_wei))}",
-        f"Худшая: {esc(worst.token_symbol)} {fmt_amount(from_wei(worst.native_returned_wei - worst.native_spent_wei))}",
-    ]
+    text = f"🧾 <b>Отчёт</b> за {days} дн.\n\n" + render_summary(summary, chain.native_symbol)
     if open_positions:
-        lines.append(f"\nОткрыто сейчас: {len(open_positions)} (в расчёт не входят)")
-    await reply(message, "\n".join(lines))
+        text += f"\n\nОткрытых позиций сейчас: <b>{len(open_positions)}</b> (/positions)"
+    await reply(message, text)
+    await _send_file(message, summary.rows, [], f"pnl-{'test-' if paper else ''}{dt.date.today()}",
+                     f"Сделки за {days} дн.")
 
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["закрыта", "сеть", "токен", "адрес", "площадка", "источник",
-                     "вложено", "возвращено", "pnl", "pnl_%"])
-    for position in positions:
-        position_spent = from_wei(position.native_spent_wei)
-        position_pnl = from_wei(position.native_returned_wei - position.native_spent_wei)
-        writer.writerow([
-            (position.closed_at or position.opened_at).strftime("%Y-%m-%d %H:%M"),
-            position.chain, position.token_symbol, position.token_address,
-            f"{position.dex_kind}{'/' + str(position.pool_fee) if position.pool_fee else ''}",
-            "тест" if position.is_paper else position.source,
-            f"{position_spent:.8f}", f"{from_wei(position.native_returned_wei):.8f}",
-            f"{position_pnl:.8f}",
-            f"{(position_pnl / position_spent * 100):.2f}" if position_spent else "",
-        ])
-    name = f"pnl-{'test-' if paper else ''}{dt.date.today()}.csv"
+
+@router.message(Command("report"))
+async def cmd_report(message: Message, command: CommandObject, ctx: BotContext, user: User,
+                     chain) -> None:
+    """Сводный отчёт: боевые и тестовые сделки рядом, плюс файл со всеми."""
+    raw = (command.args or "").strip()
+    days = int(raw) if raw.isdigit() else 30
+    days = max(1, min(365, days))
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+
+    async with session_scope() as session:
+        real_positions = await repo.closed_between(session, user.id, since, paper=False)
+        paper_positions = await repo.closed_between(session, user.id, since, paper=True)
+        open_positions = await repo.open_positions(session, user_id=user.id)
+
+    real = summarize(real_positions, "💰 Боевой режим", chain.native_decimals)
+    paper = summarize(paper_positions, "🧪 Тестовый режим", chain.native_decimals)
+
+    if not real.count and not paper.count:
+        await reply(
+            message,
+            f"🧾 Отчёт за {days} дн.: закрытых сделок нет.\n\n"
+            "Наберите статистику бесплатно: /dry включает тестовый режим, "
+            "сделки считаются по реальным котировкам без трат.",
+        )
+        return
+
+    await reply(message, render_report(real, paper, days, chain.native_symbol, len(open_positions)))
+    await _send_file(
+        message,
+        [*real.rows, *paper.rows],
+        to_rows(open_positions, chain.native_decimals),
+        f"сделки-{dt.date.today()}",
+        f"Все сделки за {days} дн. + открытые позиции",
+    )
+
+
+async def _send_file(message: Message, rows, open_rows, name: str, caption: str) -> None:
+    """CSV с разделителем «;» и запятой в числах — открывается Excel как есть."""
+    content = trades_csv(rows, open_rows)
     await message.answer_document(
-        BufferedInputFile(buffer.getvalue().encode("utf-8-sig"), filename=name),
-        caption=f"Сделки за {days} дн.",
+        BufferedInputFile(content.encode("utf-8-sig"), filename=f"{name}.csv"),
+        caption=caption,
     )
 
 

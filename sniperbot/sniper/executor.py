@@ -233,7 +233,7 @@ class Trader:
         percent = max(1, min(100, percent))
 
         if position.is_paper:
-            return await self._paper_sell(position, adapter, percent)
+            return await self._paper_sell(position, adapter, percent, reason)
 
         account = self.wallets.account(user)
         on_chain_balance = await balance_of(client, token_address, account.address)
@@ -320,6 +320,7 @@ class Trader:
                 stored.amount_wei = remaining
                 stored.native_returned_wei += received_native
                 stored.sell_tx = sent.tx_hash
+                stored.exit_reason = reason
                 if remaining == 0 or percent >= 100:
                     stored.status = "closed"
                     stored.closed_at = utcnow()
@@ -367,7 +368,8 @@ class Trader:
             dex=f"{adapter.name} ({pool.label})", tx_hash=None,
         )
 
-    async def _paper_sell(self, position: Position, adapter: DexAdapter, percent: int) -> TradeResult:
+    async def _paper_sell(self, position: Position, adapter: DexAdapter, percent: int,
+                          reason: str = "manual") -> TradeResult:
         """Продажа «на бумаге» по текущей котировке пула."""
         pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
                        fee=position.pool_fee or 0)
@@ -383,6 +385,7 @@ class Trader:
             if stored is not None:
                 stored.amount_wei = max(0, stored.amount_wei - amount)
                 stored.native_returned_wei += received
+                stored.exit_reason = reason
                 if stored.amount_wei == 0 or percent >= 100:
                     stored.status = "closed"
                     stored.closed_at = utcnow()
