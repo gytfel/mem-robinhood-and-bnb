@@ -2,7 +2,17 @@
 
 from aiogram import Router
 
-from sniperbot.bot.handlers import admin, common, control, positions, reports, settings, trade, wallet
+from sniperbot.bot.handlers import (
+    admin,
+    common,
+    control,
+    lab,
+    positions,
+    reports,
+    settings,
+    trade,
+    wallet,
+)
 
 
 def build_router() -> Router:
@@ -13,6 +23,7 @@ def build_router() -> Router:
     root.include_router(wallet.router)
     root.include_router(positions.router)
     root.include_router(reports.router)
+    root.include_router(lab.router)
     root.include_router(settings.router)
     root.include_router(admin.router)
     root.include_router(trade.router)

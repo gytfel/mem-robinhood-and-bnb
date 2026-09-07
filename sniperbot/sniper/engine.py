@@ -13,7 +13,9 @@ from sniperbot.chain.wallet import WalletService
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
+from sniperbot.db.models import Position
 from sniperbot.notify import Notifier
+from sniperbot.settings_registry import parse_variant, variant_overlay
 from sniperbot.sniper.executor import Trader
 from sniperbot.sniper.safety import analyze_token, evaluate_for_settings
 from sniperbot.sniper.scanner import PairEvent, PairScanner
@@ -22,6 +24,7 @@ from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr, to_wei
 log = logging.getLogger(__name__)
 
 MAX_PARALLEL_PAIRS = 4
+EARLY_BLOCKS = 3          # сколько блоков после листинга считать «первыми»
 MAX_SIM_AMOUNT = Decimal("0.05")  # верхняя граница суммы для симуляции налогов
 
 
@@ -129,6 +132,8 @@ class SniperEngine:
             pool=pool,
         )
 
+        await self._record_pair_details(client, event, report, pair_id)
+
         sniped = 0
         reject_reason = ""
         for user, cfg in subscribers:
@@ -149,7 +154,8 @@ class SniperEngine:
                 if avoid and owner in await repo.bad_owners(session, user.id, event.chain):
                     reject_reason = reject_reason or "владелец уже приводил к убытку"
                     continue
-            await self._snipe(user, cfg, event, report, (adapter, pool))
+            group, effective = await self._ab_variant(user.id, event.chain, cfg)
+            await self._snipe(user, effective, event, report, (adapter, pool), group)
             sniped += 1
 
         await self._mark(pair_id, "sniped" if sniped else "rejected", reject_reason or None)
@@ -202,7 +208,47 @@ class SniperEngine:
                     return f"{streak} убыточных сделок подряд — автоснайп на паузе, включите /on"
         return None
 
-    async def _snipe(self, user, cfg, event: PairEvent, report, venue) -> None:
+    async def _ab_variant(self, user_id: int, chain: str, cfg):
+        """Если включён A/B-тест, половина сделок идёт с изменёнными настройками."""
+        if not getattr(cfg, "ab_enabled", False):
+            return "", cfg
+        variant = parse_variant(getattr(cfg, "ab_variant", ""))
+        if not variant:
+            return "", cfg
+        async with session_scope() as session:
+            group = await repo.next_ab_group(session, user_id, chain)
+        return group, (variant_overlay(cfg, variant) if group == "B" else cfg)
+
+    async def _record_pair_details(self, client, event: PairEvent, report, pair_id) -> None:
+        """Дописывает в историю пулов то, что понадобится отчётам."""
+        swaps = await self._count_early_swaps(client, event)
+        async with session_scope() as session:
+            await repo.update_seen_pair(
+                session, pair_id,
+                token_symbol=(report.token.symbol or "")[:32],
+                token_name=(report.token.name or "")[:64],
+                token_owner=report.token.owner,
+                first_block_swaps=swaps,
+            )
+
+    async def _count_early_swaps(self, client, event: PairEvent) -> int:
+        """Сколько сделок прошло в пуле в первые блоки — мера конкуренции."""
+        from sniperbot.chain.abi import V2_SWAP_TOPIC, V3_SWAP_TOPIC
+
+        topic = V3_SWAP_TOPIC if event.kind == "v3" else V2_SWAP_TOPIC
+        try:
+            logs = await client.get_logs({
+                "fromBlock": event.block,
+                "toBlock": event.block + EARLY_BLOCKS,
+                "address": event.pair,
+                "topics": [topic],
+            })
+        except Exception as exc:  # noqa: BLE001 - это статистика, а не торговля
+            log.debug("Не смог посчитать ранние свапы %s: %s", event.pair, exc)
+            return -1
+        return len(logs)
+
+    async def _snipe(self, user, cfg, event: PairEvent, report, venue, group: str = "") -> None:
         chain = self.registry.config(event.chain)
         symbol = esc(report.token.symbol)
         await self.notifier.send(
@@ -218,6 +264,11 @@ class SniperEngine:
             user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source="auto",
             pair_address=event.pair, venue=venue,
         )
+        if group and result.ok and result.position_id:
+            async with session_scope() as session:
+                position = await session.get(Position, result.position_id)
+                if position is not None:
+                    position.ab_group = group
         if result.ok:
             await self.notifier.send(
                 user.id,

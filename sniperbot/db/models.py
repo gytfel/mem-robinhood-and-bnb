@@ -152,6 +152,10 @@ class ChainSettings(Base):
     exit_slippage_bps: Mapped[int] = mapped_column(Integer, default=3_000)
     pre_approve: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # --- A/B-тест настроек ---
+    ab_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    ab_variant: Mapped[str] = mapped_column(Text, default="")   # JSON с изменёнными настройками
+
     # --- служебное ---
     last_native_balance: Mapped[int] = mapped_column(Wei, default=0)
     deposit_synced: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -201,6 +205,7 @@ class Position(Base):
     status: Mapped[str] = mapped_column(String(16), default="open")   # open | closed | failed
     source: Mapped[str] = mapped_column(String(16), default="manual") # manual | auto
     is_paper: Mapped[bool] = mapped_column(Boolean, default=False)    # сделка в тестовом режиме
+    ab_group: Mapped[str] = mapped_column(String(1), default="")      # A | B при включённом тесте
     buy_tx: Mapped[str | None] = mapped_column(String(80))
     sell_tx: Mapped[str | None] = mapped_column(String(80))
     error: Mapped[str | None] = mapped_column(Text)
@@ -265,6 +270,10 @@ class SeenPair(Base):
     dex_kind: Mapped[str] = mapped_column(String(8), default="v2")
     pool_fee: Mapped[int] = mapped_column(Integer, default=0)
     block_number: Mapped[int] = mapped_column(BigInteger, default=0)
+    token_symbol: Mapped[str] = mapped_column(String(32), default="")
+    token_name: Mapped[str] = mapped_column(String(64), default="")
+    token_owner: Mapped[str | None] = mapped_column(String(42))
+    first_block_swaps: Mapped[int] = mapped_column(Integer, default=-1)  # -1 = не измеряли
     status: Mapped[str] = mapped_column(String(16), default="new")  # new|checked|rejected|sniped
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

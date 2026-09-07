@@ -320,6 +320,57 @@ def effective_gas_multiplier(cfg) -> Decimal:
     return Decimal(bps) / 10_000
 
 
+class VariantOverlay:
+    """Настройки варианта B поверх основных: читается как обычный объект настроек."""
+
+    __slots__ = ("_base", "_overrides")
+
+    def __init__(self, base, overrides: dict) -> None:
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._base, name)
+
+
+def parse_variant(raw: str | None) -> dict:
+    """Разбирает JSON варианта из БД, отбрасывая мусор."""
+    import json
+
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return {str(k): v for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def variant_overlay(cfg, variant: dict):
+    """Возвращает cfg с применёнными настройками варианта (или сам cfg)."""
+    overrides = {}
+    for name, raw in variant.items():
+        setting = find(name)
+        if setting is None or setting.scope != "chain":
+            continue
+        try:
+            overrides[setting.field] = setting.parse(str(raw))
+        except ValueError:
+            continue
+    return VariantOverlay(cfg, overrides) if overrides else cfg
+
+
+def describe_variant(variant: dict) -> str:
+    parts = []
+    for name, raw in variant.items():
+        setting = find(name)
+        title = setting.title if setting else name
+        parts.append(f"{title} = {raw}")
+    return "; ".join(parts) if parts else "пусто"
+
+
 def apply_value(name: str, raw: str, cfg, user=None) -> tuple[Setting, object]:
     """Разбирает и записывает значение. Бросает ValueError с текстом для пользователя."""
     setting = find(name)

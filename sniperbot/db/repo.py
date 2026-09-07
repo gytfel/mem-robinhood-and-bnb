@@ -373,3 +373,96 @@ async def bad_owners(session: AsyncSession, user_id: int, chain: str, limit: int
             continue
         totals[owner] = totals.get(owner, 0) + (position.native_returned_wei - position.native_spent_wei)
     return {owner for owner, pnl in totals.items() if pnl < 0}
+
+
+async def update_seen_pair(session: AsyncSession, pair_id: int | None, **values) -> None:
+    """Дополняет запись о пуле данными, которые стали известны после анализа."""
+    if pair_id is None:
+        return
+    await session.execute(update(SeenPair).where(SeenPair.id == pair_id).values(**values))
+
+
+async def creator_stats(
+    session: AsyncSession, user_id: int, chain: str | None = None, limit: int = 300
+) -> list[dict]:
+    """Сводка по владельцам токенов: сколько сделок и с каким результатом."""
+    stmt = (
+        select(Position)
+        .where(
+            Position.user_id == user_id,
+            Position.status == "closed",
+            Position.token_owner.is_not(None),
+        )
+        .order_by(Position.closed_at.desc().nullslast())
+        .limit(limit)
+    )
+    if chain:
+        stmt = stmt.where(Position.chain == chain)
+
+    buckets: dict[str, dict] = {}
+    for position in (await session.scalars(stmt)).all():
+        owner = (position.token_owner or "").lower()
+        if not owner:
+            continue
+        bucket = buckets.setdefault(owner, {"owner": owner, "trades": 0, "wins": 0,
+                                            "pnl": 0, "symbols": []})
+        pnl = position.native_returned_wei - position.native_spent_wei
+        bucket["trades"] += 1
+        bucket["pnl"] += pnl
+        bucket["wins"] += 1 if pnl > 0 else 0
+        if position.token_symbol and position.token_symbol not in bucket["symbols"]:
+            bucket["symbols"].append(position.token_symbol)
+    return sorted(buckets.values(), key=lambda item: item["pnl"])
+
+
+async def ab_stats(session: AsyncSession, user_id: int, chain: str, since: dt.datetime) -> dict:
+    """Результаты A/B-теста по группам."""
+    stmt = select(Position).where(
+        Position.user_id == user_id,
+        Position.chain == chain,
+        Position.status == "closed",
+        Position.closed_at >= since,
+        Position.ab_group.in_(["A", "B"]),
+    )
+    groups: dict[str, dict] = {
+        "A": {"trades": 0, "wins": 0, "pnl": 0, "spent": 0},
+        "B": {"trades": 0, "wins": 0, "pnl": 0, "spent": 0},
+    }
+    for position in (await session.scalars(stmt)).all():
+        bucket = groups[position.ab_group]
+        pnl = position.native_returned_wei - position.native_spent_wei
+        bucket["trades"] += 1
+        bucket["pnl"] += pnl
+        bucket["spent"] += position.native_spent_wei
+        bucket["wins"] += 1 if pnl > 0 else 0
+    return groups
+
+
+async def next_ab_group(session: AsyncSession, user_id: int, chain: str) -> str:
+    """Чередует группы, чтобы сделок в A и B было примерно поровну."""
+    stmt = (
+        select(func.count())
+        .select_from(Position)
+        .where(Position.user_id == user_id, Position.chain == chain,
+               Position.ab_group.in_(["A", "B"]))
+    )
+    return "B" if int(await session.scalar(stmt) or 0) % 2 else "A"
+
+
+async def failed_trades(session: AsyncSession, user_id: int, since: dt.datetime,
+                        kind: str = "buy") -> tuple[int, int]:
+    """Сколько сделок прошло и сколько сорвалось — для советов по газу."""
+    stmt = select(TradeLog).where(
+        TradeLog.user_id == user_id, TradeLog.kind == kind, TradeLog.created_at >= since
+    )
+    rows = list((await session.scalars(stmt)).all())
+    failed = sum(1 for row in rows if row.status == "failed")
+    return len(rows), failed
+
+
+async def recent_trades(session: AsyncSession, user_id: int | None = None,
+                        limit: int = 20) -> list[TradeLog]:
+    stmt = select(TradeLog).order_by(TradeLog.id.desc()).limit(limit)
+    if user_id is not None:
+        stmt = stmt.where(TradeLog.user_id == user_id)
+    return list((await session.scalars(stmt)).all())

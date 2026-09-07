@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import signal
 import time
 from pathlib import Path
 
@@ -249,6 +250,59 @@ async def cmd_broadcast(message: Message, command: CommandObject, ctx: BotContex
         sent += 1
         await asyncio.sleep(0.05)      # ~20 сообщений в секунду — лимит Telegram
     await status.edit_text(f"📢 Отправлено: {sent} из {len(users)}", parse_mode="HTML")
+
+
+@router.message(Command("logs"))
+async def cmd_logs(message: Message, command: CommandObject, ctx: BotContext,
+                   is_admin: bool = False) -> None:
+    if _deny(is_admin):
+        return
+    limit = int(command.args) if (command.args or "").strip().isdigit() else 15
+    async with session_scope() as session:
+        trades = await repo.recent_trades(session, limit=max(1, min(50, limit)))
+
+    if not trades:
+        await reply(message, "🧾 Сделок в журнале пока нет.")
+        return
+
+    lines = ["🧾 <b>Журнал операций</b>\n"]
+    for trade in trades:
+        icon = {"success": "✅", "failed": "⛔️"}.get(trade.status, "⏳")
+        chain = ctx.chain(trade.chain) if trade.chain in ctx.registry.configs else None
+        link = f"<a href='{chain.tx_url(trade.tx_hash)}'>tx</a>" if chain and trade.tx_hash else ""
+        error = f" — {esc(trade.error[:60])}" if trade.error else ""
+        lines.append(
+            f"{icon} {trade.created_at:%d.%m %H:%M} · {trade.kind} · "
+            f"user {trade.user_id} · {esc((trade.token_address or '')[:10])} {link}{error}"
+        )
+    await reply(message, "\n".join(lines))
+
+
+@router.message(Command("restart"))
+async def cmd_restart(message: Message, command: CommandObject, ctx: BotContext,
+                      is_admin: bool = False) -> None:
+    if _deny(is_admin):
+        return
+    if (command.args or "").strip().lower() not in {"confirm", "да", "now"}:
+        await reply(
+            message,
+            "♻️ <b>Перезапуск процесса</b>\n\n"
+            "Бот корректно завершится, а systemd (или Docker) поднимет его заново — "
+            "придёт обычное уведомление о старте. Открытые позиции сохранятся, "
+            "но пока сервис перезапускается, автоснайп и стопы не работают.\n\n"
+            "Подтвердить: <code>/restart confirm</code>\n\n"
+            "<i>Если бот запущен вручную из терминала, он просто выключится.</i>",
+        )
+        return
+
+    await reply(message, "♻️ Останавливаюсь. Если настроен автозапуск — вернусь через несколько секунд.")
+    log.warning("Перезапуск по команде администратора %s", message.from_user.id)
+
+    async def _shutdown() -> None:
+        await asyncio.sleep(1)          # даём сообщению уйти
+        signal.raise_signal(signal.SIGTERM)
+
+    asyncio.create_task(_shutdown())
 
 
 def _single_rpc(chain: ChainConfig, url: str) -> ChainConfig:

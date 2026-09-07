@@ -7,6 +7,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from sniperbot.bot.context import BotContext
@@ -224,6 +225,29 @@ async def _delete(message: Message) -> None:
         await message.delete()
     except Exception as exc:  # noqa: BLE001 - у бота может не быть прав
         log.debug("Не удалил сообщение с ключом: %s", exc)
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    """Сбрасывает ожидание ввода — на случай, если бот «завис» на вопросе."""
+    was_waiting = await state.get_state() is not None
+    await state.clear()
+    await reply(
+        message,
+        "❌ Ввод отменён." if was_waiting else "Нечего отменять — бот ничего не ждёт.",
+    )
+
+
+@router.message(Command("id"))
+async def cmd_id(message: Message, user: User, is_admin: bool = False) -> None:
+    """Свой Telegram ID — его вписывают в ADMIN_IDS и ALLOWED_USER_IDS."""
+    await reply(
+        message,
+        f"🪪 Ваш Telegram ID: <code>{user.id}</code>\n"
+        f"Права администратора: {'есть' if is_admin else 'нет'}\n\n"
+        "Этот ID вписывается в <code>ADMIN_IDS</code> и <code>ALLOWED_USER_IDS</code> файла .env.",
+    )
+
 
 
 @router.message(Command("version"))

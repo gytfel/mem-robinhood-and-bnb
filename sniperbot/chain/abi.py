@@ -199,3 +199,9 @@ WETH_ABI = [
 
 # keccak256("PoolCreated(address,address,uint24,int24,address)")
 POOL_CREATED_TOPIC = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
+
+
+# keccak256("Swap(address,uint256,uint256,uint256,uint256,address)") — Uniswap V2
+V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+# keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)") — Uniswap V3
+V3_SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
