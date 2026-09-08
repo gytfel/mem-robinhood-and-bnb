@@ -185,3 +185,37 @@ def test_fast_window_can_be_disabled():
     from sniperbot.sniper.positions import check_interval
 
     assert check_interval(0.0, 1.5, 6.0, 0.0) == 6.0       # окно выключено
+
+
+# ------------------------------------------ взаимодействие лестницы и трейлинга
+def test_trailing_guards_the_remainder_after_ladder_steps():
+    """После ступеней остаток защищён только входом — трейлинг закрывает разрыв."""
+    pos = position(tp_ladder="50:40,150:30", tp_done="50,150", take_profit_pct=0,
+                   trailing_stop_pct=40, breakeven_armed=True,
+                   amount_wei=to_wei(30), bought_wei=to_wei(100))
+
+    # цена ушла на +500% и откатилась до +100%: откат 66% от максимума
+    rule, percent, _ = decide_exit(pos, ctx(100, peak_change=500, price=2.0, peak_price=6.0))
+    assert rule.key == "trailing"
+    assert percent == 100
+
+
+def test_tight_trailing_fires_on_a_dip_between_ladder_steps():
+    """Узкий трейлинг закрывает позицию на обычном провале — это цена тесной настройки."""
+    pos = position(tp_ladder="50:40,150:30,400:20", tp_done="50", take_profit_pct=0,
+                   trailing_stop_pct=25, breakeven_armed=True)
+
+    # после первой ступени цена просела с +50% до +8%: откат 28% > 25%
+    tight, _, _ = decide_exit(pos, ctx(8, peak_change=50, price=1.08, peak_price=1.5))
+    assert tight.key == "trailing"
+
+    # тот же провал при широком трейлинге позицию не трогает
+    pos.trailing_stop_pct = 40
+    wide, _, _ = decide_exit(pos, ctx(8, peak_change=50, price=1.08, peak_price=1.5))
+    assert wide is None
+
+
+def test_trailing_never_touches_a_losing_position():
+    """В минусе трейлинг молчит: там работает стоп-лосс."""
+    pos = position(take_profit_pct=0, stop_loss_pct=0, trailing_stop_pct=20)
+    assert decide_exit(pos, ctx(-50, peak_change=80, price=0.5, peak_price=1.8))[0] is None
