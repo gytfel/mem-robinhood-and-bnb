@@ -17,7 +17,14 @@ from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, User
-from sniperbot.settings_registry import GROUPS, SETTINGS, by_group, find
+from sniperbot.settings_registry import (
+    GROUPS,
+    SETTINGS,
+    find,
+    render_compact,
+    render_full,
+    render_one,
+)
 from sniperbot.utils.fmt import esc
 
 log = logging.getLogger(__name__)
@@ -72,29 +79,44 @@ async def _show_group(callback: CallbackQuery, group: str, cfg: ChainSettings,
 @router.message(Command("config"))
 async def cmd_config(message: Message, command: CommandObject, cfg: ChainSettings,
                      chain: ChainConfig, user: User) -> None:
-    raw = (command.args or "").strip().lower() == "all"
+    """Показывает настройки: кратко, подробно, по группе или по одной."""
+    arg = (command.args or "").strip().lower()
     native = chain.native_symbol
-    if raw:
-        lines = [f"<b>Настройки</b> — {esc(chain.name)}\n<pre>"]
-        for setting in SETTINGS:
-            lines.append(f"{setting.name:<10} {setting.display(cfg, user, native)}")
-        lines.append("</pre>")
-        await reply(message, "\n".join(lines))
+    header = f"⚙️ <b>Настройки</b> — {esc(chain.name)}"
+
+    if arg == "all":                       # сырой список для копирования
+        rows = "\n".join(f"{setting.name:<12} {setting.display(cfg, user, native)}"
+                          for setting in SETTINGS)
+        await reply(message, f"{header}\n<pre>{rows}</pre>")
         return
 
-    lines = [f"⚙️ <b>Настройки</b> — {esc(chain.name)}\n"]
-    for group, title in GROUPS.items():
-        items = by_group().get(group, [])
-        if not items:
-            continue
-        lines.append(f"\n<b>{title}</b>")
-        for setting in items:
-            lines.append(
-                f"<code>{setting.name}</code> = <b>{esc(setting.display(cfg, user, native))}</b>"
-                f"\n    <i>{esc(setting.hint)}</i>"
-            )
-    lines.append("\nИзменить: <code>/set имя значение</code>, например <code>/set tp 150</code>")
-    await reply(message, "\n".join(lines), settings_menu(cfg, native, user))
+    if arg in GROUPS:                      # одна группа с пояснениями
+        await reply(message, f"{header}\n{render_full(cfg, user, native, group=arg)}",
+                    group_menu(arg, cfg, native, user))
+        return
+
+    if arg in {"full", "полностью", "все", "всё"}:
+        await reply(message, f"{header}\n{render_full(cfg, user, native)}")
+        return
+
+    if arg:                                # карточка одной настройки
+        setting = find(arg)
+        if setting is None:
+            await reply(message, f"❌ Настройки «{esc(arg)}» нет. Полный список: /config")
+            return
+        await reply(message, render_one(setting, cfg, user, native))
+        return
+
+    groups = " · ".join(f"<code>/config {key}</code>" for key in GROUPS)
+    await reply(
+        message,
+        f"{header}\n{render_compact(cfg, user, native)}\n\n"
+        f"Всего настроек: {len(SETTINGS)}\n"
+        f"Подробно: <code>/config full</code> · по одной: <code>/config tp</code>\n"
+        f"По группам: {groups}\n"
+        f"Изменить: <code>/set имя значение</code>",
+        settings_menu(cfg, native, user),
+    )
 
 
 @router.message(Command("set"))

@@ -113,3 +113,82 @@ def test_groups_cover_all_settings():
     grouped = by_group()
     assert sum(len(items) for items in grouped.values()) == len(SETTINGS)
     assert {"trade", "exits", "filters", "risk", "ux"} <= set(grouped)
+
+
+# ------------------------------------------------------ показ настроек в боте
+def filled_cfg() -> tuple[ChainSettings, User]:
+    from decimal import Decimal as D
+
+    cfg, user = make_cfg(), User(id=1)
+    for setting in SETTINGS:
+        if setting.kind == "bool":
+            setting.write(True, cfg, user)
+        elif setting.kind == "choice":
+            setting.write(setting.choices[0], cfg, user)
+        elif setting.kind == "ladder":
+            setting.write("100:50", cfg, user)
+        elif setting.kind == "decimal":
+            setting.write(D("0.01"), cfg, user)
+        else:
+            setting.write(50, cfg, user)
+    return cfg, user
+
+
+def test_compact_view_shows_every_setting_and_fits_one_message():
+    from sniperbot.bot.ui import TELEGRAM_LIMIT
+    from sniperbot.settings_registry import render_compact
+
+    cfg, user = filled_cfg()
+    text = render_compact(cfg, user, "BNB")
+
+    assert len(text) < TELEGRAM_LIMIT           # краткий экран влезает целиком
+    for setting in SETTINGS:
+        assert f"<code>{setting.name}</code>" in text
+
+
+def test_full_view_includes_hints():
+    from sniperbot.settings_registry import render_full
+
+    cfg, user = filled_cfg()
+    text = render_full(cfg, user, "BNB")
+    for setting in SETTINGS:
+        assert setting.title in text
+        if setting.hint:
+            assert setting.hint.split(".")[0][:40] in text
+
+
+def test_group_view_shows_only_its_group():
+    from sniperbot.settings_registry import render_full
+
+    cfg, user = filled_cfg()
+    text = render_full(cfg, user, "BNB", group="filters")
+    assert "<code>minliq</code>" in text
+    assert "<code>tp</code>" not in text        # выходы сюда не попадают
+
+
+def test_single_setting_card_explains_limits():
+    from sniperbot.settings_registry import find, render_one
+
+    cfg, user = filled_cfg()
+    card = render_one(find("sl"), cfg, user, "BNB")
+    assert "Стоп-лосс" in card
+    assert "Сейчас:" in card
+    assert "0–99" in card
+    assert "/set sl" in card
+
+
+def test_ladder_card_shows_example_and_off_switch():
+    from sniperbot.settings_registry import find, render_one
+
+    cfg, user = filled_cfg()
+    card = render_one(find("ladder"), cfg, user, "BNB")
+    assert "100:50" in card
+    assert "off" in card
+
+
+def test_user_scoped_setting_says_it_is_global():
+    from sniperbot.settings_registry import find, render_one
+
+    cfg, user = filled_cfg()
+    assert "общая для всех сетей" in render_one(find("dry"), cfg, user, "BNB")
+    assert "своя для каждой сети" in render_one(find("buy"), cfg, user, "BNB")

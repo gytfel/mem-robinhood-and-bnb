@@ -371,6 +371,64 @@ def describe_variant(variant: dict) -> str:
     return "; ".join(parts) if parts else "пусто"
 
 
+def render_compact(cfg, user=None, native: str = "") -> str:
+    """Все настройки одним экраном: только имена и значения."""
+    lines = []
+    grouped = by_group()
+    for group, title in GROUPS.items():
+        items = grouped.get(group, [])
+        if not items:
+            continue
+        lines.append(f"\n<b>{title}</b>")
+        for setting in items:
+            lines.append(f"<code>{setting.name}</code> — {setting.display(cfg, user, native)}")
+    return "\n".join(lines).strip()
+
+
+def render_full(cfg, user=None, native: str = "", group: str | None = None) -> str:
+    """То же, но с пояснением к каждой настройке."""
+    lines = []
+    grouped = by_group()
+    for key, title in GROUPS.items():
+        if group and key != group:
+            continue
+        items = grouped.get(key, [])
+        if not items:
+            continue
+        lines.append(f"\n<b>{title}</b>")
+        for setting in items:
+            lines.append(
+                f"<code>{setting.name}</code> · {setting.title}: "
+                f"<b>{setting.display(cfg, user, native)}</b>\n    <i>{setting.hint}</i>"
+            )
+    return "\n".join(lines).strip()
+
+
+def render_one(setting: Setting, cfg, user=None, native: str = "") -> str:
+    """Карточка одной настройки: что это, сколько сейчас и что можно ставить."""
+    if setting.kind == "bool":
+        allowed = "on / off"
+    elif setting.kind == "choice":
+        allowed = " · ".join(f"<code>{choice}</code>" for choice in setting.choices)
+    elif setting.kind == "ladder":
+        allowed = "например <code>100:50,300:30</code> · <code>off</code> — выключить"
+    else:
+        bounds = [str(setting.minimum) if setting.minimum is not None else "",
+                  str(setting.maximum) if setting.maximum is not None else ""]
+        unit = setting.unit or (native if setting.kind == "decimal" else "")
+        allowed = f"{'–'.join(b for b in bounds if b)} {unit}".strip() or "любое число"
+
+    scope = "общая для всех сетей" if setting.scope == "user" else "своя для каждой сети"
+    return (
+        f"⚙️ <b>{setting.title}</b>\n"
+        f"<i>{setting.hint}</i>\n\n"
+        f"Сейчас: <b>{setting.display(cfg, user, native)}</b>\n"
+        f"Допустимо: {allowed}\n"
+        f"Область: {scope}\n\n"
+        f"Изменить: <code>/set {setting.name} значение</code>"
+    )
+
+
 def apply_value(name: str, raw: str, cfg, user=None) -> tuple[Setting, object]:
     """Разбирает и записывает значение. Бросает ValueError с текстом для пользователя."""
     setting = find(name)
