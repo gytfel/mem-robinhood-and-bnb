@@ -32,6 +32,20 @@ log = logging.getLogger(__name__)
 MAX_QUOTE_FAILURES = 20
 
 
+def check_interval(age_minutes: float, fast_interval: float, normal_interval: float,
+                   fast_window_minutes: float) -> float:
+    """Как часто проверять позицию.
+
+    Основные потери случаются в первые минуты жизни токена: цена успевает
+    сложиться в разы между двумя редкими проверками, и стоп-лосс исполняется
+    уже на дне. Поэтому свежие позиции опрашиваются часто, а старые — редко,
+    чтобы не жечь лимиты RPC.
+    """
+    if fast_window_minutes > 0 and age_minutes <= fast_window_minutes:
+        return fast_interval
+    return normal_interval
+
+
 @dataclass(slots=True)
 class Rule:
     key: str
@@ -131,10 +145,16 @@ class PositionMonitor:
         self.settings = settings
         self._running = False
         self._failures: dict[int, int] = {}
+        self._last_check: dict[int, float] = {}
 
     async def run(self) -> None:
         self._running = True
-        log.info("Монитор позиций запущен (интервал %.1f c)", self.settings.position_poll_interval)
+        log.info(
+            "Монитор позиций запущен: свежие каждые %.1f c (%.0f мин), остальные каждые %.1f c",
+            self.settings.fast_poll_interval, self.settings.fast_watch_minutes,
+            self.settings.position_poll_interval,
+        )
+        step = min(self.settings.fast_poll_interval, self.settings.position_poll_interval)
         while self._running:
             try:
                 await self.tick()
@@ -142,7 +162,7 @@ class PositionMonitor:
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.exception("Монитор позиций: %s", exc)
-            await asyncio.sleep(self.settings.position_poll_interval)
+            await asyncio.sleep(step)
 
     def stop(self) -> None:
         self._running = False
@@ -150,13 +170,31 @@ class PositionMonitor:
     async def tick(self) -> None:
         async with session_scope() as session:
             positions = await repo.open_positions(session)
+
+        now = asyncio.get_running_loop().time()
+        alive = {position.id for position in positions}
+        self._last_check = {key: value for key, value in self._last_check.items() if key in alive}
+
+        due = []
         for position in positions:
-            try:
-                await self.check_position(position)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                log.debug("Позиция #%s: %s", position.id, exc)
+            age = (dt.datetime.now(dt.UTC) - _aware(position.opened_at)).total_seconds() / 60
+            interval = check_interval(
+                age, self.settings.fast_poll_interval, self.settings.position_poll_interval,
+                self.settings.fast_watch_minutes,
+            )
+            if now - self._last_check.get(position.id, 0.0) >= interval:
+                self._last_check[position.id] = now
+                due.append(position)
+
+        # Свежие позиции проверяем разом: последовательный обход стоит секунд,
+        # а на молодом токене каждая секунда — это проценты цены.
+        results = await asyncio.gather(*(self.check_position(p) for p in due),
+                                       return_exceptions=True)
+        for position, result in zip(due, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
+                log.debug("Позиция #%s: %s", position.id, result)
 
     # --------------------------------------------------------------- оценка
     def _pool_of(self, position: Position) -> PoolRef:

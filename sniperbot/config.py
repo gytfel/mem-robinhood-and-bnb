@@ -165,6 +165,8 @@ class Settings(BaseSettings):
     scanner_liquidity_watch_minutes: int = Field(default=180, alias="SCANNER_LIQUIDITY_WATCH_MINUTES")
     scanner_watch_interval: float = Field(default=12.0, alias="SCANNER_WATCH_INTERVAL")
     position_poll_interval: float = Field(default=6.0, alias="POSITION_POLL_INTERVAL")
+    fast_poll_interval: float = Field(default=1.5, alias="FAST_POLL_INTERVAL")
+    fast_watch_minutes: float = Field(default=15.0, alias="FAST_WATCH_MINUTES")
     deposit_poll_interval: float = Field(default=30.0, alias="DEPOSIT_POLL_INTERVAL")
 
     service_fee_bps: int = Field(default=0, alias="SERVICE_FEE_BPS")

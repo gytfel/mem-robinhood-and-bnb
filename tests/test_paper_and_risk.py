@@ -346,3 +346,47 @@ async def test_watch_tick_processes_pair_once_liquidity_arrives(db, monkeypatch)
 
     async with session_scope() as session:
         assert (await session.get(SeenPair, row_id)).status == "checking"
+
+
+async def test_monitor_respects_per_position_intervals(db, monkeypatch):
+    """Старая позиция не должна опрашиваться в темпе свежей."""
+    import asyncio
+
+    from sniperbot.config import Settings
+    from sniperbot.sniper.positions import PositionMonitor
+
+    async with session_scope() as session:
+        await repo.get_or_create_user(session, 1)
+        session.add(Position(user_id=1, chain="bsc", token_address="0xFRESH", router_address="0x1",
+                             status="open", amount_wei=to_wei(1), native_spent_wei=to_wei("0.1"),
+                             entry_price=Decimal("0.1"), opened_at=utcnow()))
+        session.add(Position(user_id=1, chain="bsc", token_address="0xOLD", router_address="0x1",
+                             status="open", amount_wei=to_wei(1), native_spent_wei=to_wei("0.1"),
+                             entry_price=Decimal("0.1"),
+                             opened_at=utcnow() - dt.timedelta(hours=2)))
+
+    settings = Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32,
+                        FAST_POLL_INTERVAL=1.5, POSITION_POLL_INTERVAL=60.0,
+                        FAST_WATCH_MINUTES=15.0)
+    monitor = PositionMonitor(FakeRegistry(), make_trader(), None, settings)  # type: ignore[arg-type]
+
+    checked: list[str] = []
+
+    async def record(position):  # noqa: ANN001
+        checked.append(position.token_address)
+
+    monitor.check_position = record  # type: ignore[assignment]
+
+    await monitor.tick()
+    assert set(checked) == {"0xFRESH", "0xOLD"}      # первый проход проверяет всё
+
+    checked.clear()
+    await monitor.tick()                             # сразу следом — никого
+    assert checked == []
+
+    # сдвигаем внутренние часы на 2 секунды: свежая позиция снова готова, старая нет
+    loop_time = asyncio.get_running_loop().time()
+    monitor._last_check = {key: value - 2.0 for key, value in monitor._last_check.items()}
+    assert loop_time > 0
+    await monitor.tick()
+    assert checked == ["0xFRESH"]

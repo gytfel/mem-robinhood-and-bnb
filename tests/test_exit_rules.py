@@ -168,3 +168,20 @@ def test_exit_percent_is_always_valid(percent):
     pos = position(sell_percent=percent)
     _rule, value, _ = decide_exit(pos, ctx(500))
     assert 1 <= value <= 100
+
+
+# --------------------------------------------- частота проверки позиции
+def test_fresh_positions_are_polled_often():
+    """Свежая позиция проверяется часто: именно там теряются проценты."""
+    from sniperbot.sniper.positions import check_interval
+
+    assert check_interval(0.0, 1.5, 6.0, 15.0) == 1.5      # только что купили
+    assert check_interval(14.9, 1.5, 6.0, 15.0) == 1.5
+    assert check_interval(15.1, 1.5, 6.0, 15.0) == 6.0     # позиция «остыла»
+    assert check_interval(600.0, 1.5, 6.0, 15.0) == 6.0
+
+
+def test_fast_window_can_be_disabled():
+    from sniperbot.sniper.positions import check_interval
+
+    assert check_interval(0.0, 1.5, 6.0, 0.0) == 6.0       # окно выключено
