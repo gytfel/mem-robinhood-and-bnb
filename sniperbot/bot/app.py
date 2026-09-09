@@ -56,6 +56,7 @@ COMMANDS = [
     BotCommand(command="route", description="Площадка: v2/v3/auto"),
     BotCommand(command="calibrate", description="Диагностика токена"),
     BotCommand(command="tip", description="Совет по газу"),
+    BotCommand(command="preset", description="Готовый набор настроек"),
     BotCommand(command="config", description="Все настройки"),
     BotCommand(command="set", description="Изменить настройку"),
     BotCommand(command="speed", description="Режим газа и маршрут"),

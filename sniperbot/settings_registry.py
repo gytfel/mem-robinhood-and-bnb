@@ -267,6 +267,92 @@ SETTINGS: tuple[Setting, ...] = (
 )
 
 BY_NAME = {setting.name: setting for setting in SETTINGS}
+@dataclass(frozen=True, slots=True)
+class Preset:
+    """Согласованный набор настроек под одну манеру торговли.
+
+    Отдельные настройки легко переставить так, что они спорят друг с другом:
+    стоп −60% рядом с трейлингом 15% просто выкидывает из каждой сделки. Пресет
+    задаёт значения, которые проверены как связка.
+    """
+
+    name: str
+    title: str
+    summary: str
+    values: dict[str, str]
+
+
+PRESETS: tuple[Preset, ...] = (
+    Preset(
+        "careful", "🛡 Осторожный",
+        "Мало сделок, жёсткие фильтры, ранняя фиксация. Для тех, кому важнее "
+        "не терять, чем поймать иксы.",
+        {
+            "slippage": "20", "gasmode": "fast",
+            "tp": "120", "sl": "35", "trail": "40", "ladder": "60:40,200:30",
+            "breakeven": "40", "rugguard": "40", "deadtime": "45", "deadpct": "15",
+            "exitgas": "2", "exitslip": "35",
+            "minliq": "3", "buytax": "8", "selltax": "8", "ownershare": "10",
+            "nomint": "on", "noblacklist": "on", "noproxy": "on", "minedge": "25",
+            "maxpos": "3", "perhour": "5", "cooldown": "120", "maxloss": "4",
+            "momentum": "on", "momgain": "8", "mommax": "60", "momtrades": "10",
+            "mombuys": "65", "momvol": "0.5", "momage": "48",
+        },
+    ),
+    Preset(
+        "momentum", "🚀 Перехват разгона",
+        "Ставка не на листинги, а на токены, которые уже растут. Пороги входа "
+        "мягче, зато покупка идёт по факту движения.",
+        {
+            "slippage": "25", "gasmode": "fast",
+            "tp": "100", "sl": "30", "trail": "35", "ladder": "50:40,150:30",
+            "breakeven": "30", "rugguard": "40", "deadtime": "30", "deadpct": "10",
+            "exitgas": "2", "exitslip": "35",
+            "minliq": "2", "buytax": "10", "selltax": "10", "ownershare": "15",
+            "nomint": "on", "noproxy": "on", "minedge": "15",
+            "maxpos": "4", "perhour": "8", "cooldown": "60", "maxloss": "5",
+            "momentum": "on", "momgain": "6", "mommax": "70", "momtrades": "6",
+            "mombuys": "60", "momvol": "0.3", "momage": "72",
+        },
+    ),
+    Preset(
+        "aggressive", "⚡️ Агрессивный снайп",
+        "Много сделок, широкое проскальзывание, поздняя фиксация. Убыточных "
+        "сделок будет больше — расчёт на редкие крупные иксы.",
+        {
+            "slippage": "30", "gasmode": "turbo",
+            "tp": "200", "sl": "45", "trail": "45", "ladder": "100:50,300:25",
+            "breakeven": "50", "rugguard": "50", "deadtime": "60", "deadpct": "20",
+            "exitgas": "2.5", "exitslip": "40",
+            "minliq": "1", "buytax": "12", "selltax": "12", "ownershare": "20",
+            "nomint": "on", "noproxy": "off", "minedge": "0",
+            "maxpos": "6", "perhour": "15", "cooldown": "0", "maxloss": "6",
+            "momentum": "on", "momgain": "5", "mommax": "90", "momtrades": "5",
+            "mombuys": "55", "momvol": "0.2", "momage": "72",
+        },
+    ),
+)
+
+PRESETS_BY_NAME = {preset.name: preset for preset in PRESETS}
+
+
+def preset_changes(preset: Preset, cfg) -> list[tuple[Setting, object, str]]:
+    """Что пресет поменяет: (настройка, новое значение, как показать).
+
+    Значения проходят обычный разбор `/set`, поэтому пресет не может записать
+    то, что вручную записать нельзя.
+    """
+    changes = []
+    for name, raw in preset.values.items():
+        setting = BY_NAME.get(name)
+        if setting is None or setting.scope != "chain":
+            continue
+        value = setting.parse(raw)
+        if setting.read(cfg) == value:
+            continue
+        changes.append((setting, value, raw))
+    return changes
+
 GAS_MODE_MULTIPLIERS = {"normal": 11_000, "fast": 15_000, "turbo": 25_000}
 
 

@@ -192,3 +192,42 @@ def test_user_scoped_setting_says_it_is_global():
     cfg, user = filled_cfg()
     assert "общая для всех сетей" in render_one(find("dry"), cfg, user, "BNB")
     assert "своя для каждой сети" in render_one(find("buy"), cfg, user, "BNB")
+
+
+# ------------------------------------------------------------------- пресеты
+def test_presets_only_use_real_settings_with_valid_values():
+    """Пресет не должен уметь записать то, что вручную записать нельзя."""
+    from sniperbot.settings_registry import BY_NAME, PRESETS
+
+    for preset in PRESETS:
+        for name, raw in preset.values.items():
+            setting = BY_NAME.get(name)
+            assert setting is not None, f"{preset.name}: настройки «{name}» нет"
+            assert setting.scope == "chain", f"{preset.name}: «{name}» не настройка сети"
+            setting.parse(raw)      # бросит ValueError, если значение вне диапазона
+
+
+def test_preset_changes_skip_values_already_set():
+    from sniperbot.db.models import ChainSettings
+    from sniperbot.settings_registry import PRESETS_BY_NAME, preset_changes
+
+    preset = PRESETS_BY_NAME["momentum"]
+    cfg = ChainSettings(user_id=1, chain="bsc")
+    for setting, value, _ in preset_changes(preset, cfg):
+        setting.write(value, cfg)
+
+    assert preset_changes(preset, cfg) == []      # повторное применение ничего не меняет
+    assert cfg.momentum_enabled is True
+    assert cfg.stop_loss_pct == 30
+
+
+def test_presets_keep_exit_rules_consistent():
+    """Трейлинг не должен срабатывать раньше первой ступени фиксации."""
+    from sniperbot.settings_registry import PRESETS, ladder_steps
+
+    for preset in PRESETS:
+        steps = ladder_steps(preset.values.get("ladder", ""))
+        trail = int(preset.values.get("trail", 0))
+        assert steps, f"{preset.name}: без лестницы прибыль не фиксируется"
+        first_step = steps[0][0]
+        assert trail < first_step, f"{preset.name}: трейлинг {trail}% съест ступень +{first_step}%"

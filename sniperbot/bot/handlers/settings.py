@@ -19,8 +19,11 @@ from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, User
 from sniperbot.settings_registry import (
     GROUPS,
+    PRESETS,
+    PRESETS_BY_NAME,
     SETTINGS,
     find,
+    preset_changes,
     render_compact,
     render_full,
     render_one,
@@ -154,6 +157,49 @@ async def cmd_set(message: Message, command: CommandObject, cfg: ChainSettings,
         f"✅ <b>{esc(setting.title)}</b> = {esc(setting.display(cfg, user, chain.native_symbol))}"
         + ("\n<i>Настройка общая для всех сетей</i>" if setting.scope == "user"
            else f"\n<i>Только для сети {esc(chain.name)}</i>"),
+    )
+
+
+@router.message(Command("preset"))
+async def cmd_preset(message: Message, command: CommandObject, cfg: ChainSettings,
+                     chain: ChainConfig, user: User) -> None:
+    """Применяет согласованный набор настроек одной командой."""
+    name = (command.args or "").strip().lower()
+    if not name:
+        lines = ["🎛 <b>Готовые наборы настроек</b>\n"]
+        for preset in PRESETS:
+            lines.append(f"<b>{esc(preset.title)}</b> — <code>/preset {preset.name}</code>\n"
+                         f"{esc(preset.summary)}\n")
+        lines.append("Набор меняет только настройки текущей сети и не трогает сумму "
+                     "покупки. После применения проверьте /config и погоняйте в /dry.")
+        await reply(message, "\n".join(lines))
+        return
+
+    preset = PRESETS_BY_NAME.get(name)
+    if preset is None:
+        available = " · ".join(f"<code>{item.name}</code>" for item in PRESETS)
+        await reply(message, f"❌ Набора «{esc(name)}» нет. Доступны: {available}")
+        return
+
+    changes = preset_changes(preset, cfg)
+    for setting, value, _ in changes:
+        await _persist(user.id, chain.key, setting, value, cfg, user)
+
+    if not changes:
+        await reply(message, f"🎛 <b>{esc(preset.title)}</b> уже применён — менять нечего.")
+        return
+
+    shown = [f"· {esc(setting.title)}: {esc(setting.display(cfg, user, chain.native_symbol))}"
+             for setting, _, _ in changes[:12]]
+    if len(changes) > 12:
+        shown.append(f"· …и ещё {len(changes) - 12} — смотрите /config")
+    await reply(
+        message,
+        f"🎛 <b>{esc(preset.title)}</b> применён для сети {esc(chain.name)}\n"
+        f"{esc(preset.summary)}\n\n"
+        + "\n".join(shown)
+        + "\n\nСумма покупки не менялась: <code>/set buy 0.01</code>. "
+          "Прежде чем включать боевой режим, проверьте набор в /dry.",
     )
 
 
