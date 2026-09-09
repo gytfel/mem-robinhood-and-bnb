@@ -108,9 +108,35 @@ sudo bash scripts/install-server.sh
 systemctl status memecoin-sniper      # состояние
 journalctl -u memecoin-sniper -f      # логи
 systemctl restart memecoin-sniper     # после правки .env
-bash scripts/update.sh                # обновление
 bash scripts/backup.sh                # бэкап базы кошельков
 ```
+
+### Обновление
+
+Обновление запускается **из клона репозитория** (там, где лежит `.git`), а не из
+`/opt/memecoin-sniper`: в `/opt` копия кода без истории git, обновлять её нечем.
+
+```bash
+cd ~/mem-robinhood-and-bnb            # каталог, куда клонировали репозиторий
+sudo bash scripts/update.sh
+```
+
+Скрипт сам подтянет свежий код текущей ветки, сделает копию базы, обновит
+зависимости и перезапустит сервис. Каталог установки он берёт из systemd, так что
+указывать пути не нужно. `.env` и `data/` не трогаются — ключи и кошельки на месте.
+
+Клон потерялся? Достаточно клонировать заново — установка в `/opt` не пострадает:
+
+```bash
+git clone -b claude/memecoin-sniper-bot-1nkbtm \
+    https://github.com/gytfel/mem-robinhood-and-bnb.git ~/mem-robinhood-and-bnb
+cd ~/mem-robinhood-and-bnb && sudo bash scripts/update.sh
+```
+
+Если бот стоит не в `/opt/memecoin-sniper` или сервис назван иначе:
+`sudo APP_DIR=/свой/путь SERVICE_NAME=своё-имя bash scripts/update.sh`.
+После обновления бот сам пришлёт в Telegram сообщение о перезапуске, а `/version`
+покажет установленный коммит.
 
 Через Docker:
 

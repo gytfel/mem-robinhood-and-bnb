@@ -11,7 +11,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/memecoin-sniper}"
 APP_USER="${APP_USER:-sniper}"
-SERVICE_NAME="memecoin-sniper"
+SERVICE_NAME="${SERVICE_NAME:-memecoin-sniper}"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
