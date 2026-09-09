@@ -117,6 +117,15 @@ class ChainSettings(Base):
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
     risk_reset_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # --- перехват разгона (покупка уже торгующихся токенов) ---
+    momentum_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    momentum_min_gain_pct: Mapped[int] = mapped_column(Integer, default=8)     # рост за окно
+    momentum_max_gain_pct: Mapped[int] = mapped_column(Integer, default=80)    # выше — уже вершина
+    momentum_min_trades: Mapped[int] = mapped_column(Integer, default=8)       # сделок за окно
+    momentum_min_buy_ratio_pct: Mapped[int] = mapped_column(Integer, default=60)
+    momentum_max_age_hours: Mapped[int] = mapped_column(Integer, default=48)   # глубина списка наблюдения
+    momentum_min_volume: Mapped[Decimal] = mapped_column(Dec, default=Decimal("0.3"))
+
     # --- фильтры безопасности ---
     min_liquidity: Mapped[Decimal] = mapped_column(Dec, default=Decimal("2"))
     max_liquidity: Mapped[Decimal] = mapped_column(Dec, default=Decimal("0"))  # 0 = без ограничения
@@ -279,6 +288,28 @@ class SeenPair(Base):
     status: Mapped[str] = mapped_column(String(16), default="new")
     # new | waiting (ждём ликвидность) | checking | sniped | rejected
     reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class PoolSample(Base):
+    """Замер активности пула: цена и поток сделок на конец окна наблюдения.
+
+    Разгон виден только в сравнении, поэтому одну точку хранить бессмысленно —
+    сравниваем текущее окно с предыдущим замером того же пула.
+    """
+
+    __tablename__ = "pool_samples"
+    __table_args__ = (Index("ix_pool_samples_chain_pool", "chain", "pool_address", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chain: Mapped[str] = mapped_column(String(32))
+    pool_address: Mapped[str] = mapped_column(String(42))
+    token_address: Mapped[str] = mapped_column(String(42), default="")
+    price: Mapped[Decimal | None] = mapped_column(Dec)      # нативная монета за сырую единицу токена
+    swaps: Mapped[int] = mapped_column(Integer, default=0)
+    buys: Mapped[int] = mapped_column(Integer, default=0)
+    sells: Mapped[int] = mapped_column(Integer, default=0)
+    volume_wei: Mapped[int] = mapped_column(Wei, default=0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 

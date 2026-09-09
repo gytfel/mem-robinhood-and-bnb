@@ -405,3 +405,109 @@ def _mark(value: bool | None) -> str:
 
 def _pct(bps: int | None) -> str:
     return "—" if bps is None else f"{bps / 100:.1f}%"
+
+
+# --------------------------------------------------------- перехват разгона
+@router.message(Command("trending"))
+async def cmd_trending(message: Message, ctx: BotContext, cfg: ChainSettings,
+                       chain: ChainConfig) -> None:
+    """Что прямо сейчас разгоняется в наблюдаемых пулах."""
+    hunter = ctx.engine.hunter
+    ranked = hunter.trending.get(chain.key, [])
+    watched = hunter.watched.get(chain.key, 0)
+    last = hunter.last_tick.get(chain.key)
+
+    header = (
+        f"🚀 <b>Разгон</b> — {esc(chain.name)}\n"
+        f"Под наблюдением пулов: {watched}"
+    )
+    if last is not None:
+        age = int((dt.datetime.now(dt.UTC) - last).total_seconds())
+        header += f" · замер {age} c назад"
+
+    if not cfg.momentum_enabled:
+        header += "\n\n⚠️ Режим выключен: <code>/set momentum on</code>"
+
+    if not ranked:
+        await reply(
+            message,
+            f"{header}\n\nПока сделок в наблюдаемых пулах нет. "
+            "Список пополняется новыми пулами сам; добавить токен вручную: "
+            "<code>/watch 0xАдрес</code>.",
+        )
+        return
+
+    lines = [header, ""]
+    for index, (signal, _pool, token) in enumerate(ranked[:10], start=1):
+        verdict = "✅ проходит" if signal.passed else esc(signal.reasons[0])
+        lines.append(
+            f"{index}. <code>{token}</code>\n"
+            f"    рост {signal.gain_pct:+.1f}% · покупок {signal.buy_ratio * 100:.0f}% · "
+            f"сделок {signal.trades} · оборот {fmt_amount(from_wei(signal.volume_native), 3)} "
+            f"{chain.native_symbol}\n"
+            f"    рейтинг {signal.score} · {verdict}"
+        )
+    lines.append(
+        "\nПороги входа: <code>/set momgain</code>, <code>/set mombuys</code>, "
+        "<code>/set momtrades</code>. Все настройки режима: /config"
+    )
+    await reply(message, "\n".join(lines))
+
+
+@router.message(Command("watch"))
+async def cmd_watch(message: Message, command: CommandObject, ctx: BotContext,
+                    chain: ChainConfig) -> None:
+    """Добавляет токен в список наблюдения за разгоном."""
+    token = extract_address(command.args or "")
+    if not token:
+        await reply(
+            message,
+            "Использование: <code>/watch 0xАдресТокена</code>\n"
+            "Добавлю токен в наблюдение: бот будет следить за потоком сделок в его пуле "
+            "и купит, когда начнётся движение. Список: /trending",
+        )
+        return
+
+    status = await reply(message, "👀 Ищу пул токена…")
+    from sniperbot.chain.dex_adapter import find_best_venue
+
+    client = ctx.registry.get(chain.key)
+    venue = await find_best_venue(client, token)
+    if venue is None:
+        await status.edit_text(
+            "❌ Пул с ликвидностью не найден — наблюдать не за чем.", parse_mode="HTML"
+        )
+        return
+    adapter, pool, state = venue
+
+    async with session_scope() as session:
+        existing = await repo.watched_pool(session, chain.key, token)
+        if existing is not None:
+            existing.status = "watch"
+            existing.reason = "добавлен вручную"
+            pair_address = existing.pair_address
+        else:
+            record = await repo.add_seen_pair(
+                session,
+                chain=chain.key,
+                pair_address=pool.address,
+                token_address=token,
+                router_address=adapter.cfg.router,
+                dex_kind=pool.kind,
+                pool_fee=pool.fee,
+                block_number=0,
+                status="watch",
+                reason="добавлен вручную",
+            )
+            pair_address = record.pair_address
+
+    await status.edit_text(
+        f"👀 <b>Наблюдаю</b> за <code>{token}</code>\n"
+        f"Площадка: {esc(adapter.name)} ({pool.label})\n"
+        f"Пул: <code>{pair_address}</code>\n"
+        f"Ликвидность: {fmt_amount(state.liquidity_native, 4)} {chain.native_symbol}\n\n"
+        "Куплю, когда в пуле начнётся движение по вашим порогам. "
+        "Проверить: /trending",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )

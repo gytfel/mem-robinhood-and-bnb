@@ -240,3 +240,31 @@ def test_all_time_report_includes_period_block():
     assert "Боевые по периодам" in text
     assert "24 часа" in text
     assert "/report 7" in text
+
+
+def test_source_breakdown_separates_entry_modes():
+    """Общий итог прячет ответ на главный вопрос: какой режим входа зарабатывает."""
+    from sniperbot.reports import source_breakdown
+
+    rows = to_rows([
+        trade("SNIPE1", "0.1", "0.02", source="auto", reason="stop_loss"),
+        trade("SNIPE2", "0.1", "0.03", source="auto", reason="stop_loss"),
+        trade("MOM1", "0.1", "0.25", source="momentum"),
+        trade("MOM2", "0.1", "0.06", source="momentum", reason="stop_loss"),
+    ])
+    lines = source_breakdown(rows, "BNB")
+
+    assert len(lines) == 2
+    snipe = next(line for line in lines if "снайп новых пар" in line)
+    momentum = next(line for line in lines if "перехват разгона" in line)
+    assert "0% плюсовых" in snipe
+    assert "50% плюсовых" in momentum
+    assert momentum.startswith("🟢") and snipe.startswith("🔴")
+
+
+def test_source_breakdown_silent_when_one_mode():
+    """Разбивка из одной строки ничего не объясняет — её не показываем."""
+    from sniperbot.reports import source_breakdown
+
+    rows = to_rows([trade("A", "0.1", "0.2"), trade("B", "0.1", "0.05", reason="stop_loss")])
+    assert source_breakdown(rows, "BNB") == []

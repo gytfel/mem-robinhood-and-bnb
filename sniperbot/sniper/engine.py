@@ -18,6 +18,7 @@ from sniperbot.db.models import Position
 from sniperbot.notify import Notifier
 from sniperbot.settings_registry import parse_variant, variant_overlay
 from sniperbot.sniper.executor import Trader
+from sniperbot.sniper.hunter import MomentumHunter
 from sniperbot.sniper.safety import analyze_token, evaluate_for_settings
 from sniperbot.sniper.scanner import PairEvent, PairScanner
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr, to_wei
@@ -50,6 +51,7 @@ class SniperEngine:
         self._watching = False
         self._semaphore = asyncio.Semaphore(MAX_PARALLEL_PAIRS)
         self._inflight: set[asyncio.Task] = set()
+        self.hunter = MomentumHunter(self)
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -66,7 +68,9 @@ class SniperEngine:
                 self._scanners.append(scanner)
                 self._tasks.append(asyncio.create_task(scanner.run(), name=f"scanner-{key}-{router_cfg.name}"))
         self._tasks.append(asyncio.create_task(self.watch_pending(), name="liquidity-watcher"))
-        log.info("Запущено сканеров: %s (+ наблюдение за ликвидностью)", len(self._tasks) - 1)
+        self._tasks.append(asyncio.create_task(self.hunter.run(), name="momentum-hunter"))
+        log.info("Запущено сканеров: %s (+ ожидание ликвидности и перехват разгона)",
+                 len(self._tasks) - 2)
 
     def status(self) -> list[dict]:
         """Состояние сканеров — для команды /health."""
@@ -145,6 +149,7 @@ class SniperEngine:
 
     async def stop(self) -> None:
         self._watching = False
+        self.hunter.stop()
         for scanner in self._scanners:
             scanner.stop()
         for task in [*self._tasks, *self._inflight]:
@@ -220,7 +225,7 @@ class SniperEngine:
             if not ok:
                 reject_reason = reject_reason or "; ".join(reasons)
                 continue
-            blocked = await self._limits_hit(user.id, event.chain, cfg)
+            blocked = await self.check_limits(user.id, event.chain, cfg)
             if blocked:
                 reject_reason = reject_reason or blocked
                 continue
@@ -233,8 +238,8 @@ class SniperEngine:
                 if avoid and owner in await repo.bad_owners(session, user.id, event.chain):
                     reject_reason = reject_reason or "владелец уже приводил к убытку"
                     continue
-            group, effective = await self._ab_variant(user.id, event.chain, cfg)
-            await self._snipe(user, effective, event, report, (adapter, pool), group)
+            group, effective = await self.ab_variant(user.id, event.chain, cfg)
+            await self.buy_for_user(user, effective, event, report, (adapter, pool), group)
             sniped += 1
 
         await self._mark(pair_id, "sniped" if sniped else "rejected", reject_reason or None)
@@ -256,7 +261,7 @@ class SniperEngine:
             elapsed += step
         return False
 
-    async def _limits_hit(self, user_id: int, chain: str, cfg) -> str | None:
+    async def check_limits(self, user_id: int, chain: str, cfg) -> str | None:
         """Проверяет риск-лимиты пользователя. Возвращает причину отказа или None."""
         now = dt.datetime.now(dt.UTC)
         async with session_scope() as session:
@@ -287,7 +292,7 @@ class SniperEngine:
                     return f"{streak} убыточных сделок подряд — автоснайп на паузе, включите /on"
         return None
 
-    async def _ab_variant(self, user_id: int, chain: str, cfg):
+    async def ab_variant(self, user_id: int, chain: str, cfg):
         """Если включён A/B-тест, половина сделок идёт с изменёнными настройками."""
         if not getattr(cfg, "ab_enabled", False):
             return "", cfg
@@ -329,12 +334,13 @@ class SniperEngine:
             return -1
         return len(logs)
 
-    async def _snipe(self, user, cfg, event: PairEvent, report, venue, group: str = "") -> None:
+    async def buy_for_user(self, user, cfg, event: PairEvent, report, venue, group: str = "",
+                           source: str = "auto", headline: str = "🎯 <b>Новый токен</b>") -> None:
         chain = self.registry.config(event.chain)
         symbol = esc(report.token.symbol)
         await self.notifier.send(
             user.id,
-            f"🎯 <b>Новый токен</b> {symbol} в сети {esc(chain.name)}\n"
+            f"{headline} {symbol} в сети {esc(chain.name)}\n"
             f"<code>{event.token}</code>\n"
             f"Площадка: {esc(report.venue or event.router.name)}\n"
             f"Ликвидность: {fmt_amount(report.liquidity_native, 4)} {chain.native_symbol}\n"
@@ -342,7 +348,7 @@ class SniperEngine:
             f"Покупаю на {fmt_amount(cfg.buy_amount)} {chain.native_symbol}…",
         )
         result = await self.trader.buy(
-            user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source="auto",
+            user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source=source,
             pair_address=event.pair, venue=venue,
         )
         if group and result.ok and result.position_id:

@@ -16,6 +16,12 @@ from decimal import Decimal
 from sniperbot.db.models import Position
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 
+SOURCE_TITLES = {
+    "auto": "снайп новых пар",
+    "momentum": "перехват разгона",
+    "manual": "покупки вручную",
+}
+
 EXIT_TITLES = {
     "take_profit": "тейк-профит",
     "ladder": "ступень фиксации",
@@ -203,6 +209,27 @@ def period_breakdown(rows: list[TradeRow], symbol: str,
     return lines
 
 
+def source_breakdown(rows: list[TradeRow], symbol: str) -> list[str]:
+    """Что приносит деньги: снайп листингов, перехват разгона или ручные покупки.
+
+    Это главный вопрос при выборе режима — общий итог его скрывает.
+    """
+    groups: dict[str, list[TradeRow]] = {}
+    for row in rows:
+        groups.setdefault(row.position.source or "manual", []).append(row)
+    if len(groups) < 2:
+        return []
+    lines = []
+    for source, group in sorted(groups.items(), key=lambda item: -len(item[1])):
+        summary = Summary(label=source, rows=group)
+        icon = "🟢" if summary.pnl >= 0 else "🔴"
+        title = SOURCE_TITLES.get(source, source)
+        lines.append(f"{icon} {title}: {summary.count} сдел. · {summary.winrate}% плюсовых · "
+                     f"{fmt_amount(summary.pnl)} {symbol} "
+                     f"({fmt_amount(summary.average)} на сделку)")
+    return lines
+
+
 def render_report(real: Summary, paper: Summary, days: int | None, symbol: str,
                   open_positions: int = 0, now: dt.datetime | None = None) -> str:
     """Полный отчёт: боевой режим и тестовый рядом."""
@@ -221,6 +248,10 @@ def render_report(real: Summary, paper: Summary, days: int | None, symbol: str,
         windows = period_breakdown(real.rows, symbol, now)
         if windows:
             parts.append("\n📅 <b>Боевые по периодам</b>\n" + "\n".join(windows))
+
+    by_source = source_breakdown([*real.rows, *paper.rows], symbol)
+    if by_source:
+        parts.append("\n🎯 <b>По способу входа</b>\n" + "\n".join(by_source))
 
     if open_positions:
         parts.append(f"\nОткрытых позиций сейчас: <b>{open_positions}</b> "

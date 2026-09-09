@@ -48,6 +48,8 @@ COMMANDS = [
     BotCommand(command="stats", description="Поток токенов и фильтры"),
     BotCommand(command="ab", description="A/B-тест настроек"),
     BotCommand(command="creators", description="Репутация создателей"),
+    BotCommand(command="trending", description="Кто разгоняется сейчас"),
+    BotCommand(command="watch", description="Следить за токеном"),
     BotCommand(command="trends", description="Горячие темы"),
     BotCommand(command="bundles", description="Конкуренция за вход"),
     BotCommand(command="paths", description="Где торгуется токен"),

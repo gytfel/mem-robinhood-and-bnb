@@ -139,9 +139,9 @@ async def test_position_and_hourly_limits(db):
                              status="open", source="auto", native_spent_wei=to_wei("0.1")))
 
     engine = make_engine()
-    assert await engine._limits_hit(1, "bsc", cfg_for(max_positions=1)) is not None
-    assert await engine._limits_hit(1, "bsc", cfg_for(max_positions=5, max_snipes_per_hour=1)) is not None
-    assert await engine._limits_hit(1, "bsc", cfg_for(max_positions=5, max_snipes_per_hour=10)) is None
+    assert await engine.check_limits(1, "bsc", cfg_for(max_positions=1)) is not None
+    assert await engine.check_limits(1, "bsc", cfg_for(max_positions=5, max_snipes_per_hour=1)) is not None
+    assert await engine.check_limits(1, "bsc", cfg_for(max_positions=5, max_snipes_per_hour=10)) is None
 
 
 async def test_cooldown_blocks_and_expires(db):
@@ -153,9 +153,9 @@ async def test_cooldown_blocks_and_expires(db):
                              closed_at=utcnow()))
 
     engine = make_engine()
-    blocked = await engine._limits_hit(1, "bsc", cfg_for(cooldown_seconds=600))
+    blocked = await engine.check_limits(1, "bsc", cfg_for(cooldown_seconds=600))
     assert blocked is not None and "пауза" in blocked
-    assert await engine._limits_hit(1, "bsc", cfg_for(cooldown_seconds=0)) is None
+    assert await engine.check_limits(1, "bsc", cfg_for(cooldown_seconds=0)) is None
 
 
 async def test_daily_loss_limit_stops_sniping(db):
@@ -166,10 +166,10 @@ async def test_daily_loss_limit_stops_sniping(db):
                              native_returned_wei=to_wei("0.1"), closed_at=utcnow()))
 
     engine = make_engine()
-    blocked = await engine._limits_hit(1, "bsc", cfg_for(daily_loss_limit=Decimal("0.3")))
+    blocked = await engine.check_limits(1, "bsc", cfg_for(daily_loss_limit=Decimal("0.3")))
     assert blocked is not None and "лимит убытка" in blocked
     # лимит выше убытка — снайп продолжается
-    assert await engine._limits_hit(1, "bsc", cfg_for(daily_loss_limit=Decimal("1"))) is None
+    assert await engine.check_limits(1, "bsc", cfg_for(daily_loss_limit=Decimal("1"))) is None
 
 
 async def test_consecutive_losses_and_reset(db):
@@ -181,13 +181,13 @@ async def test_consecutive_losses_and_reset(db):
                                  native_returned_wei=to_wei("0.02"), closed_at=utcnow()))
 
     engine = make_engine()
-    blocked = await engine._limits_hit(1, "bsc", cfg_for(max_consecutive_losses=3))
+    blocked = await engine.check_limits(1, "bsc", cfg_for(max_consecutive_losses=3))
     assert blocked is not None and "подряд" in blocked
 
     # /on ставит risk_reset_at «сейчас» — прошлые убытки больше не считаются
     reset = cfg_for(max_consecutive_losses=3)
     reset.risk_reset_at = utcnow() + dt.timedelta(seconds=1)
-    assert await engine._limits_hit(1, "bsc", reset) is None
+    assert await engine.check_limits(1, "bsc", reset) is None
 
 
 async def test_profitable_trade_breaks_the_losing_streak(db):

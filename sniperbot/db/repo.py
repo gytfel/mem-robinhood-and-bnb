@@ -5,11 +5,12 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniperbot.db.models import (
     ChainSettings,
+    PoolSample,
     Position,
     ScannerState,
     SeenPair,
@@ -61,6 +62,26 @@ async def get_settings(session: AsyncSession, user_id: int, chain: str) -> Chain
         session.add(settings)
         await session.flush()
     return settings
+
+
+async def users_with_momentum(session: AsyncSession, chain: str) -> list[tuple[User, ChainSettings]]:
+    """Подписчики режима перехвата разгона.
+
+    Автоснайп остаётся общим выключателем: /off должен останавливать все покупки,
+    а не только снайп новых пар.
+    """
+    stmt = (
+        select(User, ChainSettings)
+        .join(ChainSettings, ChainSettings.user_id == User.id)
+        .where(
+            ChainSettings.chain == chain,
+            ChainSettings.auto_snipe.is_(True),
+            ChainSettings.momentum_enabled.is_(True),
+            User.is_blocked.is_(False),
+            User.wallet_address.is_not(None),
+        )
+    )
+    return [(row[0], row[1]) for row in (await session.execute(stmt)).all()]
 
 
 async def users_with_autosnipe(session: AsyncSession, chain: str) -> list[tuple[User, ChainSettings]]:
@@ -507,3 +528,59 @@ async def pair_status_counts(session: AsyncSession, chain: str,
         stmt = stmt.where(SeenPair.created_at >= since)
     rows = (await session.execute(stmt.group_by(SeenPair.status))).all()
     return {str(status): int(count) for status, count in rows}
+
+
+# ------------------------------------------------------------------ перехват разгона
+async def momentum_watchlist(
+    session: AsyncSession, chain: str, since: dt.datetime, limit: int = 300
+) -> list[SeenPair]:
+    """Пулы под наблюдением: недавно найденные плюс добавленные вручную.
+
+    Отвергнутые пулы тоже остаются в списке: причина отказа часто временная —
+    пустой пул наполняется, а «мало ликвидности» перестаёт быть правдой.
+    """
+    stmt = (
+        select(SeenPair)
+        .where(
+            SeenPair.chain == chain,
+            or_(SeenPair.created_at >= since, SeenPair.status == "watch"),
+        )
+        .order_by(SeenPair.created_at.desc())
+        .limit(limit)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def add_pool_sample(session: AsyncSession, **kwargs) -> PoolSample:
+    sample = PoolSample(**kwargs)
+    session.add(sample)
+    await session.flush()
+    return sample
+
+
+async def last_pool_samples(
+    session: AsyncSession, chain: str, pools: list[str]
+) -> dict[str, PoolSample]:
+    """Последний замер по каждому из пулов — точка отсчёта для роста цены."""
+    if not pools:
+        return {}
+    newest = (
+        select(func.max(PoolSample.id).label("id"))
+        .where(PoolSample.chain == chain, PoolSample.pool_address.in_(pools))
+        .group_by(PoolSample.pool_address)
+    )
+    rows = await session.scalars(select(PoolSample).where(PoolSample.id.in_(newest)))
+    return {sample.pool_address: sample for sample in rows}
+
+
+async def prune_pool_samples(session: AsyncSession, before: dt.datetime) -> int:
+    """Замеры нужны только для сравнения соседних окон — старые удаляем."""
+    result = await session.execute(delete(PoolSample).where(PoolSample.created_at < before))
+    return int(result.rowcount or 0)
+
+
+async def watched_pool(session: AsyncSession, chain: str, token: str) -> SeenPair | None:
+    stmt = select(SeenPair).where(
+        SeenPair.chain == chain, func.lower(SeenPair.token_address) == token.lower()
+    ).order_by(SeenPair.id.desc())
+    return (await session.scalars(stmt)).first()

@@ -169,6 +169,15 @@ class Settings(BaseSettings):
     fast_watch_minutes: float = Field(default=15.0, alias="FAST_WATCH_MINUTES")
     deposit_poll_interval: float = Field(default=30.0, alias="DEPOSIT_POLL_INTERVAL")
 
+    # перехват разгона: как часто снимать замеры и сколько пулов держать под наблюдением
+    momentum_interval: float = Field(default=45.0, alias="MOMENTUM_INTERVAL")
+    momentum_watch_limit: int = Field(default=300, alias="MOMENTUM_WATCH_LIMIT")
+    momentum_sample_ttl_hours: int = Field(default=24, alias="MOMENTUM_SAMPLE_TTL_HOURS")
+    momentum_retry_minutes: int = Field(default=30, alias="MOMENTUM_RETRY_MINUTES")
+    # разовый разбор истории фабрик при старте: наполняет список наблюдения
+    # пулами, которые появились до запуска бота. 0 — не разбирать
+    momentum_backfill_blocks: int = Field(default=20_000, alias="MOMENTUM_BACKFILL_BLOCKS")
+
     service_fee_bps: int = Field(default=0, alias="SERVICE_FEE_BPS")
     service_fee_wallet: str = Field(default="", alias="SERVICE_FEE_WALLET")
 

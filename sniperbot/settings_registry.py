@@ -21,6 +21,7 @@ GROUPS = {
     "trade": "💰 Торговля",
     "exits": "🎯 Выходы",
     "filters": "🛡 Фильтры безопасности",
+    "momentum": "🚀 Перехват разгона",
     "risk": "🚦 Риск-лимиты",
     "ux": "🔔 Прочее",
 }
@@ -212,6 +213,29 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("lpburn", "min_lp_burned_pct", "chain", "int", "Мин. сожжённый LP",
             "Доля LP в burn-адресах. 0 — не проверять. В V3 не применяется",
             "filters", unit="%", minimum=Decimal(0), maximum=Decimal(100)),
+
+    # ------------------------------------------------------------ перехват разгона
+    Setting("momentum", "momentum_enabled", "chain", "bool", "Перехват разгона",
+            "Покупать уже торгующиеся токены, когда в них начинается движение. "
+            "Работает вместе с автоснайпом и подчиняется тем же фильтрам", "momentum"),
+    Setting("momgain", "momentum_min_gain_pct", "chain", "int", "Мин. рост за окно",
+            "На сколько процентов цена должна вырасти за окно наблюдения, чтобы это считалось разгоном",
+            "momentum", unit="%", minimum=Decimal(1), maximum=Decimal(500)),
+    Setting("mommax", "momentum_max_gain_pct", "chain", "int", "Макс. рост за окно",
+            "Выше этого роста вход считается покупкой на вершине. 0 — без ограничения",
+            "momentum", unit="%", minimum=Decimal(0), maximum=Decimal(5000)),
+    Setting("momtrades", "momentum_min_trades", "chain", "int", "Мин. сделок за окно",
+            "Меньше этого числа сделок — движение делает один-два кошелька, а не рынок",
+            "momentum", minimum=Decimal(1), maximum=Decimal(1000)),
+    Setting("mombuys", "momentum_min_buy_ratio_pct", "chain", "int", "Мин. доля покупок",
+            "Сколько процентов сделок должны быть покупками. Ниже 50% из токена выходят",
+            "momentum", unit="%", minimum=Decimal(1), maximum=Decimal(100)),
+    Setting("momvol", "momentum_min_volume", "chain", "decimal", "Мин. оборот за окно",
+            "Минимальный оборот пула в нативной монете за окно наблюдения",
+            "momentum", minimum=Decimal(0), maximum=Decimal(10_000)),
+    Setting("momage", "momentum_max_age_hours", "chain", "int", "Глубина наблюдения",
+            "Сколько часов держать найденные пулы в списке наблюдения",
+            "momentum", unit=" ч", minimum=Decimal(1), maximum=Decimal(720)),
 
     # ------------------------------------------------------------------ риск
     Setting("maxpos", "max_positions", "chain", "int", "Макс. позиций",
