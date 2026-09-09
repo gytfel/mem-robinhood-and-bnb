@@ -156,3 +156,33 @@ def test_stats_appear_in_the_message():
 )
 def test_human_duration(delta, expected):
     assert human_duration(delta) == expected
+
+
+# --------------------------------------------- расхождение диска и процесса
+def test_stale_build_warning_fires_when_disk_is_newer():
+    """Файл BUILD обновление переписывает сразу — /version не должен на это вестись."""
+    from sniperbot.bot.startup import stale_build_warning
+
+    running = BuildInfo(commit="aaaa1111", date="01.09 10:00")
+    on_disk = BuildInfo(commit="bbbb2222", date="09.09 20:10")
+    warning = stale_build_warning(running, on_disk)
+
+    assert "старом коде" in warning
+    assert "bbbb2222" in warning       # видно, какая сборка ждёт перезапуска
+    assert "restart" in warning
+
+
+def test_no_warning_when_running_code_matches_disk():
+    from sniperbot.bot.startup import stale_build_warning
+
+    info = BuildInfo(commit="aaaa1111")
+    assert stale_build_warning(info, info) == ""
+    assert stale_build_warning(info, BuildInfo(commit=UNKNOWN)) == ""
+
+
+def test_warning_when_build_file_appeared_after_start():
+    """До обновления файла BUILD не было — процесс заведомо старее."""
+    from sniperbot.bot.startup import stale_build_warning
+
+    warning = stale_build_warning(BuildInfo(), BuildInfo(commit="bbbb2222"))
+    assert "старом коде" in warning

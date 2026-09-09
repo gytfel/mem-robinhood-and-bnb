@@ -126,9 +126,10 @@ async def run_bot() -> None:
     monitor = PositionMonitor(registry, trader, notifier, settings)
     deposits = DepositWatcher(registry, notifier, settings)
 
+    running_build = build_info()
     ctx = BotContext(
         settings=settings, registry=registry, wallets=wallets,
-        trader=trader, engine=engine, notifier=notifier,
+        trader=trader, engine=engine, notifier=notifier, build=running_build,
     )
 
     dp = Dispatcher(storage=MemoryStorage())
@@ -151,7 +152,7 @@ async def run_bot() -> None:
     ]
     engine.start()
 
-    report = await record_start(build_info())
+    report = await record_start(running_build)
     log.info("Сборка: %s (%s)", report.info.short(), report.info.source)
 
     try:

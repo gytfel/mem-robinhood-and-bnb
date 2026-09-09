@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.wallet import WalletService
@@ -10,6 +10,7 @@ from sniperbot.config import ChainConfig, Settings
 from sniperbot.notify import Notifier
 from sniperbot.sniper.engine import SniperEngine
 from sniperbot.sniper.executor import Trader
+from sniperbot.version import BuildInfo, build_info
 
 
 @dataclass
@@ -20,6 +21,10 @@ class BotContext:
     trader: Trader
     engine: SniperEngine
     notifier: Notifier
+    # Сборка, с которой процесс запустился. Файл BUILD на диске обновление
+    # переписывает сразу, поэтому читать его при каждом /version нельзя: пока
+    # службу не перезапустили, там лежит код, который ещё не работает.
+    build: BuildInfo = field(default_factory=build_info)
 
     @property
     def active_chain_keys(self) -> list[str]:

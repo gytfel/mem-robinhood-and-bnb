@@ -254,14 +254,20 @@ async def cmd_id(message: Message, user: User, is_admin: bool = False) -> None:
 async def cmd_version(message: Message, ctx: BotContext) -> None:
     from sqlalchemy import select
 
-    from sniperbot.bot.startup import human_duration
+    from sniperbot.bot.startup import human_duration, stale_build_warning
     from sniperbot.db.models import BotRun
     from sniperbot.version import build_info
 
-    info = build_info()
-    lines = [f"🤖 <b>Сборка</b>\n{esc(info.short())}"]
-    if info.branch:
-        lines.append(f"Ветка: <code>{esc(info.branch)}</code>")
+    running = ctx.build            # сборка, с которой процесс запустился
+    on_disk = build_info()         # что лежит на диске прямо сейчас
+
+    lines = [f"🤖 <b>Сборка</b>\n{esc(running.short())}"]
+    if running.branch:
+        lines.append(f"Ветка: <code>{esc(running.branch)}</code>")
+
+    warning = stale_build_warning(running, on_disk)
+    if warning:
+        lines.append("\n" + warning)
 
     async with session_scope() as session:
         runs = list((await session.scalars(

@@ -36,6 +36,26 @@ class RestartReport:
     stats: dict = field(default_factory=dict)
 
 
+def stale_build_warning(running: BuildInfo, on_disk: BuildInfo) -> str:
+    """Предупреждение, если на диске лежит сборка новее работающей.
+
+    Обновление переписывает файл BUILD сразу, а код в памяти процесса меняется
+    только при перезапуске службы. Расхождение — это ровно случай «обновился,
+    а новых команд нет»: пока об этом не сказать прямо, /version выглядит так,
+    будто всё хорошо.
+    """
+    if not on_disk.known or running.same_code_as(on_disk):
+        return ""
+    when = f" от {esc(on_disk.date)}" if on_disk.date else ""
+    return (
+        "⚠️ <b>Бот работает на старом коде.</b>\n"
+        f"На диске уже сборка <code>{esc(on_disk.commit)}</code>{when}, "
+        "но службу после обновления не перезапускали.\n"
+        "Перезапуск: <code>systemctl restart memecoin-sniper</code>\n"
+        "Не помогло — причину покажет <code>bash scripts/diagnose.sh</code>"
+    )
+
+
 def human_duration(delta: dt.timedelta | None) -> str:
     """«5 ч 12 мин», «42 с» — коротко и по-русски."""
     if delta is None:
