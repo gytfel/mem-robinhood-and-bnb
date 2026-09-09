@@ -81,6 +81,28 @@ fi
 
 say "Обновляю зависимости"
 "$APP_DIR/.venv/bin/pip" install --quiet -e "$APP_DIR"
+
+# Проверяем, откуда бот на самом деле возьмёт код. Если пакет когда-то ставили
+# обычной установкой, python импортирует копию из site-packages, и новый код в
+# APP_DIR так и остаётся невостребованным — обновление «не доходит».
+code_root() {
+    "$APP_DIR/.venv/bin/python" -c \
+        'import sniperbot, os; print(os.path.dirname(os.path.dirname(sniperbot.__file__)))' 2>/dev/null || true
+}
+if [ "$(code_root)" != "$APP_DIR" ]; then
+    say "Код брался из $(code_root) — переставляю пакет на $APP_DIR"
+    "$APP_DIR/.venv/bin/pip" uninstall -y -q memecoin-sniper-bot >/dev/null 2>&1 || true
+    "$APP_DIR/.venv/bin/pip" install --quiet -e "$APP_DIR"
+    [ "$(code_root)" = "$APP_DIR" ] || fail "python всё ещё берёт код из $(code_root).
+Проще всего пересоздать окружение:
+  rm -rf $APP_DIR/.venv && python3 -m venv $APP_DIR/.venv \\
+    && $APP_DIR/.venv/bin/pip install -e $APP_DIR"
+fi
+
+# Свежий ли код доехал: файла перехвата разгона нет в старых сборках.
+[ -f "$APP_DIR/sniperbot/sniper/hunter.py" ] \
+    || fail "в $APP_DIR не оказалось нового кода — проверьте, из какой ветки клон:
+  git -C $SRC_DIR rev-parse --abbrev-ref HEAD"
 if id -u "$APP_USER" >/dev/null 2>&1; then
     chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 fi
