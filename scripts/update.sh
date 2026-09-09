@@ -86,8 +86,11 @@ say "Обновляю зависимости"
 # обычной установкой, python импортирует копию из site-packages, и новый код в
 # APP_DIR так и остаётся невостребованным — обновление «не доходит».
 code_root() {
-    "$APP_DIR/.venv/bin/python" -c \
-        'import sniperbot, os; print(os.path.dirname(os.path.dirname(sniperbot.__file__)))' 2>/dev/null || true
+    # Из корня: текущий каталог python ставит первым в sys.path, и запуск из
+    # клона показал бы код клона вместо установленного.
+    (cd / && "$APP_DIR/.venv/bin/python" -c \
+        'import sniperbot, os; print(os.path.dirname(os.path.dirname(sniperbot.__file__)))' \
+        2>/dev/null) || true
 }
 if [ "$(code_root)" != "$APP_DIR" ]; then
     say "Код брался из $(code_root) — переставляю пакет на $APP_DIR"

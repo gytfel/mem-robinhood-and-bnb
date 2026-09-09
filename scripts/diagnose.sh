@@ -49,7 +49,8 @@ else
         info "python: ${exe:-?}"
         # Откуда процесс берёт код — это и есть настоящий ответ.
         if [ -n "$exe" ]; then
-            pkg="$("$exe" -c 'import sniperbot,os;print(os.path.dirname(os.path.dirname(sniperbot.__file__)))' 2>/dev/null || true)"
+            # Из корня: иначе python подставит текущий каталог и покажет его код.
+            pkg="$( (cd / && "$exe" -c 'import sniperbot,os;print(os.path.dirname(os.path.dirname(sniperbot.__file__)))' 2>/dev/null) || true)"
             if [ -n "$pkg" ]; then
                 info "код импортируется из: $pkg"
                 if fresh "$pkg"; then

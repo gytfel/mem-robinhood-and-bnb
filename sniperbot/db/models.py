@@ -118,7 +118,7 @@ class ChainSettings(Base):
     risk_reset_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     # --- перехват разгона (покупка уже торгующихся токенов) ---
-    momentum_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    momentum_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     momentum_min_gain_pct: Mapped[int] = mapped_column(Integer, default=8)     # рост за окно
     momentum_max_gain_pct: Mapped[int] = mapped_column(Integer, default=80)    # выше — уже вершина
     momentum_min_trades: Mapped[int] = mapped_column(Integer, default=8)       # сделок за окно

@@ -42,6 +42,11 @@ async def cmd_on(message: Message, user: User, cfg: ChainSettings, chain: ChainC
         f"Сумма входа: {fmt_amount(cfg.buy_amount)} {chain.native_symbol}\n"
         f"TP +{cfg.take_profit_pct}% · SL −{cfg.stop_loss_pct}%"
         + (f" · трейлинг {cfg.trailing_stop_pct}%" if cfg.trailing_stop_pct else "")
+        + "\n\n<b>Как ищем вход</b>\n"
+        + "· новые пулы в момент листинга\n"
+        + ("· разгон уже торгующихся токенов — /trending\n"
+           if cfg.momentum_enabled else
+           "· разгон выключен: <code>/set momentum on</code>\n")
         + "\nСчётчик убытков подряд сброшен.",
         main_menu(chain.name, True),
     )
