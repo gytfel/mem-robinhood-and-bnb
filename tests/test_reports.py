@@ -268,3 +268,75 @@ def test_source_breakdown_silent_when_one_mode():
 
     rows = to_rows([trade("A", "0.1", "0.2"), trade("B", "0.1", "0.05", reason="stop_loss")])
     assert source_breakdown(rows, "BNB") == []
+
+
+# ------------------------------------------------------------ разбор результата
+def anatomy_sample(deep: int = 12, stops: int = 30, wins: int = 28) -> list[Position]:
+    """Похоже на реальный прогон: часть убытков — обвалы до нуля, часть — стопы."""
+    rows = [trade(f"D{i}", "0.01", "0.000001", reason="stop_loss") for i in range(deep)]
+    rows += [trade(f"S{i}", "0.01", "0.0070", reason="stop_loss") for i in range(stops)]
+    rows += [trade(f"W{i}", "0.01", "0.0180", reason="ladder") for i in range(wins)]
+    return rows
+
+
+def test_anatomy_separates_wipeouts_from_ordinary_stops():
+    """Смешанные в одну строку, они выглядят одной причиной — а лечатся разно."""
+    from sniperbot.reports import render_anatomy
+
+    text = render_anatomy(summarize(anatomy_sample(), "тест"), "ETH")
+
+    assert "обвал до нуля" in text
+    assert "12 сдел." in text
+    assert "стоп-лосс: 30 сдел." in text
+
+
+def test_anatomy_shows_what_the_result_would_be_without_wipeouts():
+    """Главное число: сколько стоит именно эта проблема."""
+    from sniperbot.reports import render_anatomy
+
+    text = render_anatomy(summarize(anatomy_sample(), "тест"), "ETH")
+    assert "Без них итог был бы" in text
+    assert "lpburn" in text          # и чем это лечится
+
+
+def test_anatomy_states_the_average_win_needed_to_break_even():
+    from sniperbot.reports import render_anatomy, required_avg_win
+
+    summary = summarize(anatomy_sample(), "тест")
+    need = required_avg_win(summary)
+
+    # 42 убытка против 28 побед: победа должна быть в 1.5 раза крупнее убытка
+    assert float(need) == pytest.approx(float(abs(summary.avg_loss)) * 1.5, rel=0.01)
+    assert "средняя прибыль должна быть" in render_anatomy(summary, "ETH")
+
+
+def test_anatomy_stays_silent_without_wipeouts():
+    from sniperbot.reports import render_anatomy
+
+    rows = [trade(f"S{i}", "0.01", "0.0070", reason="stop_loss") for i in range(20)]
+    rows += [trade(f"W{i}", "0.01", "0.0180", reason="ladder") for i in range(20)]
+    text = render_anatomy(summarize(rows, "тест"), "ETH")
+
+    assert "обвал до нуля" not in text
+    assert "lpburn" not in text      # советовать нечего — проблемы нет
+
+
+def test_anatomy_needs_a_few_trades_before_it_says_anything():
+    from sniperbot.reports import render_anatomy
+
+    rows = [trade("A", "0.01", "0.02"), trade("B", "0.01", "0.005", reason="stop_loss")]
+    assert render_anatomy(summarize(rows, "тест"), "ETH") == ""
+
+
+def test_reason_rows_rank_by_money_not_by_count():
+    """Десять мелких стопов и одна дыра в списке равны — по деньгам нет."""
+    from sniperbot.reports import reason_rows
+
+    rows = to_rows([
+        *[trade(f"S{i}", "0.01", "0.0095", reason="stop_loss") for i in range(10)],
+        trade("RUG", "0.01", "0", reason="rug"),
+    ])
+    ranked = reason_rows(rows)
+
+    assert ranked[0].reason == "слив ликвидности"   # одна сделка, но дороже всех
+    assert ranked[0].count == 1

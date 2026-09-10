@@ -28,6 +28,7 @@ from sniperbot.pairstats import (
 from sniperbot.reports import (
     period_breakdown,
     period_label,
+    render_anatomy,
     render_report,
     render_summary,
     summarize,
@@ -75,6 +76,9 @@ async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, use
         return
 
     text = f"🧾 <b>Отчёт</b> {period}\n\n" + render_summary(summary, chain.native_symbol)
+    anatomy = render_anatomy(summary, chain.native_symbol)
+    if anatomy:
+        text += "\n\n" + anatomy
     windows = period_breakdown(summary.rows, chain.native_symbol)
     if windows and days is None:
         text += "\n\n📅 <b>По периодам</b>\n" + "\n".join(windows)
