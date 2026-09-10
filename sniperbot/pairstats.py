@@ -34,6 +34,7 @@ class Outcome:
 
     accepted: bool                    # прошёл фильтры (куплен или мог быть куплен)
     multiple: Decimal                 # пик цены к первой замеченной, «×»
+    low: Decimal = Decimal(1)         # минимум цены к первой, «×» — по нему считается стоп
     codes: tuple[str, ...] = ()       # какие фильтры его отсеяли
     hour: int | None = None           # час суток UTC, когда пул найден
 
@@ -84,9 +85,12 @@ def to_outcomes(pairs) -> list[Outcome]:
             continue
         codes = tuple(code for code in (getattr(pair, "reject_codes", "") or "").split(",") if code)
         created = getattr(pair, "created_at", None)
+        first = Decimal(pair.first_price)
+        low = getattr(pair, "low_price", None)
         outcomes.append(Outcome(
             accepted=pair.status == "sniped" or (pair.status != "rejected" and not codes),
             multiple=multiple,
+            low=(Decimal(low) / first) if low else Decimal(1),
             codes=codes,
             hour=created.hour if created is not None else None,
         ))
@@ -278,3 +282,162 @@ def window_label(hours: int | None, rows: list | None = None,
     first = min(stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.UTC) for stamp in stamps)
     days = ((now or dt.datetime.now(dt.UTC)) - first).days + 1
     return f"за всё время ({days} дн.)"
+
+
+# ---------------------------------------------------------- подбор под винрейт
+@dataclass(slots=True)
+class SimResult:
+    """Что дала бы пара TP/SL на уже собранных данных.
+
+    Порядок пика и минимума в замерах неизвестен, поэтому там, где сработали бы
+    оба уровня, честный ответ — вилка: сколько будет побед, зависит от того, что
+    случилось раньше. Одно число здесь было бы выдумкой.
+    """
+
+    take_profit: int
+    stop_loss: int
+    cost: Decimal
+    total: int = 0
+    wins: int = 0            # достали TP и не задели стоп
+    losses: int = 0          # задели стоп и не достали TP
+    ambiguous: int = 0       # сработали бы оба — порядок неизвестен
+    flat: int = 0            # ни то ни другое: выход около входа
+
+    @property
+    def winrate_low(self) -> Decimal:
+        return Decimal(self.wins * 100) / Decimal(self.total) if self.total else Decimal(0)
+
+    @property
+    def winrate_high(self) -> Decimal:
+        if not self.total:
+            return Decimal(0)
+        return Decimal((self.wins + self.ambiguous) * 100) / Decimal(self.total)
+
+    def _expectancy(self, ambiguous_win: bool) -> Decimal:
+        if not self.total:
+            return Decimal(0)
+        win_net = Decimal(self.take_profit) - self.cost
+        loss_net = -Decimal(self.stop_loss) - self.cost
+        wins = self.wins + (self.ambiguous if ambiguous_win else 0)
+        losses = self.losses + (0 if ambiguous_win else self.ambiguous)
+        total = wins * win_net + losses * loss_net + self.flat * (-self.cost)
+        return total / Decimal(self.total)
+
+    @property
+    def expectancy_low(self) -> Decimal:
+        return self._expectancy(ambiguous_win=False)
+
+    @property
+    def expectancy_high(self) -> Decimal:
+        return self._expectancy(ambiguous_win=True)
+
+
+def simulate(rows: list[Outcome], take_profit: int, stop_loss: int,
+             cost_pct: Decimal) -> SimResult:
+    """Прогоняет пару TP/SL по собранным пикам и минимумам цены."""
+    result = SimResult(take_profit, stop_loss, cost_pct, total=len(rows))
+    tp_level = Decimal(1) + Decimal(take_profit) / 100
+    sl_level = Decimal(1) - Decimal(stop_loss) / 100
+    for row in rows:
+        hit_tp = row.multiple >= tp_level
+        hit_sl = row.low <= sl_level
+        if hit_tp and hit_sl:
+            result.ambiguous += 1
+        elif hit_tp:
+            result.wins += 1
+        elif hit_sl:
+            result.losses += 1
+        else:
+            result.flat += 1
+    return result
+
+
+def breakeven_take_profit(winrate_pct: Decimal, stop_loss: int, cost_pct: Decimal) -> Decimal:
+    """Какой TP нужен, чтобы стратегия с таким винрейтом вышла в ноль.
+
+    Из условия «доля побед × чистая прибыль = доля проигрышей × чистый убыток».
+    Это и есть ответ на вопрос «хватит ли мне 45% плюсовых сделок»: сам по себе
+    винрейт не значит ничего, пока не назван размер выигрыша.
+    """
+    win = Decimal(winrate_pct) / 100
+    if win <= 0 or win >= 1:
+        return Decimal(0)
+    return (1 - win) / win * (Decimal(stop_loss) + cost_pct) + cost_pct
+
+
+def winrate_grid(rows: list[Outcome], target: Decimal, cost_pct: Decimal,
+                 take_profits=(15, 20, 25, 30, 40, 50, 75, 100, 150, 200),
+                 stop_losses=(15, 20, 25, 30, 40, 50)) -> list[SimResult]:
+    """Пары TP/SL, дающие не меньше целевого винрейта, лучшие по ожиданию сверху."""
+    found = []
+    for take_profit in take_profits:
+        for stop_loss in stop_losses:
+            result = simulate(rows, take_profit, stop_loss, cost_pct)
+            if result.winrate_high >= target:
+                found.append(result)
+    return sorted(found, key=lambda item: item.expectancy_low, reverse=True)
+
+
+def render_winrate(rows: list[Outcome], target: Decimal, cost_pct: Decimal,
+                   scope: str = "прошедшим фильтры") -> str:
+    """Ответ на «как получить N% плюсовых сделок» — с ценой этого решения."""
+    if len(rows) < MIN_SAMPLE:
+        return (f"🎯 <b>Винрейт {target:.0f}%</b>\n\n"
+                f"Данных мало: пулов с замерами цены {len(rows)}, нужно хотя бы {MIN_SAMPLE}. "
+                "Бот копит их сам при включённом автоснайпе — вернитесь через несколько часов.")
+
+    parts = [
+        f"🎯 <b>Как получить {target:.0f}% плюсовых сделок</b>",
+        f"<i>по {len(rows)} пулам, {esc(scope)} · издержки круга {cost_pct:.1f}%</i>\n",
+        "<b>Сначала арифметика.</b> Винрейт сам по себе не значит ничего: "
+        "его легко поднять узким тейком, но тогда редкие стопы съедят все победы. "
+        "Чтобы стратегия вышла хотя бы в ноль, нужно:",
+    ]
+    for stop_loss in (20, 30, 40):
+        need = breakeven_take_profit(target, stop_loss, cost_pct)
+        parts.append(f"   при стопе −{stop_loss}%  →  тейк не ниже <b>+{need:.0f}%</b>")
+    parts.append("")
+
+    grid = winrate_grid(rows, target, cost_pct)
+    if not grid:
+        best = max(
+            (simulate(rows, tp, sl, cost_pct) for tp in (15, 20, 25, 30) for sl in (15, 20, 25, 30)),
+            key=lambda item: item.winrate_high,
+        )
+        parts.append(
+            f"<b>На ваших данных {target:.0f}% недостижимы.</b>\n"
+            f"Лучшее, что нашлось: TP +{best.take_profit}% / SL −{best.stop_loss}% — "
+            f"{best.winrate_low:.0f}–{best.winrate_high:.0f}% плюсовых "
+            f"при ожидании {best.expectancy_low:+.1f}…{best.expectancy_high:+.1f}% на сделку.\n\n"
+            "Винрейт упирается в качество входов, а не в настройку выходов. "
+            "Смотрите /stats: какие фильтры режут растущее."
+        )
+        return "\n".join(parts)
+
+    parts.append(f"<b>Что даёт {target:.0f}% на ваших данных</b>")
+    for result in grid[:5]:
+        icon = "🟢" if result.expectancy_low > 0 else ("🟡" if result.expectancy_high > 0 else "🔴")
+        parts.append(
+            f"{icon} TP +{result.take_profit}% / SL −{result.stop_loss}% · "
+            f"плюсовых {result.winrate_low:.0f}–{result.winrate_high:.0f}% · "
+            f"ожидание {result.expectancy_low:+.1f}…{result.expectancy_high:+.1f}% на сделку"
+        )
+
+    top = grid[0]
+    parts.append(
+        f"\nПрименить лучший: <code>/set tp {top.take_profit}</code> · "
+        f"<code>/set sl {top.stop_loss}</code>"
+    )
+    if top.expectancy_low <= 0 < top.expectancy_high:
+        parts.append("🟡 Ожидание положительное только в оптимистичной половине вилки — "
+                     "сначала проверьте в /dry.")
+    elif top.expectancy_high <= 0:
+        parts.append("🔴 <b>Прибыльных вариантов с таким винрейтом нет.</b> "
+                     "Это не про настройки: с такими входами любые выходы в минусе. "
+                     "Работайте над отбором токенов — /stats покажет, какие фильтры мешают.")
+    parts.append(
+        "\n<i>Вилка — потому что порядок пика и минимума в замерах неизвестен: "
+        "где сработали бы оба уровня, результат зависит от того, что случилось раньше. "
+        "Расчёт на прошлых данных и не обещает будущего.</i>"
+    )
+    return "\n".join(parts)

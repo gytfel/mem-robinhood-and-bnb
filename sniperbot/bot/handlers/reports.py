@@ -16,7 +16,14 @@ from sniperbot.bot.ui import reply
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import User
-from sniperbot.pairstats import render_outcomes, round_trip_cost, to_outcomes
+from sniperbot.pairstats import (
+    MIN_SAMPLE,
+    render_outcomes,
+    render_winrate,
+    round_trip_cost,
+    split,
+    to_outcomes,
+)
 from sniperbot.reports import (
     period_breakdown,
     period_label,
@@ -256,6 +263,57 @@ async def _costs_block(ctx: BotContext, user: User) -> str:
         text += ("\n⚠️ Газ съедает больше 5% входа — увеличьте сумму покупки "
                  "(<code>/set buy</code>) или ждите более дешёвого газа.")
     return text
+
+
+@router.message(Command("winrate"))
+async def cmd_winrate(message: Message, command: CommandObject, ctx: BotContext,
+                      user: User) -> None:
+    """Какая пара TP/SL даёт нужную долю плюсовых сделок — и сколько это стоит."""
+    parts = (command.args or "").split()
+    target = Decimal(parts[0]) if parts and parts[0].isdigit() else Decimal(45)
+    target = max(Decimal(5), min(Decimal(95), target))
+
+    chain_key = ctx.resolve_chain(user.active_chain)
+    async with session_scope() as session:
+        tracked = await repo.outcome_pairs(session, chain_key)
+        cfg = await repo.get_settings(session, user.id, chain_key)
+
+    cost = Decimal(parts[1]) if len(parts) > 1 and parts[1].isdigit() else await _round_trip_pct(
+        ctx, user, chain_key, cfg)
+
+    outcomes = to_outcomes(tracked)
+    passed, _ = split(outcomes)
+    # Считаем по тем пулам, что проходят фильтры: именно их бот и покупает.
+    rows, scope = (passed.rows, "прошедшим фильтры")
+    if len(rows) < MIN_SAMPLE:
+        rows, scope = (outcomes, "всем найденным (прошедших фильтры пока мало)")
+
+    await reply(message, render_winrate(rows, target, cost, scope))
+
+
+async def _round_trip_pct(ctx: BotContext, user: User, chain_key: str, cfg) -> Decimal:
+    """Издержки круга в процентах от входа: газ по факту плюс комиссии DEX.
+
+    Налоги токенов сюда не входят — они у каждого свои; поэтому это нижняя
+    оценка, и пользователь может задать свою: /winrate 45 10
+    """
+    dex_fee = Decimal("0.6")          # 0.3% на вход и столько же на выход
+    async with session_scope() as session:
+        gas = await repo.gas_by_kind(session, user.id, chain_key)
+    round_trip = gas.get("buy", 0) + gas.get("sell", 0)
+    if not round_trip:
+        return dex_fee + Decimal(4)   # газ ещё не измерен — берём осторожную прикидку
+    try:
+        fees = await ctx.registry.get(chain_key).gas_fees()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Цена газа недоступна: %s", exc)
+        return dex_fee + Decimal(4)
+    price = int(fees.get("gasPrice") or fees.get("maxFeePerGas") or 0)
+    if not price:
+        return dex_fee + Decimal(4)
+    _, share = round_trip_cost(round_trip, price, Decimal(str(cfg.buy_amount)),
+                               ctx.chain(chain_key).native_decimals)
+    return dex_fee + share
 
 
 @router.message(Command("blacklist"))

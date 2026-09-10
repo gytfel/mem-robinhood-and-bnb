@@ -37,10 +37,11 @@ def outcomes(accepted: int, accepted_hits: int, denied: int, denied_hits: int,
              codes: str = "min_liquidity", hour: int = 21) -> list[Outcome]:
     rows = []
     for index in range(accepted):
-        rows.append(Outcome(True, Decimal(3) if index < accepted_hits else Decimal(1), (), hour))
+        rows.append(Outcome(accepted=True, hour=hour,
+                            multiple=Decimal(3) if index < accepted_hits else Decimal(1)))
     for index in range(denied):
-        rows.append(Outcome(False, Decimal(3) if index < denied_hits else Decimal(1),
-                            tuple(codes.split(",")), hour))
+        rows.append(Outcome(accepted=False, hour=hour, codes=tuple(codes.split(",")),
+                            multiple=Decimal(3) if index < denied_hits else Decimal(1)))
     return rows
 
 
@@ -73,7 +74,7 @@ def test_bucket_median_and_milestones():
     bucket = Bucket("тест", [
         Outcome(True, Decimal(1)), Outcome(True, Decimal(2)),
         Outcome(True, Decimal(3)), Outcome(True, Decimal(6)),
-    ])
+    ])   # low не задан: по умолчанию 1× — просадки не было
     assert bucket.median == Decimal("2.5")
     assert bucket.share(Decimal(2)) == Decimal(75)
     assert bucket.share(Decimal(5)) == Decimal(25)
@@ -255,3 +256,99 @@ async def test_reject_codes_survive_a_round_trip(db):
     assert outcome.accepted is False
     assert outcome.codes == ("proxy", "owner_share")
     assert outcome.multiple == Decimal(4)
+
+
+# ---------------------------------------------------------- подбор под винрейт
+def path(peak: str, low: str = "1", accepted: bool = True) -> Outcome:
+    """Пул, который сходил вверх до peak× и вниз до low×."""
+    return Outcome(accepted=accepted, multiple=Decimal(peak), low=Decimal(low))
+
+
+def test_simulate_counts_clean_wins_and_losses():
+    from sniperbot.pairstats import simulate
+
+    rows = [path("1.5", "0.95"), path("1.02", "0.6"), path("1.05", "0.95")]
+    result = simulate(rows, take_profit=30, stop_loss=25, cost_pct=Decimal(5))
+
+    assert (result.wins, result.losses, result.flat, result.ambiguous) == (1, 1, 1, 0)
+
+
+def test_simulate_marks_ambiguous_when_both_levels_were_touched():
+    """Порядок пика и минимума неизвестен — выдавать одно число было бы враньём."""
+    from sniperbot.pairstats import simulate
+
+    result = simulate([path("2.0", "0.5")], take_profit=50, stop_loss=30, cost_pct=Decimal(5))
+
+    assert result.ambiguous == 1
+    assert result.winrate_low == Decimal(0)
+    assert result.winrate_high == Decimal(100)
+
+
+def test_expectancy_subtracts_costs_from_every_trade():
+    from sniperbot.pairstats import simulate
+
+    # Одна чистая победа по TP +50% при издержках 10% — это +40%, а не +50%.
+    result = simulate([path("1.6", "0.99")], take_profit=50, stop_loss=30, cost_pct=Decimal(10))
+    assert result.expectancy_low == Decimal(40)
+
+    # Сделка, не дошедшая никуда, всё равно стоит издержек.
+    flat = simulate([path("1.05", "0.99")], take_profit=50, stop_loss=30, cost_pct=Decimal(10))
+    assert flat.expectancy_low == Decimal(-10)
+
+
+def test_high_winrate_can_still_lose_money():
+    """Главная ловушка вопроса «как поднять винрейт»: 75% плюсовых и минус в итоге."""
+    from sniperbot.pairstats import simulate
+
+    rows = [path("1.3", "0.95")] * 3 + [path("1.0", "0.4")]
+    result = simulate(rows, take_profit=20, stop_loss=50, cost_pct=Decimal(8))
+
+    assert result.winrate_low == Decimal(75)
+    assert result.expectancy_low < 0
+
+
+def test_breakeven_take_profit_matches_hand_arithmetic():
+    from sniperbot.pairstats import breakeven_take_profit
+
+    # 45% побед, стоп −25%, издержки 8%: (0.55/0.45)×33 + 8 ≈ 48.3%
+    need = breakeven_take_profit(Decimal(45), stop_loss=25, cost_pct=Decimal(8))
+    assert Decimal(48) < need < Decimal(49)
+
+    # Чем ниже винрейт, тем крупнее должна быть победа.
+    assert breakeven_take_profit(Decimal(20), 25, Decimal(8)) > need
+
+
+def test_grid_only_returns_combinations_reaching_the_target():
+    from sniperbot.pairstats import winrate_grid
+
+    rows = [path("1.25", "0.9")] * 40 + [path("1.0", "0.5")] * 60
+    grid = winrate_grid(rows, target=Decimal(35), cost_pct=Decimal(5))
+
+    assert grid, "должны найтись подходящие пары"
+    assert all(result.winrate_high >= 35 for result in grid)
+
+
+def test_winrate_report_states_required_take_profit():
+    from sniperbot.pairstats import render_winrate
+
+    rows = [path("1.3", "0.9")] * 45 + [path("1.0", "0.6")] * 55
+    text = render_winrate(rows, Decimal(45), Decimal(8))
+
+    assert "45%" in text
+    assert "тейк не ниже" in text          # арифметика безубытка на месте
+    assert "вилка" in text.lower()          # и оговорка про неизвестный порядок
+
+
+def test_winrate_report_refuses_to_guess_on_thin_data():
+    from sniperbot.pairstats import render_winrate
+
+    text = render_winrate([path("1.3")] * 5, Decimal(45), Decimal(8))
+    assert "Данных мало" in text
+
+
+def test_winrate_report_says_when_target_is_unreachable():
+    from sniperbot.pairstats import render_winrate
+
+    rows = [path("1.01", "0.3")] * 60      # ничего не растёт
+    text = render_winrate(rows, Decimal(45), Decimal(8))
+    assert "недостижимы" in text

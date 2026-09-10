@@ -16,7 +16,12 @@ from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import Position
 from sniperbot.notify import Notifier
-from sniperbot.settings_registry import parse_variant, variant_overlay
+from sniperbot.settings_registry import (
+    format_hours,
+    parse_variant,
+    trading_allowed,
+    variant_overlay,
+)
 from sniperbot.sniper.executor import Trader
 from sniperbot.sniper.hunter import MomentumHunter
 from sniperbot.sniper.safety import analyze_token, evaluate_verdict
@@ -267,6 +272,11 @@ class SniperEngine:
     async def check_limits(self, user_id: int, chain: str, cfg) -> str | None:
         """Проверяет риск-лимиты пользователя. Возвращает причину отказа или None."""
         now = dt.datetime.now(dt.UTC)
+        # Часы торговли проверяем первыми: если окно закрыто, остальное считать незачем.
+        window = getattr(cfg, "trade_hours", "") or ""
+        if not trading_allowed(window, now):
+            return f"сейчас не торговое время (окно {format_hours(window)})"
+
         async with session_scope() as session:
             if cfg.max_positions and await repo.count_open_positions(session, user_id, chain) >= cfg.max_positions:
                 return f"достигнут лимит открытых позиций ({cfg.max_positions})"

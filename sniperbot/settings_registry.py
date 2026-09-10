@@ -62,6 +62,8 @@ class Setting:
             return str(value)
         if self.kind == "ladder":
             return format_ladder(str(value)) if value else "выключена"
+        if self.kind == "hours":
+            return format_hours(str(value))
         return f"{value}{self.unit}"
 
     def parse(self, raw: str):
@@ -81,6 +83,9 @@ class Setting:
 
         if self.kind == "ladder":
             return parse_ladder(text)
+
+        if self.kind == "hours":
+            return parse_hours(text)
 
         number = parse_decimal(text)
         if number is None:
@@ -251,6 +256,10 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("dayloss", "daily_loss_limit", "chain", "decimal", "Дневной лимит убытка",
             "Автоснайп останавливается, если за сутки потеряно больше. 0 — выключено",
             "risk", minimum=Decimal(0), maximum=Decimal(1000)),
+    Setting("hours", "trade_hours", "chain", "hours", "Часы торговли",
+            "Покупать только в эти часы UTC: «00-22», «14,16,21». Пусто — круглосуточно. "
+            "Лучшие часы по вашим данным показывает /stats",
+            "risk"),
     Setting("maxloss", "max_consecutive_losses", "chain", "int", "Убытков подряд",
             "Стоп после N убыточных сделок подряд. Сбрасывается командой /on. 0 — выключено",
             "risk", minimum=Decimal(0), maximum=Decimal(50)),
@@ -355,6 +364,75 @@ def preset_changes(preset: Preset, cfg) -> list[tuple[Setting, object, str]]:
     return changes
 
 GAS_MODE_MULTIPLIERS = {"normal": 11_000, "fast": 15_000, "turbo": 25_000}
+
+
+def parse_hours(text: str) -> str:
+    """Разбирает «00-22», «14,16,21», «0-3,20-22» в нормализованный список часов.
+
+    Пустая строка означает круглосуточную торговлю. Часы всегда UTC: у сервера,
+    у отчётов и у этой настройки должно быть одно время, иначе «лучшие часы» из
+    /stats и «торговать в эти часы» разъедутся.
+    """
+    text = (text or "").strip().lower()
+    if text in {"", "off", "выкл", "нет", "все", "all", "24/7"}:
+        return ""
+    hours: set[int] = set()
+    for chunk in text.replace(";", ",").replace(" ", "").split(","):
+        if not chunk:
+            continue
+        if "-" in chunk:
+            start_raw, _, end_raw = chunk.partition("-")
+            if not (start_raw.isdigit() and end_raw.isdigit()):
+                raise ValueError("формат: 00-22 либо 14,16,21")
+            start, end = int(start_raw), int(end_raw)
+            if not (0 <= start <= 23 and 0 <= end <= 23):
+                raise ValueError("часы от 0 до 23")
+            # Интервал через полночь («22-3») — это тоже осмысленное окно.
+            hours |= set(range(start, end + 1)) if start <= end else (
+                set(range(start, 24)) | set(range(0, end + 1)))
+        elif chunk.isdigit():
+            hour = int(chunk)
+            if not 0 <= hour <= 23:
+                raise ValueError("часы от 0 до 23")
+            hours.add(hour)
+        else:
+            raise ValueError("формат: 00-22 либо 14,16,21")
+    if not hours:
+        return ""
+    if len(hours) == 24:
+        return ""      # все часы = ограничения нет
+    return ",".join(f"{hour:02d}" for hour in sorted(hours))
+
+
+def hours_set(value: str | None) -> set[int]:
+    return {int(part) for part in str(value or "").split(",") if part.strip().isdigit()}
+
+
+def format_hours(value: str | None) -> str:
+    """«00,01,02,14» → «00-02, 14» — так окно читается с одного взгляда."""
+    hours = sorted(hours_set(value))
+    if not hours:
+        return "круглосуточно"
+    spans, start, previous = [], hours[0], hours[0]
+    for hour in hours[1:]:
+        if hour == previous + 1:
+            previous = hour
+            continue
+        spans.append((start, previous))
+        start = previous = hour
+    spans.append((start, previous))
+    return ", ".join(f"{a:02d}" if a == b else f"{a:02d}-{b:02d}" for a, b in spans) + " UTC"
+
+
+def trading_allowed(value: str | None, now=None) -> bool:  # noqa: ANN001 - datetime
+    """Разрешена ли торговля сейчас. Пустая настройка — разрешена всегда."""
+    import datetime as _dt
+
+    hours = hours_set(value)
+    if not hours:
+        return True
+    moment = now or _dt.datetime.now(_dt.UTC)
+    return moment.hour in hours
 
 
 def parse_ladder(text: str) -> str:

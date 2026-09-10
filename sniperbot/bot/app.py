@@ -45,6 +45,7 @@ COMMANDS = [
     BotCommand(command="pnl", description="Сделки одного режима + файл"),
     BotCommand(command="edge", description="Есть ли преимущество"),
     BotCommand(command="optimize", description="Подобрать TP/SL по истории"),
+    BotCommand(command="winrate", description="Как получить нужный % плюсовых"),
     BotCommand(command="stats", description="Качество фильтров и поток"),
     BotCommand(command="ab", description="A/B-тест настроек"),
     BotCommand(command="creators", description="Репутация создателей"),

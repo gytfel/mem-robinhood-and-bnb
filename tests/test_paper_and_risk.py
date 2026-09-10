@@ -390,3 +390,23 @@ async def test_monitor_respects_per_position_intervals(db, monkeypatch):
     assert loop_time > 0
     await monitor.tick()
     assert checked == ["0xFRESH"]
+
+
+async def test_buys_are_blocked_outside_trading_hours(db):
+    """Окно часов проверяется раньше остальных лимитов — и закрывает покупку."""
+    import datetime as dt
+
+    from sniperbot.sniper import engine as engine_module
+
+    engine = SniperEngine(None, None, None, None,  # type: ignore[arg-type]
+                          engine_module.Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32))
+    cfg = cfg_for(max_positions=5, max_snipes_per_hour=10)
+    hour = dt.datetime.now(dt.UTC).hour
+
+    cfg.trade_hours = f"{hour:02d}"                      # сейчас окно открыто
+    assert await engine.check_limits(1, "bsc", cfg) is None
+
+    cfg.trade_hours = f"{(hour + 12) % 24:02d}"          # а сейчас заведомо закрыто
+    blocked = await engine.check_limits(1, "bsc", cfg)
+    assert blocked is not None
+    assert "торговое время" in blocked

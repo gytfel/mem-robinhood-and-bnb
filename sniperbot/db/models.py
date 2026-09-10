@@ -116,6 +116,7 @@ class ChainSettings(Base):
     daily_loss_limit: Mapped[Decimal] = mapped_column(Dec, default=Decimal(0))
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
     risk_reset_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    trade_hours: Mapped[str] = mapped_column(String(80), default="")  # часы UTC; пусто = круглосуточно
 
     # --- перехват разгона (покупка уже торгующихся токенов) ---
     momentum_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -295,6 +296,7 @@ class SeenPair(Base):
     # иначе невозможно узнать, что фильтры отсеяли — мусор или будущие иксы.
     first_price: Mapped[Decimal | None] = mapped_column(Dec)
     peak_price: Mapped[Decimal | None] = mapped_column(Dec)
+    low_price: Mapped[Decimal | None] = mapped_column(Dec)   # без минимума не проверить стоп
     price_samples: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 

@@ -231,3 +231,44 @@ def test_presets_keep_exit_rules_consistent():
         assert steps, f"{preset.name}: без лестницы прибыль не фиксируется"
         first_step = steps[0][0]
         assert trail < first_step, f"{preset.name}: трейлинг {trail}% съест ступень +{first_step}%"
+
+
+# --------------------------------------------------------------- часы торговли
+def test_hours_parsing_accepts_ranges_lists_and_midnight_crossing():
+    from sniperbot.settings_registry import parse_hours
+
+    assert parse_hours("00-03") == "00,01,02,03"
+    assert parse_hours("14,16,21") == "14,16,21"
+    assert parse_hours("22-2") == "00,01,02,22,23"      # окно через полночь
+    assert parse_hours("off") == ""
+    assert parse_hours("0-23") == ""                    # все часы = ограничения нет
+
+
+def test_hours_parsing_rejects_nonsense():
+    import pytest
+
+    from sniperbot.settings_registry import parse_hours
+
+    for raw in ("25", "abc", "1-99", "10:00"):
+        with pytest.raises(ValueError):
+            parse_hours(raw)
+
+
+def test_hours_are_shown_as_readable_spans():
+    from sniperbot.settings_registry import format_hours
+
+    assert format_hours("00,01,02,14") == "00-02, 14 UTC"
+    assert format_hours("") == "круглосуточно"
+
+
+def test_trading_allowed_respects_the_window():
+    import datetime as dt
+
+    from sniperbot.settings_registry import trading_allowed
+
+    inside = dt.datetime(2026, 9, 9, 21, tzinfo=dt.UTC)
+    outside = dt.datetime(2026, 9, 9, 11, tzinfo=dt.UTC)
+
+    assert trading_allowed("20,21,22", inside) is True
+    assert trading_allowed("20,21,22", outside) is False
+    assert trading_allowed("", outside) is True        # пусто — круглосуточно

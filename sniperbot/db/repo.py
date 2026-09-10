@@ -599,6 +599,8 @@ async def track_pool_price(session: AsyncSession, pair_id: int, price: Decimal) 
         row.first_price = price
     if row.peak_price is None or price > row.peak_price:
         row.peak_price = price
+    if row.low_price is None or price < row.low_price:
+        row.low_price = price
     row.price_samples = int(row.price_samples or 0) + 1
 
 
