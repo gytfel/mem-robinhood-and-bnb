@@ -185,6 +185,15 @@ class Settings(BaseSettings):
     service_fee_bps: int = Field(default=0, alias="SERVICE_FEE_BPS")
     service_fee_wallet: str = Field(default="", alias="SERVICE_FEE_WALLET")
 
+    # --- комиссии сервиса и реферальная программа ---
+    # Комиссия за пополнение снимается один раз с суммы прихода, комиссия за
+    # прибыль — только с положительного результата закрытой сделки.
+    deposit_fee_bps: int = Field(default=200, alias="DEPOSIT_FEE_BPS")     # 2%
+    profit_fee_bps: int = Field(default=500, alias="PROFIT_FEE_BPS")       # 5% от прибыли
+    referrals_for_free_deposit: int = Field(default=3, alias="REFERRALS_FOR_FREE_DEPOSIT")
+    # Комиссию меньше этой доли от газа брать бессмысленно: отправка съест больше
+    min_fee_gas_ratio: int = Field(default=3, alias="MIN_FEE_GAS_RATIO")
+
     @field_validator("service_fee_bps")
     @classmethod
     def _limit_fee(cls, value: int) -> int:

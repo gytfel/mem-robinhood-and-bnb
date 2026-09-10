@@ -71,6 +71,30 @@ def _add_missing_columns(connection) -> None:  # noqa: ANN001 - sync-соеди�
             log.info("Миграция: добавляю столбец %s.%s", table.name, column.name)
             connection.execute(text(ddl))
 
+    _add_missing_indexes(connection, inspector, existing_tables)
+
+
+def _add_missing_indexes(connection, inspector, existing_tables) -> None:  # noqa: ANN001
+    """Создаёт индексы, которых нет в уже существующих таблицах.
+
+    ALTER TABLE ADD COLUMN индекс не создаёт, а create_all() до старых таблиц не
+    доходит. Без этого обновлённая база и свежая расходятся: одни и те же запросы
+    в одной идут по индексу, а в другой перебором всей таблицы.
+    """
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        present = {index["name"] for index in inspector.get_indexes(table.name)}
+        for index in table.indexes:
+            if index.name in present:
+                continue
+            try:
+                index.create(bind=connection)
+            except Exception as exc:  # noqa: BLE001 - индекс не критичен для работы
+                log.debug("Индекс %s не создан: %s", index.name, exc)
+            else:
+                log.info("Миграция: создаю индекс %s", index.name)
+
 
 async def close_db() -> None:
     global _engine, _session_factory

@@ -676,3 +676,43 @@ async def recent_token_addresses(
 
 def to_lower(value: str) -> str:
     return str(value).lower()
+
+
+# ------------------------------------------------------------------- рефералы
+async def referral_count(session: AsyncSession, user_id: int) -> int:
+    stmt = select(func.count()).select_from(User).where(User.referred_by == user_id)
+    return int(await session.scalar(stmt) or 0)
+
+
+async def referrals_of(session: AsyncSession, user_id: int, limit: int = 50) -> list[User]:
+    stmt = select(User).where(User.referred_by == user_id).order_by(User.created_at.desc()).limit(limit)
+    return list((await session.scalars(stmt)).all())
+
+
+async def set_referrer(session: AsyncSession, user_id: int, referrer_id: int) -> bool:
+    """Привязывает пригласившего. Один раз и не на себя — иначе программа фиктивна."""
+    if user_id == referrer_id:
+        return False
+    user = await session.get(User, user_id)
+    if user is None or user.referred_by is not None:
+        return False
+    if await session.get(User, referrer_id) is None:
+        return False
+    user.referred_by = referrer_id
+    return True
+
+
+async def add_fee_paid(session: AsyncSession, user_id: int, amount_wei: int) -> None:
+    user = await session.get(User, user_id)
+    if user is not None:
+        user.fees_paid_wei = int(user.fees_paid_wei or 0) + int(amount_wei)
+
+
+async def fees_total(session: AsyncSession) -> int:
+    """Сколько комиссий удержано со всех пользователей — для отчёта владельцу.
+
+    Складываем в Python: суммы в wei лежат строками (uint256 не влезает в int64),
+    и SQL-сумма по ним дала бы бессмыслицу.
+    """
+    rows = await session.scalars(select(User.fees_paid_wei))
+    return sum(int(value or 0) for value in rows)

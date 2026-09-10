@@ -9,6 +9,7 @@ from sniperbot.chain.clients import ChainRegistry
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
+from sniperbot.fees import deposit_fee
 from sniperbot.notify import Notifier
 from sniperbot.utils.fmt import fmt_amount, from_wei
 
@@ -20,10 +21,13 @@ CONCURRENCY = 8
 class DepositWatcher:
     """Сравнивает баланс кошелька с сохранённым и сообщает о пополнении."""
 
-    def __init__(self, registry: ChainRegistry, notifier: Notifier, settings: Settings) -> None:
+    def __init__(self, registry: ChainRegistry, notifier: Notifier, settings: Settings,
+                 wallets=None, trader=None) -> None:  # noqa: ANN001 - без циклического импорта
         self.registry = registry
         self.notifier = notifier
         self.settings = settings
+        self.wallets = wallets
+        self.trader = trader
         self._running = False
         self._semaphore = asyncio.Semaphore(CONCURRENCY)
 
@@ -78,11 +82,53 @@ class DepositWatcher:
                 amount_wei=delta, balance_after_wei=balance,
             )
 
+        fee = await self._charge(user_id, chain_key, delta)
+
         if notify:
             symbol = self.registry.config(chain_key).native_symbol
-            await self.notifier.send(
-                user_id,
-                f"💰 <b>Пополнение</b> +{fmt_amount(from_wei(delta))} {symbol}\n"
-                f"Баланс: {fmt_amount(from_wei(balance))} {symbol}\n"
-                f"Сеть: {self.registry.config(chain_key).name}",
+            text = (f"💰 <b>Пополнение</b> +{fmt_amount(from_wei(delta))} {symbol}\n"
+                    f"Баланс: {fmt_amount(from_wei(balance - fee))} {symbol}\n"
+                    f"Сеть: {self.registry.config(chain_key).name}")
+            if fee:
+                text += (f"\n\nКомиссия сервиса: {fmt_amount(from_wei(fee))} {symbol} "
+                         f"({self.settings.deposit_fee_bps / 100:g}%)\n"
+                         "Пригласите друзей — комиссия снимется навсегда: /ref")
+            await self.notifier.send(user_id, text)
+
+    async def _charge(self, user_id: int, chain_key: str, amount_wei: int) -> int:
+        """Удерживает комиссию за пополнение. Возвращает удержанное в wei."""
+        if self.wallets is None or self.trader is None:
+            return 0
+        policy = self.trader.fee_policy()
+        if not policy.enabled:
+            return 0
+
+        async with session_scope() as session:
+            user = await repo.get_user(session, user_id)
+            referrals = await repo.referral_count(session, user_id)
+        if user is None:
+            return 0
+
+        gas = await self.trader._transfer_gas_cost(chain_key)
+        fee = deposit_fee(amount_wei, referrals=referrals,
+                          is_admin=user_id in self.settings.admin_ids,
+                          exempt=bool(user.fee_exempt), policy=policy, gas_cost_wei=gas)
+        if fee <= 0:
+            return 0
+
+        try:
+            client = self.registry.get(chain_key)
+            account = self.wallets.account(user)
+            await self.wallets.send_native(client, account, policy.wallet, fee)
+        except Exception as exc:  # noqa: BLE001 - пополнение важнее комиссии
+            log.warning("Комиссия за пополнение не удержана у %s: %s", user_id, exc)
+            return 0
+
+        async with session_scope() as session:
+            await repo.add_fee_paid(session, user_id, fee)
+            await repo.log_wallet_event(
+                session, user_id=user_id, chain=chain_key, kind="fee",
+                amount_wei=fee, balance_after_wei=0,
             )
+        log.info("Комиссия за пополнение %s: %s wei", user_id, fee)
+        return fee

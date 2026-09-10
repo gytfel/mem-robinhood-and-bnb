@@ -8,6 +8,7 @@ from sniperbot.bot.handlers import (
     control,
     lab,
     positions,
+    referral,
     reports,
     settings,
     trade,
@@ -23,6 +24,7 @@ def build_router() -> Router:
     root.include_router(wallet.router)
     root.include_router(positions.router)
     root.include_router(reports.router)
+    root.include_router(referral.router)
     root.include_router(lab.router)
     root.include_router(settings.router)
     root.include_router(admin.router)

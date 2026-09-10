@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -16,25 +16,42 @@ from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, User
+from sniperbot.fees import parse_referral
 
 router = Router(name="common")
 
 
 @router.message(CommandStart())
 async def cmd_start(
-    message: Message, ctx: BotContext, user: User, cfg: ChainSettings, chain: ChainConfig,
-    is_new_user: bool, state: FSMContext,
+    message: Message, command: CommandObject, ctx: BotContext, user: User,
+    cfg: ChainSettings, chain: ChainConfig, is_new_user: bool, state: FSMContext,
 ) -> None:
     await state.clear()
+    invited_by = await _accept_referral(user, command.args)
     if is_new_user:
-        await reply(
-            message,
-            WELCOME
-            + f"💼 Ваш кошелёк создан:\n<code>{user.wallet_address}</code>\n\n"
-            + "Пополните его, чтобы начать торговать.\n\n"
-            + DISCLAIMER,
-        )
+        text = (WELCOME
+                + f"💼 Ваш кошелёк создан:\n<code>{user.wallet_address}</code>\n\n"
+                + "Пополните его, чтобы начать торговать.\n\n")
+        if invited_by:
+            text += "Вы пришли по приглашению — спасибо тому, кто позвал.\n\n"
+        await reply(message, text + DISCLAIMER)
     await show_main(message, ctx, user, cfg, chain)
+
+
+async def _accept_referral(user: User, payload: str | None) -> int | None:
+    """Запоминает пригласившего из ссылки-приглашения.
+
+    Привязка делается один раз и только при первом заходе: иначе приглашённого
+    можно было бы «перепривязать» и накрутить себе бесплатные пополнения.
+    """
+    referrer = parse_referral(payload)
+    if referrer is None or referrer == user.id or user.referred_by is not None:
+        return None
+    async with session_scope() as session:
+        if not await repo.set_referrer(session, user.id, referrer):
+            return None
+    user.referred_by = referrer
+    return referrer
 
 
 @router.message(Command("help"))

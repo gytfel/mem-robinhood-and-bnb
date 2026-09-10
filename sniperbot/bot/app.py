@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, ErrorEvent
+from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.handlers import build_router
@@ -30,6 +30,8 @@ from sniperbot.version import build_info
 
 log = logging.getLogger(__name__)
 
+# Команды, видимые всем. Админские живут отдельным списком ниже: Telegram умеет
+# показывать разные наборы разным чатам, и лишнего в меню пользователя быть не должно.
 COMMANDS = [
     BotCommand(command="start", description="Главное меню"),
     BotCommand(command="on", description="Включить автоснайп"),
@@ -66,13 +68,51 @@ COMMANDS = [
     BotCommand(command="settings", description="Настройки кнопками"),
     BotCommand(command="blacklist", description="Чёрный список токенов"),
     BotCommand(command="withdraw", description="Вывод средств"),
+    BotCommand(command="export", description="Показать приватный ключ"),
+    BotCommand(command="newwallet", description="Создать новый кошелёк"),
+    BotCommand(command="import", description="Привязать свой кошелёк"),
+    BotCommand(command="menu", description="Главное меню"),
     BotCommand(command="history", description="История сделок"),
     BotCommand(command="chain", description="Переключить сеть"),
     BotCommand(command="id", description="Мой Telegram ID"),
     BotCommand(command="cancel", description="Отменить ввод"),
     BotCommand(command="version", description="Версия и перезапуски"),
+    BotCommand(command="ref", description="Пригласить друзей и снять комиссию"),
     BotCommand(command="help", description="Помощь"),
 ]
+
+# Видны только тем, чьи id перечислены в ADMIN_IDS.
+ADMIN_COMMANDS = [
+    BotCommand(command="fees", description="🔒 Собранные комиссии"),
+    BotCommand(command="exempt", description="🔒 Освободить пользователя от комиссий"),
+    BotCommand(command="users", description="🔒 Список пользователей"),
+    BotCommand(command="userinfo", description="🔒 Карточка пользователя"),
+    BotCommand(command="ban", description="🔒 Заблокировать пользователя"),
+    BotCommand(command="unban", description="🔒 Разблокировать"),
+    BotCommand(command="broadcast", description="🔒 Сообщение всем"),
+    BotCommand(command="health", description="🔒 Живы ли сканеры и ноды"),
+    BotCommand(command="usage", description="🔒 Расход RPC и размер базы"),
+    BotCommand(command="latency", description="🔒 Задержки эндпоинтов"),
+    BotCommand(command="logs", description="🔒 Журнал операций"),
+    BotCommand(command="restart", description="🔒 Перезапуск бота"),
+]
+
+
+async def publish_commands(bot: Bot, admins: set[int]) -> None:
+    """Ставит меню команд: общее всем и расширенное — администраторам.
+
+    Список у пользователя должен содержать только то, что ему доступно: команда,
+    которая всё равно ответит «только для администратора», в меню лишь мешает.
+    """
+    await bot.set_my_commands(COMMANDS)
+    for admin_id in admins:
+        try:
+            await bot.set_my_commands(
+                [*COMMANDS, *ADMIN_COMMANDS],
+                scope=BotCommandScopeChat(chat_id=admin_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - админ мог не запускать бота
+            log.debug("Меню для администратора %s не поставлено: %s", admin_id, exc)
 
 
 async def announce_restart(ctx: BotContext, text: str) -> None:
@@ -143,7 +183,7 @@ async def run_bot() -> None:
     trader.on_late_result = announce_late_result
     engine = SniperEngine(registry, trader, wallets, notifier, settings)
     monitor = PositionMonitor(registry, trader, notifier, settings)
-    deposits = DepositWatcher(registry, notifier, settings)
+    deposits = DepositWatcher(registry, notifier, settings, wallets=wallets, trader=trader)
 
     running_build = build_info()
     ctx = BotContext(
@@ -175,7 +215,7 @@ async def run_bot() -> None:
     log.info("Сборка: %s (%s)", report.info.short(), report.info.source)
 
     try:
-        await bot.set_my_commands(COMMANDS)
+        await publish_commands(bot, settings.admin_ids)
         me = await bot.get_me()
         log.info("Бот @%s запущен", me.username)
 

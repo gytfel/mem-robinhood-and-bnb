@@ -28,14 +28,24 @@ log = logging.getLogger(__name__)
 router = Router(name="admin")
 
 
+ADMIN_ONLY = ("🔒 Команда только для администратора бота.\n"
+              "Список доступных вам команд: /help")
+
+
 def _deny(is_admin: bool) -> bool:
     return not is_admin
+
+
+async def _refuse(message: Message) -> None:
+    """Отказ вслух: молчание выглядит поломкой, а не запретом."""
+    await reply(message, ADMIN_ONLY)
 
 
 @router.message(Command("stats_admin", "adminstats"))
 @router.message(Command("health"))
 async def cmd_health(message: Message, ctx: BotContext, is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     from sniperbot.bot.startup import human_duration
     from sniperbot.db.models import BotRun
@@ -92,6 +102,7 @@ async def cmd_health(message: Message, ctx: BotContext, is_admin: bool = False) 
 @router.message(Command("usage"))
 async def cmd_usage(message: Message, ctx: BotContext, is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     lines = ["📊 <b>Расход ресурсов</b>\n", "<b>Запросы к RPC</b> (с момента запуска)"]
     for key in ctx.active_chain_keys:
@@ -117,6 +128,7 @@ async def cmd_usage(message: Message, ctx: BotContext, is_admin: bool = False) -
 @router.message(Command("latency"))
 async def cmd_latency(message: Message, ctx: BotContext, is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     status = await reply(message, "⏱ Замеряю задержки эндпоинтов…")
     lines = ["⏱ <b>Задержки RPC</b>"]
@@ -140,6 +152,7 @@ async def cmd_latency(message: Message, ctx: BotContext, is_admin: bool = False)
 @router.message(Command("users"))
 async def cmd_users(message: Message, ctx: BotContext, is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     async with session_scope() as session:
         users = await repo.list_users(session, limit=40)
@@ -169,6 +182,7 @@ async def cmd_users(message: Message, ctx: BotContext, is_admin: bool = False) -
 async def cmd_userinfo(message: Message, command: CommandObject, ctx: BotContext,
                        is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     raw = (command.args or "").strip()
     if not raw.isdigit():
@@ -216,6 +230,7 @@ async def cmd_unban(message: Message, command: CommandObject, is_admin: bool = F
 
 async def _set_block(message: Message, command: CommandObject, is_admin: bool, blocked: bool) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     raw = (command.args or "").strip()
     if not raw.isdigit():
@@ -234,6 +249,7 @@ async def _set_block(message: Message, command: CommandObject, is_admin: bool, b
 async def cmd_broadcast(message: Message, command: CommandObject, ctx: BotContext,
                         is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     text = (command.args or "").strip()
     if not text:
@@ -256,6 +272,7 @@ async def cmd_broadcast(message: Message, command: CommandObject, ctx: BotContex
 async def cmd_logs(message: Message, command: CommandObject, ctx: BotContext,
                    is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     limit = int(command.args) if (command.args or "").strip().isdigit() else 15
     async with session_scope() as session:
@@ -282,6 +299,7 @@ async def cmd_logs(message: Message, command: CommandObject, ctx: BotContext,
 async def cmd_restart(message: Message, command: CommandObject, ctx: BotContext,
                       is_admin: bool = False) -> None:
     if _deny(is_admin):
+        await _refuse(message)
         return
     if (command.args or "").strip().lower() not in {"confirm", "да", "now"}:
         await reply(

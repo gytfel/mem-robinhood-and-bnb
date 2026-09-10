@@ -29,6 +29,7 @@ from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, Position, User, utcnow
+from sniperbot.fees import FeePolicy, profit_fee
 from sniperbot.settings_registry import effective_gas_multiplier
 from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import from_wei, to_wei
@@ -37,6 +38,7 @@ log = logging.getLogger(__name__)
 
 BALANCE_RECHECK_DELAY = 4.0   # пауза перед повторным опросом нод, сек
 MIN_GAS_UNITS = 150_000       # ниже этого своп не стоит нигде
+TRANSFER_GAS = 21_000         # обычный перевод монеты
 
 MAX_UINT256 = 2**256 - 1
 GAS_BUFFER_BPS = 13_000  # +30% к оценке газа: токены с комиссией жрут больше
@@ -600,6 +602,8 @@ class Trader:
         )
         remaining = await balance_of(client, token_address, account.address)
 
+        closed = False
+        spent_total = returned_total = 0
         async with session_scope() as session:
             stored = await session.get(Position, position.id)
             if stored is not None:
@@ -610,12 +614,20 @@ class Trader:
                 if remaining == 0 or percent >= 100:
                     stored.status = "closed"
                     stored.closed_at = utcnow()
+                    closed = True
+                    spent_total = int(stored.native_spent_wei or 0)
+                    returned_total = int(stored.native_returned_wei or 0)
                 await session.flush()
             await repo.log_trade(
                 session, user_id=user.id, position_id=position.id, chain=position.chain, kind="sell",
                 token_address=token_address, amount_in_wei=amount, amount_out_wei=received_native,
                 tx_hash=sent.tx_hash, status="success", gas_used=int(receipt.get("gasUsed", 0)),
             )
+
+        # Комиссию считаем по всей позиции целиком: частичные фиксации по ступеням
+        # каждая по отдельности «прибыльны», хотя сделка в сумме может быть в минусе.
+        if closed:
+            await self.charge_profit_fee(user, position.chain, position, spent_total, returned_total)
 
         return TradeResult(
             True, "sell", tx_hash=sent.tx_hash, amount_in=amount, amount_out=received_native,
@@ -843,6 +855,61 @@ class Trader:
         except Exception:  # noqa: BLE001 - симуляция часто ревертит на свежих парах
             return fallback
         return max(fallback // 4, min(estimated * GAS_BUFFER_BPS // 10_000, 5_000_000))
+
+    def fee_policy(self) -> FeePolicy:
+        """Правила комиссий из настроек сервиса."""
+        return FeePolicy(
+            wallet=self.settings.service_fee_wallet,
+            deposit_bps=self.settings.deposit_fee_bps,
+            profit_bps=self.settings.profit_fee_bps,
+            referrals_needed=self.settings.referrals_for_free_deposit,
+            min_ratio_to_gas=self.settings.min_fee_gas_ratio,
+        )
+
+    async def charge_profit_fee(self, user: User, chain_key: str, position: Position,
+                                spent_wei: int, returned_wei: int) -> int:
+        """Удерживает комиссию с прибыли закрытой сделки. Возвращает удержанное.
+
+        Комиссия берётся только с превышения над вложенным: если сделка в минусе,
+        брать процент с потерь нечестно, и функция возвращает ноль.
+        """
+        policy = self.fee_policy()
+        if not policy.enabled:
+            return 0
+        is_admin = user.id in self.settings.admin_ids
+        gas = await self._transfer_gas_cost(chain_key)
+        fee = profit_fee(spent_wei, returned_wei, is_admin=is_admin,
+                         exempt=bool(user.fee_exempt), policy=policy, gas_cost_wei=gas)
+        if fee <= 0:
+            return 0
+
+        client = self.registry.get(chain_key)
+        account = self.wallets.account(user)
+        try:
+            await self.wallets.send_native(client, account, policy.wallet, fee)
+        except Exception as exc:  # noqa: BLE001 - сделка уже закрыта, ронять её нельзя
+            log.warning("Комиссия с прибыли не отправлена: %s", exc)
+            return 0
+        async with session_scope() as session:
+            await repo.add_fee_paid(session, user.id, fee)
+            await repo.log_trade(
+                session, user_id=user.id, position_id=position.id, chain=chain_key,
+                kind="fee", token_address=position.token_address, amount_in_wei=fee,
+                status="success",
+            )
+        log.info("Комиссия с прибыли %s: %s wei", user.id, fee)
+        return fee
+
+    async def _transfer_gas_cost(self, chain_key: str) -> int:
+        """Во что обойдётся отправка комиссии — чтобы не брать её себе в убыток."""
+        try:
+            client = self.registry.get(chain_key)
+            fees = await client.gas_fees()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Цена газа для комиссии недоступна: %s", exc)
+            return 0
+        price = int(fees.get("gasPrice") or fees.get("maxFeePerGas") or 0)
+        return price * TRANSFER_GAS
 
     async def _send_service_fee(self, client, account, fee_wei: int) -> None:
         try:

@@ -81,6 +81,11 @@ class User(Base):
     notify_restart: Mapped[bool] = mapped_column(Boolean, default=True)
     tz_offset: Mapped[int] = mapped_column(Integer, default=0)   # часы от UTC, для отчётов
 
+    # --- реферальная программа и комиссии ---
+    referred_by: Mapped[int | None] = mapped_column(BigInteger, index=True)  # кто пригласил
+    fee_exempt: Mapped[bool] = mapped_column(Boolean, default=False)         # освобождён вручную
+    fees_paid_wei: Mapped[int] = mapped_column(Wei, default=0)               # сколько удержано всего
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

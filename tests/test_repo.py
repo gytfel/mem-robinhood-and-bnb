@@ -132,3 +132,22 @@ async def test_wei_column_survives_huge_values(db):
     async with session_scope() as session:
         position = (await repo.open_positions(session, user_id=8))[0]
         assert position.amount_wei == huge
+
+
+async def test_migration_adds_missing_indexes_not_only_columns(db):
+    """ALTER TABLE ADD COLUMN индекс не создаёт, а create_all() старые таблицы не трогает.
+
+    Без этого обновлённая база и свежая расходятся: один и тот же запрос в одной
+    идёт по индексу, в другой — перебором.
+    """
+    from sqlalchemy import inspect
+
+    from sniperbot.db.base import session_factory
+
+    async with session_factory()() as session:
+        names = await session.run_sync(
+            lambda sync: {index["name"] for index in inspect(sync.bind).get_indexes("users")}
+        )
+
+    assert "ix_users_referred_by" in names       # добавлен вместе со столбцом
+    assert "ix_users_wallet_address" in names
