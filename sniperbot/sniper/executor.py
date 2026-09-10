@@ -36,6 +36,7 @@ from sniperbot.utils.fmt import from_wei, to_wei
 log = logging.getLogger(__name__)
 
 BALANCE_RECHECK_DELAY = 4.0   # пауза перед повторным опросом нод, сек
+MIN_GAS_UNITS = 150_000       # ниже этого своп не стоит нигде
 
 MAX_UINT256 = 2**256 - 1
 GAS_BUFFER_BPS = 13_000  # +30% к оценке газа: токены с комиссией жрут больше
@@ -159,12 +160,15 @@ class Trader:
         gas_fees = await self.gas_fees(client, cfg)
         gas_price = int(gas_fees.get("gasPrice") or gas_fees.get("maxFeePerGas") or 0)
         balance = await client.native_balance(account.address)
-        needed = amount_wei + gas_price * cfg.gas_limit
-        if balance < needed and not getattr(user, "dry_run", False):
+        paper = bool(getattr(user, "dry_run", False))
+        # Ранняя проверка — по минимально возможному расходу газа. Настройка
+        # gas_limit это потолок, а не цена сделки: своп тратит впятеро меньше,
+        # и резервировать весь потолок значит отказывать при живых деньгах.
+        if not paper and balance < amount_wei + gas_price * MIN_GAS_UNITS:
             return TradeResult(
                 False, "buy",
-                error=(f"Недостаточно {chain.native_symbol}: нужно ~{from_wei(needed):.6f}, "
-                       f"на балансе {from_wei(balance):.6f}. Пополните кошелёк."),
+                error=self._not_enough(chain, amount_wei, gas_price * MIN_GAS_UNITS,
+                                       balance, gas_price),
             )
 
         token = await fetch_token(client, token_address)
@@ -194,6 +198,16 @@ class Trader:
         if tx is None:
             return TradeResult(False, "buy", token_symbol=token.symbol, dex=adapter.name,
                                error=f"Покупка не пройдёт: {error}")
+
+        # Теперь газ известен точно: сеть требует баланс не меньше суммы плюс
+        # лимит собранной транзакции, помноженный на цену газа.
+        gas_cost = int(tx.get("gas", cfg.gas_limit)) * gas_price
+        value = int(tx.get("value", spend_wei))
+        if balance < value + gas_cost:
+            return TradeResult(
+                False, "buy", token_symbol=token.symbol, dex=adapter.name,
+                error=self._not_enough(chain, value, gas_cost, balance, gas_price),
+            )
 
         balance_before = await balance_of(client, token_address, account.address)
         try:
@@ -438,6 +452,32 @@ class Trader:
                 symbol, decimals = "?", 18
             found.append(OrphanToken(to_checksum(address), symbol, balance, decimals))
         return found
+
+    @staticmethod
+    def _not_enough(chain, amount_wei: int, gas_cost: int, balance: int, gas_price: int) -> str:
+        """Отказ по деньгам с разбором: сколько на сделку, сколько на газ.
+
+        Газ — плата за транзакцию, а не процент от суммы: он одинаков и для
+        0.0002, и для 1 монеты. Если он съедает вход, дело не в балансе, и
+        сообщение должно говорить об этом прямо.
+        """
+        needed = amount_wei + gas_cost
+        text = (f"Недостаточно {chain.native_symbol}: нужно ~{from_wei(needed, chain.native_decimals):.6f} "
+                f"(покупка {from_wei(amount_wei, chain.native_decimals):.6f} + газ "
+                f"{from_wei(gas_cost, chain.native_decimals):.6f}), "
+                f"на балансе {from_wei(balance, chain.native_decimals):.6f}.")
+        if amount_wei > 0 and gas_cost * 2 > amount_wei:
+            # Круг стоит дороже половины входа — торговать такой суммой бессмысленно.
+            sane = gas_cost * 2 * 20      # газ на круг должен быть не больше 5% входа
+            text += (f"\n\n⚠️ Газ за круг «купил-продал» — около "
+                     f"{from_wei(gas_cost * 2, chain.native_decimals):.6f} {chain.native_symbol}. "
+                     f"При входе {from_wei(amount_wei, chain.native_decimals):.6f} это дороже самой сделки: "
+                     "прибыль невозможна в принципе.\n"
+                     f"Разумный минимум сейчас: <code>/set buy "
+                     f"{from_wei(sane, chain.native_decimals):.4f}</code>")
+        else:
+            text += " Пополните кошелёк."
+        return text
 
     # -------------------------------------------------------------- продажа
     async def sell(

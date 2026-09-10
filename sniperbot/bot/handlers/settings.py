@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -17,6 +18,7 @@ from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, User
+from sniperbot.pairstats import round_trip_cost
 from sniperbot.settings_registry import (
     GROUPS,
     PRESETS,
@@ -28,11 +30,13 @@ from sniperbot.settings_registry import (
     render_full,
     render_one,
 )
-from sniperbot.utils.fmt import esc
+from sniperbot.utils.fmt import esc, fmt_amount
 
 log = logging.getLogger(__name__)
 
 router = Router(name="settings")
+
+TYPICAL_SWAP_GAS = 200_000   # пока своих замеров нет — обычная цена свопа
 
 
 class SettingsStates(StatesGroup):
@@ -123,8 +127,8 @@ async def cmd_config(message: Message, command: CommandObject, cfg: ChainSetting
 
 
 @router.message(Command("set"))
-async def cmd_set(message: Message, command: CommandObject, cfg: ChainSettings,
-                  chain: ChainConfig, user: User) -> None:
+async def cmd_set(message: Message, command: CommandObject, ctx: BotContext,
+                  cfg: ChainSettings, chain: ChainConfig, user: User) -> None:
     parts = (command.args or "").split(maxsplit=1)
     if len(parts) < 2:
         await reply(
@@ -152,11 +156,48 @@ async def cmd_set(message: Message, command: CommandObject, cfg: ChainSettings,
         return
 
     await _persist(user.id, chain.key, setting, value, cfg, user)
-    await reply(
-        message,
+    text = (
         f"✅ <b>{esc(setting.title)}</b> = {esc(setting.display(cfg, user, chain.native_symbol))}"
         + ("\n<i>Настройка общая для всех сетей</i>" if setting.scope == "user"
-           else f"\n<i>Только для сети {esc(chain.name)}</i>"),
+           else f"\n<i>Только для сети {esc(chain.name)}</i>")
+    )
+    if setting.name == "buy":
+        text += await _gas_warning(ctx, user, chain, value)
+    await reply(message, text)
+
+
+async def _gas_warning(ctx: BotContext, user: User, chain: ChainConfig, amount) -> str:  # noqa: ANN001
+    """Предупреждение, если газ съедает вход.
+
+    Газ — плата за транзакцию, а не процент от суммы: он одинаков для любого
+    входа. Узнавать об этом в момент сделки поздно, поэтому считаем сразу.
+    """
+    try:
+        fees = await ctx.registry.get(chain.key).gas_fees()
+    except Exception as exc:  # noqa: BLE001 - без цены газа просто молчим
+        log.debug("Цена газа недоступна: %s", exc)
+        return ""
+    price = int(fees.get("gasPrice") or fees.get("maxFeePerGas") or 0)
+    if not price:
+        return ""
+
+    async with session_scope() as session:
+        measured = await repo.gas_by_kind(session, user.id, chain.key)
+    units = (measured.get("buy", 0) + measured.get("sell", 0)) or 2 * TYPICAL_SWAP_GAS
+    cost, share = round_trip_cost(units, price, Decimal(str(amount)), chain.native_decimals)
+    if share < 5:
+        return (f"\n\nГаз за круг «купил-продал»: ~{fmt_amount(cost, 6)} {chain.native_symbol} "
+                f"— это {share:.1f}% от входа.")
+
+    sane = cost * 20      # чтобы газ был не больше 5% входа
+    return (
+        f"\n\n⚠️ <b>Газ съест сделку.</b> Круг «купил-продал» стоит около "
+        f"{fmt_amount(cost, 6)} {chain.native_symbol} — это <b>{share:.0f}%</b> от входа "
+        f"{fmt_amount(Decimal(str(amount)))}.\n"
+        "Газ не зависит от суммы: он одинаков и для 0.0002, и для целой монеты. "
+        "Чем меньше вход, тем большую долю он забирает.\n"
+        f"Чтобы газ был в пределах 5%, вход должен быть от "
+        f"<code>/set buy {fmt_amount(sane, 4)}</code>"
     )
 
 

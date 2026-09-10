@@ -492,3 +492,31 @@ async def test_find_orphans_survives_a_broken_token(db, token):
     assert len(orphans) == 1
     assert orphans[0].symbol == "?"        # имя не прочиталось, но подобрать можно
     assert orphans[0].decimals == 18
+
+
+# ------------------------------------------------------------------ газ и вход
+def test_shortfall_message_separates_purchase_from_gas():
+    """«Нужно 0.001343» без разбора выглядит как комиссия с суммы — это не так."""
+    text = Trader._not_enough(CHAIN, amount_wei=2 * 10**14, gas_cost=11 * 10**14,
+                              balance=128 * 10**13, gas_price=2 * 10**9)
+
+    assert "покупка 0.000200" in text
+    assert "газ 0.001100" in text
+
+
+def test_shortfall_message_warns_when_gas_dwarfs_the_trade():
+    """Вход 0.0002 при круге 0.0022 — не вопрос баланса, а бессмысленная сделка."""
+    text = Trader._not_enough(CHAIN, amount_wei=2 * 10**14, gas_cost=11 * 10**14,
+                              balance=128 * 10**13, gas_price=2 * 10**9)
+
+    assert "прибыль невозможна" in text
+    assert "/set buy" in text                    # названа рабочая сумма
+
+
+def test_shortfall_message_stays_plain_when_gas_is_small():
+    """При нормальном входе лишних нотаций быть не должно."""
+    text = Trader._not_enough(CHAIN, amount_wei=10**18, gas_cost=10**15,
+                              balance=5 * 10**17, gas_price=10**9)
+
+    assert "Пополните кошелёк" in text
+    assert "прибыль невозможна" not in text
