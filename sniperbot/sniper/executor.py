@@ -8,7 +8,9 @@ honeypot, закрытую торговлю и слишком высокий н�
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -48,6 +50,7 @@ class TradeResult:
     error: str | None = None
     explorer_url: str | None = None
     dex: str = ""
+    pending: bool = False        # транзакция отправлена, но подтверждения ещё нет
 
 
 class Trader:
@@ -57,6 +60,23 @@ class Trader:
         self.registry = registry
         self.wallets = wallets
         self.settings = settings
+        # Куда сообщить о судьбе транзакции, которая подтвердилась уже после
+        # ответа пользователю. Ставится приложением; без неё бот просто молчит.
+        self.on_late_result: Callable[[User, TradeResult], Awaitable[None]] | None = None
+        self._settling: set[asyncio.Task] = set()
+
+    async def close(self) -> None:
+        """Снимает незавершённые дожидания — вызывается при остановке бота."""
+        for task in list(self._settling):
+            task.cancel()
+        if self._settling:
+            await asyncio.gather(*self._settling, return_exceptions=True)
+        self._settling.clear()
+
+    def _settle_later(self, coro) -> None:  # noqa: ANN001 - корутина дожидания
+        task = asyncio.create_task(coro)
+        self._settling.add(task)
+        task.add_done_callback(self._settling.discard)
 
     async def gas_fees(self, client, cfg: ChainSettings, *, exit_mode: bool = False) -> dict:
         """Цена газа по режиму; на выходе применяется отдельный множитель."""
@@ -164,40 +184,120 @@ class Trader:
             return TradeResult(False, "buy", error=str(exc), token_symbol=token.symbol)
 
         log.info("BUY %s %s (%s): tx %s", token.symbol, chain_key, adapter.name, sent.tx_hash)
+        # Транзакция уже в сети — деньги списаны. Дальше нельзя просто вернуть
+        # ошибку и забыть хэш: тогда токены придут в кошелёк, а бот о них не
+        # узнает и продавать будет нечего.
+        await self._log(user.id, chain_key, "buy", token_address, spend_wei, 0, sent.tx_hash,
+                        "pending")
+        result = await self.settle_buy(
+            user, chain_key, token, adapter, pool, spend_wei, balance_before,
+            sent.tx_hash, source, cfg, pair_address, fee_wei, gas_fees, timeout=180,
+        )
+        if result.pending:
+            # Ждать в этом вызове дальше нельзя — пользователь не должен смотреть
+            # в пустоту. Но и бросать транзакцию нельзя: она может подтвердиться
+            # через минуту, и тогда позиция обязана появиться сама.
+            self._settle_later(self._finish_later(
+                user, chain_key, token, adapter, pool, spend_wei, balance_before,
+                sent.tx_hash, source, cfg, pair_address, fee_wei, gas_fees,
+            ))
+        return result
+
+    async def _finish_later(self, user, chain_key, token, adapter, pool, spend_wei,
+                            balance_before, tx_hash, source, cfg, pair_address,
+                            fee_wei, gas_fees) -> None:
+        """Дожидается медленную транзакцию в фоне и сообщает, чем всё кончилось."""
+        result = await self.settle_buy(
+            user, chain_key, token, adapter, pool, spend_wei, balance_before,
+            tx_hash, source, cfg, pair_address, fee_wei, gas_fees,
+            timeout=self.settings.pending_buy_timeout,
+        )
+        log.info("Отложенная покупка %s: %s", tx_hash, "успех" if result.ok else result.error)
+        if self.on_late_result is not None:
+            await self.on_late_result(user, result)
+
+    async def settle_buy(
+        self, user: User, chain_key: str, token, adapter: DexAdapter, pool: PoolRef,
+        spend_wei: int, balance_before: int, tx_hash: str, source: str, cfg: ChainSettings,
+        pair_address: str | None = None, fee_wei: int = 0, gas_fees: dict | None = None,
+        timeout: float = 180,
+    ) -> TradeResult:
+        """Доводит отправленную покупку до записанной позиции.
+
+        Вынесено отдельно, чтобы то же самое можно было доиграть позже: при
+        медленной сети ожидание квитанции истекает, но транзакция никуда не
+        девается, и позиция должна появиться, когда она подтвердится.
+        """
+        client = self.registry.get(chain_key)
+        chain = client.config
+        account = self.wallets.account(user)
+        explorer = chain.tx_url(tx_hash)
+
         try:
-            receipt = await client.wait_receipt(sent.tx_hash, timeout=180)
-        except TimeoutError as exc:
-            return TradeResult(False, "buy", tx_hash=sent.tx_hash, error=str(exc), token_symbol=token.symbol)
+            receipt = await client.wait_receipt(tx_hash, timeout=timeout)
+        except TimeoutError:
+            return TradeResult(
+                False, "buy", tx_hash=tx_hash, token_symbol=token.symbol, dex=adapter.name,
+                pending=True, amount_in=spend_wei, explorer_url=explorer,
+                error=f"Транзакция отправлена, но сеть ещё не подтвердила её за {timeout:.0f} c",
+            )
+        except Exception as exc:  # noqa: BLE001 - нода могла отвалиться, а деньги уже потрачены
+            log.exception("Не смог дождаться квитанции %s: %s", tx_hash, exc)
+            return TradeResult(
+                False, "buy", tx_hash=tx_hash, token_symbol=token.symbol, dex=adapter.name,
+                pending=True, amount_in=spend_wei, explorer_url=explorer,
+                error=f"Не смог проверить транзакцию: {exc}",
+            )
 
         if int(receipt.get("status", 0)) != 1:
-            await self._log(user.id, chain_key, "buy", token_address, spend_wei, 0, sent.tx_hash,
+            await self._log(user.id, chain_key, "buy", token.address, spend_wei, 0, tx_hash,
                             "failed", error="Транзакция отклонена сетью")
             return TradeResult(
-                False, "buy", tx_hash=sent.tx_hash, token_symbol=token.symbol, dex=adapter.name,
+                False, "buy", tx_hash=tx_hash, token_symbol=token.symbol, dex=adapter.name,
                 error="Транзакция не прошла (revert). Обычно это высокий налог, лимит на покупку или закрытая торговля.",
-                explorer_url=chain.tx_url(sent.tx_hash),
+                explorer_url=explorer,
             )
 
-        balance_after = await balance_of(client, token_address, account.address)
+        try:
+            balance_after = await balance_of(client, token.address, account.address)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Не смог прочитать баланс токена после покупки: %s", exc)
+            return TradeResult(
+                False, "buy", tx_hash=tx_hash, token_symbol=token.symbol, dex=adapter.name,
+                pending=True, amount_in=spend_wei, explorer_url=explorer,
+                error=f"Транзакция прошла, но баланс токена не прочитался: {exc}",
+            )
+
         received = max(0, balance_after - balance_before)
         if received == 0:
+            await self._log(user.id, chain_key, "buy", token.address, spend_wei, 0, tx_hash,
+                            "failed", error="Токены не пришли")
             return TradeResult(
-                False, "buy", tx_hash=sent.tx_hash, token_symbol=token.symbol, dex=adapter.name,
+                False, "buy", tx_hash=tx_hash, token_symbol=token.symbol, dex=adapter.name,
                 error="Транзакция прошла, но токены не пришли (100% налог?)",
-                explorer_url=chain.tx_url(sent.tx_hash),
+                explorer_url=explorer,
             )
 
-        position_id = await self._store_buy(
-            user, chain_key, token, adapter, pool, spend_wei, received, sent.tx_hash,
-            source, cfg, receipt, pair_address,
-        )
+        try:
+            position_id = await self._store_buy(
+                user, chain_key, token, adapter, pool, spend_wei, received, tx_hash,
+                source, cfg, receipt, pair_address,
+            )
+        except Exception as exc:  # noqa: BLE001 - токены уже в кошельке, молчать нельзя
+            log.exception("Токены получены, но позиция не записалась: %s", exc)
+            return TradeResult(
+                False, "buy", tx_hash=tx_hash, token_symbol=token.symbol, dex=adapter.name,
+                amount_in=spend_wei, amount_out=received, explorer_url=explorer,
+                error=(f"Токены пришли, но позиция не записалась: {exc}. "
+                       f"Подберите её командой /recover {token.address}"),
+            )
 
         if getattr(cfg, "pre_approve", False):
             # Разрешение выдаём сразу: в момент стоп-лосса лишняя транзакция
             # стоит дороже, чем сейчас.
             try:
-                await self._ensure_allowance(client, adapter, account, token_address,
-                                             received, cfg, gas_fees)
+                await self._ensure_allowance(client, adapter, account, token.address,
+                                             received, cfg, gas_fees or await self.gas_fees(client, cfg))
             except Exception as exc:  # noqa: BLE001 - покупка уже состоялась
                 log.warning("Предварительный approve не удался: %s", exc)
 
@@ -205,9 +305,58 @@ class Trader:
             await self._send_service_fee(client, account, fee_wei)
 
         return TradeResult(
-            True, "buy", tx_hash=sent.tx_hash, amount_in=spend_wei, amount_out=received,
+            True, "buy", tx_hash=tx_hash, amount_in=spend_wei, amount_out=received,
             position_id=position_id, token_symbol=token.symbol, token_decimals=token.decimals,
-            explorer_url=chain.tx_url(sent.tx_hash), dex=f"{adapter.name} ({pool.label})",
+            explorer_url=explorer, dex=f"{adapter.name} ({pool.label})",
+        )
+
+    async def adopt(self, user: User, chain_key: str, token_address: str, *,
+                    cfg: ChainSettings) -> TradeResult:
+        """Заводит позицию по токенам, которые уже лежат в кошельке.
+
+        Нужно, когда покупка прошла в сети, а записать её боту помешал сбой:
+        монеты есть, а автопродажа о них не знает и не защитит.
+        """
+        client = self.registry.get(chain_key)
+        token_address = to_checksum(token_address)
+        account = self.wallets.account(user)
+
+        async with session_scope() as session:
+            existing = await repo.position_by_token(session, user.id, chain_key, token_address)
+            if existing is not None:
+                return TradeResult(False, "buy", position_id=existing.id,
+                                   error=f"Позиция #{existing.id} по этому токену уже открыта")
+
+        token = await fetch_token(client, token_address)
+        balance = await balance_of(client, token_address, account.address)
+        if balance <= 0:
+            return TradeResult(False, "buy", token_symbol=token.symbol,
+                               error="На кошельке нет этого токена — подбирать нечего")
+
+        venue = await self.best_venue(chain_key, token_address,
+                                      getattr(cfg, "dex_route", "auto") or "auto")
+        if venue is None:
+            return TradeResult(False, "buy", token_symbol=token.symbol,
+                               error="Пул с ликвидностью не найден — цену взять неоткуда")
+        adapter, pool = venue
+
+        state = await adapter.pool_state(token_address, pool, token.decimals)
+        # price_native — цена за целый токен, а balance в сырых единицах:
+        # без приведения оценка позиции разъедется на десятки порядков.
+        value = state.price_native * from_wei(balance, token.decimals)
+        value_wei = to_wei(value, client.config.native_decimals) if value > 0 else 0
+        if value_wei <= 0:
+            return TradeResult(False, "buy", token_symbol=token.symbol,
+                               error="Пул не даёт цену — позицию нельзя оценить")
+
+        position_id = await self._store_buy(
+            user, chain_key, token, adapter, pool, value_wei, balance, None,
+            "recover", cfg, {}, pool.address,
+        )
+        return TradeResult(
+            True, "buy", amount_in=value_wei, amount_out=balance, position_id=position_id,
+            token_symbol=token.symbol, token_decimals=token.decimals,
+            dex=f"{adapter.name} ({pool.label})",
         )
 
     # -------------------------------------------------------------- продажа
@@ -473,11 +622,16 @@ class Trader:
                     token_symbol=token.symbol, token_decimals=token.decimals,
                     pair_address=pool.address or pair_address, router_address=adapter.router,
                     dex_kind=adapter.kind, pool_fee=pool.fee, source=source,
+                    # Значения из mapped_column(default=...) появляются только при
+                    # вставке в базу, а суммы накапливаются прямо сейчас: без явных
+                    # нулей первая реальная покупка падала на «None + int», и позиция
+                    # не записывалась, хотя монеты уже были потрачены.
+                    amount_wei=0, bought_wei=0, native_spent_wei=0, native_returned_wei=0,
                 )
                 session.add(position)
-            position.amount_wei += received
-            position.bought_wei += received
-            position.native_spent_wei += spend_wei
+            position.amount_wei = (position.amount_wei or 0) + received
+            position.bought_wei = (position.bought_wei or 0) + received
+            position.native_spent_wei = (position.native_spent_wei or 0) + spend_wei
             position.buy_tx = tx_hash
             position.status = "open"
             position.dex_kind = adapter.kind

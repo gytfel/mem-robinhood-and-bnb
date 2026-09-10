@@ -360,15 +360,39 @@ class SniperEngine:
             f"Налоги: покупка {_tax(report.buy_tax_pct)} / продажа {_tax(report.sell_tax_pct)}\n"
             f"Покупаю на {fmt_amount(cfg.buy_amount)} {chain.native_symbol}…",
         )
-        result = await self.trader.buy(
-            user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source=source,
-            pair_address=event.pair, venue=venue,
-        )
+        try:
+            result = await self.trader.buy(
+                user, event.chain, event.token, cfg.buy_amount, cfg=cfg, source=source,
+                pair_address=event.pair, venue=venue,
+            )
+        except Exception as exc:  # noqa: BLE001 - молчание после «покупаю» хуже любой ошибки
+            log.exception("Покупка %s сорвалась: %s", event.token, exc)
+            await self.notifier.send(
+                user.id,
+                f"❌ Покупка {symbol} (<code>{short_addr(event.token)}</code>) сорвалась:\n"
+                f"{esc(str(exc)[:300])}\n\n"
+                "Проверьте кошелёк на сканере — если монеты списались, "
+                f"подберите позицию: <code>/recover {event.token}</code>",
+            )
+            return
         if group and result.ok and result.position_id:
             async with session_scope() as session:
                 position = await session.get(Position, result.position_id)
                 if position is not None:
                     position.ab_group = group
+        if result.pending:
+            # Деньги ушли, подтверждения ещё нет. Молчать нельзя: пользователь
+            # видит списание и пустые позиции и думает, что бот потерял монеты.
+            await self.notifier.send(
+                user.id,
+                f"⏳ <b>Транзакция отправлена</b>, сеть ещё не подтвердила\n"
+                f"{esc(result.token_symbol)} · {fmt_amount(from_wei(result.amount_in))} "
+                f"{chain.native_symbol}\n"
+                f"<a href='{result.explorer_url}'>Посмотреть на сканере</a>\n\n"
+                "Жду в фоне и сообщу, чем кончилось. Позиция появится сама, "
+                "как только транзакция подтвердится.",
+            )
+            return
         if result.ok:
             await self.notifier.send(
                 user.id,

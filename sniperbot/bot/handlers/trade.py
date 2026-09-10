@@ -187,3 +187,48 @@ async def execute_buy(
         disable_web_page_preview=True,
         reply_markup=main_menu(chain.name, cfg.auto_snipe),
     )
+
+
+@router.message(Command("recover"))
+async def cmd_recover(message: Message, command: CommandObject, ctx: BotContext,
+                      user: User, cfg: ChainSettings, chain: ChainConfig) -> None:
+    """Заводит позицию по токенам, которые уже лежат на кошельке.
+
+    Бывает, что покупка прошла в сети, а записать её боту помешал сбой: монеты
+    есть, а автопродажа о них не знает. Эта команда возвращает их под контроль.
+    """
+    token = extract_address(command.args or "")
+    if not token:
+        await reply(
+            message,
+            "Использование: <code>/recover 0xАдресТокена</code>\n\n"
+            "Если монеты списались, а позиции нет — проверьте кошелёк на сканере "
+            "(/wallet) и подберите токен этой командой. Позиция станет обычной: "
+            "тейк-профит и стоп-лосс начнут её вести.",
+        )
+        return
+
+    status = await reply(message, "🔎 Смотрю баланс токена на кошельке…")
+    try:
+        result = await ctx.trader.adopt(user, chain.key, token, cfg=cfg)
+    except Exception as exc:  # noqa: BLE001 - показать причину полезнее, чем промолчать
+        log.exception("Подбор позиции %s не удался: %s", token, exc)
+        await status.edit_text(f"❌ Не смог подобрать позицию: {esc(str(exc)[:300])}",
+                               parse_mode="HTML")
+        return
+
+    if not result.ok:
+        await status.edit_text(f"❌ {esc(result.error or 'не получилось')}", parse_mode="HTML")
+        return
+
+    await status.edit_text(
+        f"✅ <b>Позиция #{result.position_id} подобрана</b>\n"
+        f"{esc(result.token_symbol)} · "
+        f"{fmt_amount(from_wei(result.amount_out, result.token_decimals), 4)} шт\n"
+        f"Оценка сейчас: {fmt_amount(from_wei(result.amount_in))} {chain.native_symbol}\n"
+        f"Площадка: {esc(result.dex)}\n\n"
+        "⚠️ Цена входа взята <b>текущая</b> — сколько было заплачено на самом деле, "
+        "бот не знает. Прибыль и убыток считаются от этого момента, а не от вашей покупки.\n"
+        f"Правила выхода: TP +{cfg.take_profit_pct}% · SL −{cfg.stop_loss_pct}%",
+        parse_mode="HTML",
+    )

@@ -178,6 +178,10 @@ class Settings(BaseSettings):
     # пулами, которые появились до запуска бота. 0 — не разбирать
     momentum_backfill_blocks: int = Field(default=20_000, alias="MOMENTUM_BACKFILL_BLOCKS")
 
+    # сколько ещё ждать подтверждения покупки, если сеть не уложилась в 180 с.
+    # Транзакция уже отправлена, поэтому бросать её нельзя — токены придут позже
+    pending_buy_timeout: float = Field(default=1800.0, alias="PENDING_BUY_TIMEOUT")
+
     service_fee_bps: int = Field(default=0, alias="SERVICE_FEE_BPS")
     service_fee_wallet: str = Field(default="", alias="SERVICE_FEE_WALLET")
 

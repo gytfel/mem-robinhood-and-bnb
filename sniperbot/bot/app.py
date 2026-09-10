@@ -25,6 +25,7 @@ from sniperbot.sniper.deposits import DepositWatcher
 from sniperbot.sniper.engine import SniperEngine
 from sniperbot.sniper.executor import Trader
 from sniperbot.sniper.positions import PositionMonitor
+from sniperbot.utils.fmt import esc
 from sniperbot.version import build_info
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ COMMANDS = [
     BotCommand(command="sell", description="Продать позицию"),
     BotCommand(command="check", description="Проверить токен"),
     BotCommand(command="positions", description="Открытые позиции"),
+    BotCommand(command="recover", description="Подобрать потерянную позицию"),
     BotCommand(command="report", description="Отчёт за всё время + файл"),
     BotCommand(command="pnl", description="Сделки одного режима + файл"),
     BotCommand(command="edge", description="Есть ли преимущество"),
@@ -123,6 +125,22 @@ async def run_bot() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     notifier = TelegramNotifier(bot)
     trader = Trader(registry, wallets, settings)
+
+    async def announce_late_result(user, result) -> None:  # noqa: ANN001 - User, TradeResult
+        """Итог транзакции, которая подтвердилась уже после ответа боту."""
+        chain = registry.config(user.active_chain)
+        if result.ok:
+            text = (f"✅ <b>Подтвердилась</b> покупка {esc(result.token_symbol)}\n"
+                    f"Позиция #{result.position_id} открыта — автопродажа работает.\n"
+                    f"<a href='{result.explorer_url}'>Транзакция</a>")
+        else:
+            text = (f"❌ Отложенная покупка {esc(result.token_symbol)} не удалась:\n"
+                    f"{esc(result.error or 'причина неизвестна')}")
+            if result.tx_hash:
+                text += f"\n<a href='{chain.tx_url(result.tx_hash)}'>Транзакция</a>"
+        await notifier.send(user.id, text)
+
+    trader.on_late_result = announce_late_result
     engine = SniperEngine(registry, trader, wallets, notifier, settings)
     monitor = PositionMonitor(registry, trader, notifier, settings)
     deposits = DepositWatcher(registry, notifier, settings)
@@ -171,6 +189,7 @@ async def run_bot() -> None:
         monitor.stop()
         deposits.stop()
         await engine.stop()
+        await trader.close()
         for task in background:
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
