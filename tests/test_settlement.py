@@ -425,3 +425,70 @@ async def test_recover_failure_says_how_many_nodes_were_asked(db, token):
     assert result.ok is False
     assert "Опросил нод: 3" in (result.error or "")
     assert "Проверить самому" in (result.error or "")
+
+
+# ------------------------------------------------ поиск потерянных токенов
+async def test_find_orphans_skips_tokens_that_already_have_a_position(db, token):
+    """Адреса легко перепутать, поэтому бот ищет сам — но не дублирует позиции."""
+    position = await open_position(token)
+    other = "0x" + "2" * 40
+
+    trader = trader_for(FakeClient())
+    user, _ = await user_and_cfg()
+    async with session_scope() as session:
+        await repo.log_trade(session, user_id=1, chain="bsc", kind="buy",
+                             token_address=other, status="success")
+
+    async def balances(client, address, holder):  # noqa: ANN001
+        return [7 * 10**18] if address.lower() == other.lower() else [0]
+
+    async def fake_token(client, address):  # noqa: ANN001
+        return SimpleNamespace(address=address, symbol="LOST", decimals=18, owner=None)
+
+    original, original_fetch = executor_module.balance_by_node, executor_module.fetch_token
+    executor_module.balance_by_node = balances
+    executor_module.fetch_token = fake_token
+    try:
+        orphans = await trader.find_orphans(user, "bsc")
+    finally:
+        executor_module.balance_by_node = original
+        executor_module.fetch_token = original_fetch
+
+    addresses = [item.address.lower() for item in orphans]
+    assert addresses == [other.lower()]            # токен с позицией не предлагается
+    assert position.token_address.lower() not in addresses
+    assert orphans[0].symbol == "LOST"
+    assert orphans[0].balance == 7 * 10**18
+
+
+async def test_find_orphans_survives_a_broken_token(db, token):
+    """Один нечитаемый контракт не должен ронять весь поиск."""
+    await open_position(token)
+    broken = "0x" + "3" * 40
+
+    trader = trader_for(FakeClient())
+    user, _ = await user_and_cfg()
+    async with session_scope() as session:
+        await repo.log_trade(session, user_id=1, chain="bsc", kind="buy",
+                             token_address=broken, status="success")
+
+    async def balances(client, address, holder):  # noqa: ANN001
+        if address.lower() == broken.lower():
+            return [3 * 10**18]
+        raise RuntimeError("контракт не отвечает")
+
+    async def fake_token(client, address):  # noqa: ANN001
+        raise RuntimeError("нет метаданных")
+
+    original, original_fetch = executor_module.balance_by_node, executor_module.fetch_token
+    executor_module.balance_by_node = balances
+    executor_module.fetch_token = fake_token
+    try:
+        orphans = await trader.find_orphans(user, "bsc")
+    finally:
+        executor_module.balance_by_node = original
+        executor_module.fetch_token = original_fetch
+
+    assert len(orphans) == 1
+    assert orphans[0].symbol == "?"        # имя не прочиталось, но подобрать можно
+    assert orphans[0].decimals == 18

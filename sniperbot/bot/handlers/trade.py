@@ -199,13 +199,7 @@ async def cmd_recover(message: Message, command: CommandObject, ctx: BotContext,
     """
     token = extract_address(command.args or "")
     if not token:
-        await reply(
-            message,
-            "Использование: <code>/recover 0xАдресТокена</code>\n\n"
-            "Если монеты списались, а позиции нет — проверьте кошелёк на сканере "
-            "(/wallet) и подберите токен этой командой. Позиция станет обычной: "
-            "тейк-профит и стоп-лосс начнут её вести.",
-        )
+        await _recover_menu(message, ctx, user, chain)
         return
 
     status = await reply(message, "🔎 Смотрю баланс токена на кошельке…")
@@ -232,3 +226,37 @@ async def cmd_recover(message: Message, command: CommandObject, ctx: BotContext,
         f"Правила выхода: TP +{cfg.take_profit_pct}% · SL −{cfg.stop_loss_pct}%",
         parse_mode="HTML",
     )
+
+
+async def _recover_menu(message: Message, ctx: BotContext, user: User,
+                        chain: ChainConfig) -> None:
+    """Сам ищет, что лежит на кошельке без позиции: адреса легко перепутать."""
+    status = await reply(message, "🔎 Проверяю кошелёк на токены без позиции…")
+    try:
+        orphans = await ctx.trader.find_orphans(user, chain.key)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Поиск потерянных токенов не удался: %s", exc)
+        await status.edit_text(f"❌ Не смог проверить кошелёк: {esc(str(exc)[:300])}",
+                               parse_mode="HTML")
+        return
+
+    if not orphans:
+        await status.edit_text(
+            "✅ Токенов без позиции на кошельке нет — подбирать нечего.\n\n"
+            "Если вы ждали другого, проверьте кошелёк на сканере: /wallet\n"
+            "Подобрать конкретный токен: <code>/recover 0xАдрес</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = [f"🔎 <b>Нашёл на кошельке</b> ({esc(chain.name)})\n"]
+    for orphan in orphans:
+        amount = from_wei(orphan.balance, orphan.decimals)
+        lines.append(
+            f"· <b>{esc(orphan.symbol)}</b> — {fmt_amount(amount, 4)} шт\n"
+            f"  <code>/recover {orphan.address}</code>"
+        )
+    lines.append("\nВыберите токен и отправьте команду под ним — бот заведёт позицию, "
+                 "и автопродажа начнёт её вести.")
+    await status.edit_text("\n".join(lines), parse_mode="HTML",
+                           disable_web_page_preview=True)

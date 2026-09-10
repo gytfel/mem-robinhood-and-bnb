@@ -646,3 +646,33 @@ async def lost_position_by_token(
         .order_by(Position.id.desc())
     )
     return (await session.scalars(stmt)).first()
+
+
+async def recent_token_addresses(
+    session: AsyncSession, user_id: int, chain: str, limit: int = 40
+) -> list[str]:
+    """Токены, с которыми пользователь недавно имел дело, — кандидаты на подбор.
+
+    Берём и позиции, и журнал сделок: покупка могла не дойти до позиции, и тогда
+    единственный след адреса — запись в журнале.
+    """
+    positions = await session.scalars(
+        select(Position.token_address)
+        .where(Position.user_id == user_id, Position.chain == chain)
+        .order_by(Position.id.desc()).limit(limit)
+    )
+    logs = await session.scalars(
+        select(TradeLog.token_address)
+        .where(TradeLog.user_id == user_id, TradeLog.chain == chain,
+               TradeLog.token_address.is_not(None))
+        .order_by(TradeLog.id.desc()).limit(limit)
+    )
+    seen: dict[str, None] = {}
+    for address in [*positions, *logs]:
+        if address:
+            seen.setdefault(to_lower(address), None)
+    return list(seen)
+
+
+def to_lower(value: str) -> str:
+    return str(value).lower()

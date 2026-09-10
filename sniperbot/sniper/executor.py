@@ -61,6 +61,16 @@ class TradeResult:
     pending: bool = False        # транзакция отправлена, но подтверждения ещё нет
 
 
+@dataclass(slots=True)
+class OrphanToken:
+    """Токен на кошельке, за которым не следит ни одна позиция."""
+
+    address: str
+    symbol: str
+    balance: int
+    decimals: int = 18
+
+
 class Trader:
     """Покупка и продажа через DEX выбранной сети."""
 
@@ -392,6 +402,42 @@ class Trader:
             token_symbol=token.symbol, token_decimals=token.decimals,
             dex=f"{adapter.name} ({pool.label})",
         )
+
+    async def find_orphans(self, user: User, chain_key: str) -> list[OrphanToken]:
+        """Токены на кошельке, за которыми не следит ни одна открытая позиция.
+
+        Избавляет от угадывания адреса: покупок бывает несколько подряд, адреса
+        похожи, и подобрать не тот токен слишком легко.
+        """
+        client = self.registry.get(chain_key)
+        account = self.wallets.account(user)
+
+        async with session_scope() as session:
+            candidates = await repo.recent_token_addresses(session, user.id, chain_key)
+            tracked = {
+                position.token_address.lower()
+                for position in await repo.open_positions(session, user_id=user.id,
+                                                          chain=chain_key)
+            }
+
+        found: list[OrphanToken] = []
+        for address in candidates:
+            if address in tracked:
+                continue
+            try:
+                balance = max(await balance_by_node(client, address, account.address), default=0)
+            except Exception as exc:  # noqa: BLE001 - один битый токен не должен всё ронять
+                log.debug("Баланс %s не прочитался: %s", address, exc)
+                continue
+            if balance <= 0:
+                continue
+            try:
+                token = await fetch_token(client, address)
+                symbol, decimals = token.symbol, token.decimals
+            except Exception:  # noqa: BLE001 - без имени токен всё равно можно подобрать
+                symbol, decimals = "?", 18
+            found.append(OrphanToken(to_checksum(address), symbol, balance, decimals))
+        return found
 
     # -------------------------------------------------------------- продажа
     async def sell(
