@@ -17,7 +17,7 @@ from decimal import Decimal
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.dex import apply_slippage
 from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, find_best_venue, get_adapter
-from sniperbot.chain.erc20 import allowance, balance_of, fetch_token
+from sniperbot.chain.erc20 import allowance, balance_of, confirmed_balance, fetch_token
 from sniperbot.chain.wallet import WalletError, WalletService
 from sniperbot.config import Settings
 from sniperbot.db import repo
@@ -28,6 +28,8 @@ from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import from_wei, to_wei
 
 log = logging.getLogger(__name__)
+
+BALANCE_RECHECK_DELAY = 4.0   # пауза перед повторным опросом нод, сек
 
 MAX_UINT256 = 2**256 - 1
 GAS_BUFFER_BPS = 13_000  # +30% к оценке газа: токены с комиссией жрут больше
@@ -349,6 +351,23 @@ class Trader:
             return TradeResult(False, "buy", token_symbol=token.symbol,
                                error="Пул не даёт цену — позицию нельзя оценить")
 
+        # Если позиция уже была и её списали как утраченную, возвращаем именно её:
+        # новая запись означала бы, что убыток по старой посчитан вторым разом.
+        async with session_scope() as session:
+            lost = await repo.lost_position_by_token(session, user.id, chain_key, token_address)
+            if lost is not None:
+                lost.status = "open"
+                lost.amount_wei = balance
+                lost.exit_reason = ""
+                lost.closed_at = None
+                lost.last_price = state.price_native
+                lost.peak_price = max(lost.peak_price or Decimal(0), state.price_native)
+                return TradeResult(
+                    True, "buy", amount_in=lost.native_spent_wei, amount_out=balance,
+                    position_id=lost.id, token_symbol=token.symbol,
+                    token_decimals=token.decimals, dex=f"{adapter.name} ({pool.label})",
+                )
+
         position_id = await self._store_buy(
             user, chain_key, token, adapter, pool, value_wei, balance, None,
             "recover", cfg, {}, pool.address,
@@ -387,14 +406,31 @@ class Trader:
         account = self.wallets.account(user)
         on_chain_balance = await balance_of(client, token_address, account.address)
         if on_chain_balance <= 0:
+            # Списать позицию по одному нулю нельзя: отставшая нода отвечает нулём
+            # без ошибки, и тогда бот сам вычёркивает токены, которые никуда не
+            # девались. Переспрашиваем все ноды и ждём — вдруг узел просто отстал.
+            on_chain_balance = await confirmed_balance(client, token_address, account.address)
+            if on_chain_balance <= 0:
+                await asyncio.sleep(BALANCE_RECHECK_DELAY)
+                on_chain_balance = await confirmed_balance(client, token_address, account.address)
+
+        if on_chain_balance <= 0:
+            log.warning("Позиция #%s: токенов %s нет ни на одной ноде", position.id,
+                        position.token_symbol)
             async with session_scope() as session:
                 stored = await session.get(Position, position.id)
                 if stored is not None:
                     stored.status = "closed"
                     stored.amount_wei = 0
+                    stored.exit_reason = "lost"
                     stored.closed_at = utcnow()
-            return TradeResult(False, "sell", error="На кошельке нет этих токенов — позиция закрыта",
-                               token_symbol=position.token_symbol)
+            return TradeResult(
+                False, "sell", token_symbol=position.token_symbol,
+                error=("Токенов нет на кошельке — продавать нечего. Так бывает, когда "
+                       "контракт забирает баланс у держателей. Позиция закрыта как утраченная.\n"
+                       f"Проверьте кошелёк: {chain.address_url(account.address)}\n"
+                       f"Если токены на месте — верните позицию: /recover {token_address}"),
+            )
 
         amount = on_chain_balance if percent >= 100 else on_chain_balance * percent // 100
         if amount <= 0:

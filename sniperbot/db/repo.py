@@ -628,3 +628,21 @@ async def gas_by_kind(session: AsyncSession, user_id: int, chain: str) -> dict[s
     )
     rows = (await session.execute(stmt)).all()
     return {str(kind): int(value or 0) for kind, value in rows}
+
+
+async def lost_position_by_token(
+    session: AsyncSession, user_id: int, chain: str, token: str
+) -> Position | None:
+    """Последняя позиция, закрытая как утраченная, — её и стоит вернуть."""
+    stmt = (
+        select(Position)
+        .where(
+            Position.user_id == user_id,
+            Position.chain == chain,
+            func.lower(Position.token_address) == token.lower(),
+            Position.status == "closed",
+            Position.exit_reason == "lost",
+        )
+        .order_by(Position.id.desc())
+    )
+    return (await session.scalars(stmt)).first()

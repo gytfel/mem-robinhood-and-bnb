@@ -250,3 +250,128 @@ async def test_recover_says_so_when_there_is_nothing_to_adopt(db, token):
 
     assert result.ok is False
     assert "нет этого токена" in (result.error or "")
+
+
+# --------------------------------------------- ложный ноль баланса при продаже
+class BalanceClient(FakeClient):
+    """Ноды отвечают по-разному: одна отстала и занижает баланс."""
+
+    def __init__(self, answers: list[int], single: int = 0):
+        super().__init__(receipt={"status": 1})
+        self.answers = answers
+        self.single = single
+        self.calls = 0
+
+    async def call_all(self, address, abi, fn_name, *args):  # noqa: ANN001
+        self.calls += 1
+        return list(self.answers)
+
+    async def gas_fees(self, multiplier=1.0, priority_gwei=1.0):  # noqa: ANN001
+        # Дальше проверки баланса тесту идти незачем: важно лишь, что позиция
+        # дожила до настоящей продажи, а не была списана.
+        raise RuntimeError("остановка теста после проверки баланса")
+
+
+async def test_confirmed_balance_takes_the_highest_answer():
+    """Отставшая нода занижает баланс, но завысить его не может."""
+    from sniperbot.chain.erc20 import confirmed_balance
+
+    client = BalanceClient([0, 30_000 * 10**18, 0])
+    assert await confirmed_balance(client, TOKEN, WALLET) == 30_000 * 10**18
+
+
+async def test_confirmed_balance_is_zero_when_every_node_agrees():
+    from sniperbot.chain.erc20 import confirmed_balance
+
+    assert await confirmed_balance(BalanceClient([0, 0]), TOKEN, WALLET) == 0
+    assert await confirmed_balance(BalanceClient([]), TOKEN, WALLET) == 0
+
+
+async def sell_with(monkeypatch, db_position, first_read: int, all_nodes: list[int]):
+    """Продажа, где первый (обычный) запрос баланса вернул first_read."""
+    client = BalanceClient(all_nodes)
+    trader = trader_for(client)
+    user, cfg = await user_and_cfg()
+
+    async def fake_balance(client_, address, holder):  # noqa: ANN001
+        return first_read
+
+    monkeypatch.setattr(executor_module, "balance_of", fake_balance)
+    monkeypatch.setattr(executor_module, "BALANCE_RECHECK_DELAY", 0)
+    trader.adapter_for_position = lambda position: StubAdapter()  # type: ignore[assignment]
+    return trader, await trader.sell(user, db_position, cfg=cfg, percent=100), client
+
+
+async def open_position(db_token) -> object:
+    trader = trader_for(FakeClient(receipt={"status": 1}))
+    user, cfg = await user_and_cfg()
+    await settle(trader, user, cfg, db_token, balance_after=30_000 * 10**18)
+    async with session_scope() as session:
+        return (await repo.open_positions(session, user_id=1))[0]
+
+
+async def test_lagging_node_must_not_write_off_the_position(db, token, monkeypatch):
+    """Главный случай: ноль от одной ноды не повод вычёркивать токены."""
+    position = await open_position(token)
+
+    with pytest.raises(RuntimeError, match="остановка теста"):
+        await sell_with(monkeypatch, position, first_read=0, all_nodes=[0, 30_000 * 10**18])
+
+    async with session_scope() as session:
+        stored = await session.get(executor_module.Position, position.id)
+    assert stored.status == "open"              # позиция уцелела
+    assert stored.exit_reason != "lost"
+
+
+async def test_position_is_written_off_only_when_all_nodes_agree(db, token, monkeypatch):
+    position = await open_position(token)
+
+    _, result, client = await sell_with(monkeypatch, position, first_read=0, all_nodes=[0, 0])
+
+    assert result.ok is False
+    assert "нет на кошельке" in (result.error or "")
+    assert "/recover" in (result.error or "")   # подсказка, как вернуть
+
+    async with session_scope() as session:
+        stored = await session.get(executor_module.Position, position.id)
+    assert stored.status == "closed"
+    assert stored.exit_reason == "lost"         # отличимо от обычной продажи
+
+
+async def test_recover_reopens_a_lost_position_instead_of_duplicating(db, token):
+    """Иначе убыток по старой записи посчитался бы вторым разом."""
+    position = await open_position(token)
+    spent = position.native_spent_wei
+    async with session_scope() as session:
+        stored = await session.get(executor_module.Position, position.id)
+        stored.status = "closed"
+        stored.exit_reason = "lost"
+        stored.amount_wei = 0
+
+    trader = trader_for(FakeClient())
+    user, cfg = await user_and_cfg()
+
+    async def fake_balance(client, address, holder):  # noqa: ANN001
+        return 30_000 * 10**18
+
+    async def fake_token(client, address):  # noqa: ANN001
+        return token
+
+    original_balance, original_fetch = executor_module.balance_of, executor_module.fetch_token
+    executor_module.balance_of = fake_balance
+    executor_module.fetch_token = fake_token
+    trader.best_venue = lambda *a, **kw: _venue()  # type: ignore[assignment]
+    try:
+        result = await trader.adopt(user, "bsc", TOKEN, cfg=cfg)
+    finally:
+        executor_module.balance_of = original_balance
+        executor_module.fetch_token = original_fetch
+
+    assert result.ok is True
+    assert result.position_id == position.id     # та же запись, а не вторая
+    assert result.amount_in == spent             # исходная сумма покупки сохранена
+
+    async with session_scope() as session:
+        positions = await repo.open_positions(session, user_id=1)
+    assert len(positions) == 1
+    assert positions[0].amount_wei == 30_000 * 10**18

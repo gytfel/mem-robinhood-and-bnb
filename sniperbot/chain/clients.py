@@ -158,6 +158,24 @@ class ChainClient:
 
         return await self.run(_do)
 
+    async def call_all(self, address: str, abi: list, fn_name: str, *args) -> list:
+        """Тот же вызов на всех RPC сразу — возвращает удачные ответы.
+
+        Нужен там, где ошибочный ответ дороже лишнего запроса. Отставшая или
+        подрезанная нода отвечает нулём без всякой ошибки, и по одному такому
+        ответу нельзя решать судьбу позиции.
+        """
+        results = []
+        for index, provider in enumerate(self._providers):
+            try:
+                contract = self.contract(address, abi, provider)
+                results.append(await contract.functions[fn_name](*args).call())
+            except ContractLogicError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - опрашиваем остальные
+                log.debug("RPC %s не ответил на %s: %s", self.config.rpc_urls[index], fn_name, exc)
+        return results
+
     # ------------------------------------------------------------------ chain
     async def block_number(self) -> int:
         return await self.run(lambda w3: w3.eth.get_block_number())

@@ -101,6 +101,17 @@ async def balance_of(client: ChainClient, token: str, holder: str) -> int:
     return int(await client.call(token, ERC20_ABI, "balanceOf", to_checksum(holder)))
 
 
+async def confirmed_balance(client: ChainClient, token: str, holder: str) -> int:
+    """Баланс, подтверждённый всеми доступными нодами: берём максимум.
+
+    Нода, отставшая от сети или с подрезанным состоянием, занижает баланс, но
+    завысить его не может: показать токены, которых нет, ей неоткуда. Поэтому
+    максимум по всем ответам — самый безопасный ответ на вопрос «они ещё мои?».
+    """
+    answers = await client.call_all(token, ERC20_ABI, "balanceOf", to_checksum(holder))
+    return max((int(value) for value in answers), default=0)
+
+
 async def allowance(client: ChainClient, token: str, owner: str, spender: str) -> int:
     return int(
         await client.call(token, ERC20_ABI, "allowance", to_checksum(owner), to_checksum(spender))
