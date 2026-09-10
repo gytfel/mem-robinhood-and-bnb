@@ -219,3 +219,58 @@ def test_trailing_never_touches_a_losing_position():
     """В минусе трейлинг молчит: там работает стоп-лосс."""
     pos = position(take_profit_pct=0, stop_loss_pct=0, trailing_stop_pct=20)
     assert decide_exit(pos, ctx(-50, peak_change=80, price=0.5, peak_price=1.8))[0] is None
+
+
+# ------------------------------------------------ обвал против обычного стопа
+def test_collapse_is_not_reported_as_a_plain_stop_loss():
+    """−100% при стопе −30% выглядит поломкой стопа, хотя это вынутая ликвидность."""
+    from sniperbot.sniper.positions import RULE_COLLAPSE
+
+    rule, percent, _ = decide_exit(position(stop_loss_pct=30), ctx(-100))
+
+    assert rule is RULE_COLLAPSE
+    assert percent == 100
+
+
+def test_ordinary_stop_keeps_its_name():
+    from sniperbot.sniper.positions import RULE_STOP
+
+    rule, _, _ = decide_exit(position(stop_loss_pct=30), ctx(-35))
+    assert rule is RULE_STOP
+
+
+def test_a_deep_stop_setting_is_still_a_stop():
+    """Если человек сам поставил стоп −95%, обвалом это называть незачем."""
+    from sniperbot.sniper.positions import RULE_STOP
+
+    rule, _, _ = decide_exit(position(stop_loss_pct=95), ctx(-96))
+    assert rule is RULE_STOP
+
+
+# --------------------------------------------- защита от слива и сбои сети
+def test_rug_guard_needs_a_known_peak_to_compare_with():
+    """Без замера ликвидности сравнивать не с чем — правило обязано молчать."""
+    rule, _, _ = decide_exit(
+        position(stop_loss_pct=0, rug_guard_pct=40),
+        ctx(-50, liquidity=0, peak_liquidity=0),
+    )
+    assert rule is None
+
+
+def test_rug_guard_fires_when_liquidity_leaves():
+    from sniperbot.sniper.positions import RULE_RUG
+
+    rule, percent, _ = decide_exit(
+        position(stop_loss_pct=0, rug_guard_pct=40),
+        ctx(-20, liquidity=3, peak_liquidity=10),
+    )
+    assert rule is RULE_RUG and percent == 100
+
+
+def test_unknown_liquidity_never_triggers_a_rug_exit():
+    """Сбой RPC не должен продавать живую позицию — это отдельная беда."""
+    rule, _, _ = decide_exit(
+        position(stop_loss_pct=0, rug_guard_pct=40, take_profit_pct=0),
+        ctx(15, liquidity=None, peak_liquidity=10),
+    )
+    assert rule is None

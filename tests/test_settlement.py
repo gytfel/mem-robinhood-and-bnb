@@ -63,8 +63,8 @@ class StubAdapter:
         self.price = price
 
     async def pool_state(self, token, pool, decimals=18):  # noqa: ANN001
-        return PoolState(pool=pool, price_native=self.price, reserve_native=10**18,
-                         reserve_token=10**24, token_decimals=decimals)
+        return PoolState(pool=pool, price_native=self.price, liquidity_native=Decimal(1),
+                         reserve_native=10**18, reserve_token=10**24, token_decimals=decimals)
 
 
 def trader_for(client) -> Trader:
@@ -520,3 +520,19 @@ def test_shortfall_message_stays_plain_when_gas_is_small():
 
     assert "Пополните кошелёк" in text
     assert "прибыль невозможна" not in text
+
+
+async def test_buy_arms_the_rug_guard_immediately(db, token):
+    """Без замера при покупке защита от слива молчит до первой проверки монитора,
+    а самые быстрые сливы случаются именно в эти секунды."""
+    trader = trader_for(FakeClient(receipt={"status": 1, "gasUsed": 200_000}))
+    user, cfg = await user_and_cfg()
+    cfg.rug_guard_pct = 40
+
+    await settle(trader, user, cfg, token, balance_after=5 * 10**18)
+
+    async with session_scope() as session:
+        stored = (await repo.open_positions(session, user_id=1))[0]
+
+    # StubAdapter отдаёт пул с 1 монетой в резерве — она и должна попасть в максимум
+    assert stored.peak_liquidity_wei == 10**18

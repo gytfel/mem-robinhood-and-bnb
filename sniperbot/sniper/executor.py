@@ -764,6 +764,7 @@ class Trader:
                     # нулей первая реальная покупка падала на «None + int», и позиция
                     # не записывалась, хотя монеты уже были потрачены.
                     amount_wei=0, bought_wei=0, native_spent_wei=0, native_returned_wei=0,
+                    peak_liquidity_wei=0,
                 )
                 session.add(position)
             position.amount_wei = (position.amount_wei or 0) + received
@@ -795,6 +796,13 @@ class Trader:
             position.dead_timeout_min = cfg.dead_timeout_min
             position.dead_min_pct = cfg.dead_min_pct
             position.token_owner = token.owner
+
+            # Защита от слива сравнивает текущую ликвидность с максимальной. Без
+            # замера в момент покупки максимум остаётся нулевым, проверка молчит,
+            # и самый быстрый слив — сразу после входа — проходит незамеченным.
+            liquidity_wei = await self._pool_liquidity(adapter, token, pool, chain)
+            position.peak_liquidity_wei = max(position.peak_liquidity_wei or 0, liquidity_wei)
+
             await session.flush()
             position_id = position.id
             await repo.log_trade(
@@ -803,6 +811,16 @@ class Trader:
                 tx_hash=tx_hash, status="success", gas_used=int(receipt.get("gasUsed", 0)),
             )
         return position_id
+
+    @staticmethod
+    async def _pool_liquidity(adapter: DexAdapter, token, pool: PoolRef, chain) -> int:
+        """Ликвидность пула в wei нативной монеты. 0 — прочитать не удалось."""
+        try:
+            state = await adapter.pool_state(token.address, pool, token.decimals)
+        except Exception as exc:  # noqa: BLE001 - покупка уже состоялась, ронять её нельзя
+            log.debug("Ликвидность пула %s не прочиталась: %s", pool.address, exc)
+            return 0
+        return to_wei(state.liquidity_native, chain.native_decimals)
 
     async def _ensure_allowance(self, client, adapter: DexAdapter, account, token: str,
                                 amount: int, cfg: ChainSettings, gas_fees: dict) -> None:

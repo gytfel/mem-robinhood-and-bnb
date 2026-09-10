@@ -73,6 +73,11 @@ RULE_LADDER = Rule("ladder", "Ступень фиксации", "🪜")
 RULE_TAKE = Rule("take_profit", "Тейк-профит", "🎉")
 RULE_TRAIL = Rule("trailing", "Трейлинг-стоп", "📉")
 RULE_DEAD = Rule("dead", "Позиция не растёт", "🥱")
+RULE_COLLAPSE = Rule("collapse", "Обвал цены — стоп не успел", "💥")
+
+# Падение глубже этого порога за один шаг наблюдения — это не движение цены,
+# а вынутая ликвидность: между проверками промежуточных значений не было.
+COLLAPSE_PCT = Decimal(-85)
 
 
 def ladder_percent(position: Position, share: int) -> int:
@@ -99,9 +104,11 @@ def decide_exit(position: Position, ctx: ExitContext) -> tuple[Rule | None, int,
         if drop >= rug:
             return RULE_RUG, 100, ""
 
-    # 2. Стоп-лосс.
+    # 2. Стоп-лосс. Если цена рухнула далеко за его уровень, называем вещи своими
+    # именами: сработать раньше стоп не мог, между проверками не было цены между.
     if position.stop_loss_pct and ctx.change <= -Decimal(position.stop_loss_pct):
-        return RULE_STOP, 100, ""
+        deep = ctx.change <= COLLAPSE_PCT and -Decimal(position.stop_loss_pct) > COLLAPSE_PCT
+        return (RULE_COLLAPSE if deep else RULE_STOP), 100, ""
 
     # 3. Безубыток: цель уже была достигнута, теперь не даём уйти в минус.
     if position.breakeven_armed and ctx.change <= 0:
@@ -222,8 +229,10 @@ class PositionMonitor:
             state = await adapter.pool_state(position.token_address, self._pool_of(position),
                                              position.token_decimals)
         except Exception as exc:  # noqa: BLE001 - пул мог исчезнуть
+            # Не ноль, а «не знаю»: сбой сети — не повод продавать живую позицию.
+            # Настоящий слив покажет успешный ответ с пустыми резервами.
             log.debug("Ликвидность позиции #%s недоступна: %s", position.id, exc)
-            return Decimal(0)
+            return None
         return state.liquidity_native
 
     async def check_position(self, position: Position) -> None:
