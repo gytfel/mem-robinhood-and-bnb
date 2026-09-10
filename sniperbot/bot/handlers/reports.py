@@ -18,6 +18,7 @@ from sniperbot.db.base import session_scope
 from sniperbot.db.models import User
 from sniperbot.pairstats import (
     MIN_SAMPLE,
+    render_hours,
     render_outcomes,
     render_winrate,
     round_trip_cost,
@@ -212,6 +213,7 @@ async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, u
                 outcomes, seen=len(pairs), bought=counts.get("sniped", 0),
                 window=f"{window} · {chain.name}",
             ))
+            outcome_blocks.append(render_hours(outcomes, int(user.tz_offset or 0)))
 
     if not total:
         lines.append("\nПусто. Либо сеть тихая, либо сканер не видит фабрику — проверьте /health.")

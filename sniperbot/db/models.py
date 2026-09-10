@@ -79,6 +79,7 @@ class User(Base):
     dry_run: Mapped[bool] = mapped_column(Boolean, default=False)      # бумажная торговля
     notify_level: Mapped[str] = mapped_column(String(16), default="all")
     notify_restart: Mapped[bool] = mapped_column(Boolean, default=True)
+    tz_offset: Mapped[int] = mapped_column(Integer, default=0)   # часы от UTC, для отчётов
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

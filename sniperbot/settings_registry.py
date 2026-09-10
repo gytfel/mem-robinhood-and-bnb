@@ -272,6 +272,10 @@ SETTINGS: tuple[Setting, ...] = (
             "ux", choices=("all", "trades", "errors")),
     Setting("deposits", "notify_deposits", "user", "bool", "Уведомления о пополнении",
             "Сообщать о приходе средств на кошелёк", "ux"),
+    Setting("tz", "tz_offset", "user", "int", "Часовой пояс",
+            "Сдвиг от UTC в часах: Москва 3, Берлин 2, Нью-Йорк −5. "
+            "Нужен, чтобы отчёты показывали часы по-вашему, а не по Гринвичу",
+            "ux", unit=" ч от UTC", minimum=Decimal(-12), maximum=Decimal(14)),
     Setting("restart", "notify_restart", "user", "bool", "Уведомления о перезапуске",
             "Сообщать, когда бот перезапустился и обновился ли при этом код", "ux"),
 )

@@ -153,8 +153,14 @@ def test_pool_rejected_by_several_filters_counts_in_each():
 
 # --------------------------------------------------------------- разрез по часам
 def test_hours_need_a_minimum_sample():
-    rows = outcomes(accepted=5, accepted_hits=1, denied=5, denied_hits=1, hour=3)
-    assert hour_rows(rows) == []
+    """Час с горсткой наблюдений в таблицу не попадает — это ещё не сигнал."""
+    from sniperbot.pairstats import MIN_HOUR_SAMPLE
+
+    thin = outcomes(accepted=2, accepted_hits=1, denied=2, denied_hits=1, hour=3)
+    assert hour_rows(thin) == []
+
+    enough = outcomes(accepted=MIN_HOUR_SAMPLE, accepted_hits=2, denied=0, denied_hits=0, hour=3)
+    assert [row.hour for row in hour_rows(enough)] == [3]
 
 
 def test_hours_are_ranked_by_success_share():
@@ -352,3 +358,78 @@ def test_winrate_report_says_when_target_is_unreachable():
     rows = [path("1.01", "0.3")] * 60      # ничего не растёт
     text = render_winrate(rows, Decimal(45), Decimal(8))
     assert "недостижимы" in text
+
+
+# ------------------------------------------------------- «когда торговать»
+def at_hour(hour: int, grew: int, flat: int) -> list[Outcome]:
+    return ([Outcome(accepted=True, multiple=Decimal(3), hour=hour)] * grew
+            + [Outcome(accepted=True, multiple=Decimal(1), hour=hour)] * flat)
+
+
+def day_with_good_hours(good=(16, 21)) -> list[Outcome]:
+    rows = []
+    for hour in range(24):
+        rows += at_hour(hour, grew=14 if hour in good else 2, flat=26 if hour in good else 38)
+    return rows
+
+
+def test_hours_section_names_the_window_and_the_command():
+    from sniperbot.pairstats import render_hours
+
+    text = render_hours(day_with_good_hours())
+
+    assert "Когда торговать" in text
+    assert "значима" in text
+    assert "/set hours 16,21" in text          # готовая команда, а не совет «подумайте»
+
+
+def test_hours_section_shows_local_time_when_timezone_is_set():
+    from sniperbot.pairstats import render_hours
+
+    text = render_hours(day_with_good_hours(), offset=3)
+
+    assert "16:00 (19:00)" in text
+    assert "По вашему времени это 00,19" in text   # 16→19, 21→00 через полночь
+
+
+def test_hours_section_offers_the_timezone_setting_when_missing():
+    from sniperbot.pairstats import render_hours
+
+    assert "/set tz" in render_hours(day_with_good_hours())
+
+
+def test_hours_section_refuses_to_recommend_on_noise():
+    """Половина часов всегда «выше среднего» — окно по ним было бы выдумкой."""
+    from sniperbot.pairstats import render_hours
+
+    rows = []
+    for hour in range(24):
+        rows += at_hour(hour, grew=4 if hour % 2 else 3, flat=36)
+    text = render_hours(rows)
+
+    assert "закреплять окно рано" in text
+    assert "/set hours" not in text
+
+
+def test_hours_section_explains_itself_when_there_is_no_data():
+    from sniperbot.pairstats import render_hours
+
+    assert "копит" in render_hours([Outcome(accepted=True, multiple=Decimal(1), hour=3)])
+
+
+def test_good_hours_ignores_a_lucky_spike():
+    """Час с парой удач не должен попадать в окно наравне с настоящими."""
+    from sniperbot.pairstats import good_hours, hour_rows
+
+    rows = day_with_good_hours(good=(16, 21))
+    rows += at_hour(3, grew=3, flat=7)          # 30%, но всего 10 наблюдений
+    assert good_hours(hour_rows(rows), rows) == [16, 21]
+
+
+def test_hours_spec_compresses_ranges():
+    from sniperbot.pairstats import hours_spec, shift_hours
+
+    assert hours_spec([0, 1, 2, 16, 17]) == "00-02,16-17"
+    assert hours_spec([5]) == "05"
+    assert hours_spec([]) == ""
+    assert shift_hours([22, 23], 3) == [1, 2]   # через полночь

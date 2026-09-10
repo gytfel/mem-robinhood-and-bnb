@@ -25,6 +25,7 @@ from sniperbot.utils.fmt import esc
 MILESTONES: tuple[Decimal, ...] = (Decimal("1.5"), Decimal(2), Decimal(5))
 TARGET = Decimal(2)              # по какой планке сравниваем фильтры между собой
 MIN_SAMPLE = 30                  # меньше этого числа наблюдений вывод не делаем
+MIN_HOUR_SAMPLE = 8              # столько нужно, чтобы час вообще показать в таблице
 Z_95 = 1.96                      # порог значимости для двусторонней проверки
 
 
@@ -185,7 +186,7 @@ class HourRow:
     share: Decimal
 
 
-def hour_rows(outcomes: list[Outcome], minimum: int = MIN_SAMPLE) -> list[HourRow]:
+def hour_rows(outcomes: list[Outcome], minimum: int = MIN_HOUR_SAMPLE) -> list[HourRow]:
     """Доля выросших токенов по часам суток (UTC)."""
     groups: dict[int, list[Outcome]] = {}
     for row in outcomes:
@@ -199,17 +200,110 @@ def hour_rows(outcomes: list[Outcome], minimum: int = MIN_SAMPLE) -> list[HourRo
 def hours_verdict(rows: list[HourRow], outcomes: list[Outcome]) -> str:
     """Стоит ли вообще делить сутки на часы — или разница случайна."""
     if len(rows) < 4:
-        return "Данных по часам мало — копятся."
+        return "Часов с достаточным числом наблюдений пока мало — копятся."
     best, worst = rows[0], rows[-1]
-    best_bucket = [row for row in outcomes if row.hour == best.hour]
-    worst_bucket = [row for row in outcomes if row.hour == worst.hour]
-    a, b = Bucket("best", best_bucket), Bucket("worst", worst_bucket)
+    a = Bucket("best", [row for row in outcomes if row.hour == best.hour])
+    b = Bucket("worst", [row for row in outcomes if row.hour == worst.hour])
     if not significant(a.hits(), a.count, b.hits(), b.count):
-        return "Разница между часами в пределах погрешности."
+        return ("Разница между часами пока в пределах погрешности — "
+                "закреплять окно рано, данные копятся.")
+    return "Разница между часами значима."
+
+
+def good_hours(rows: list[HourRow], outcomes: list[Outcome]) -> list[int]:
+    """Часы, которые значимо лучше остальных.
+
+    Просто «выше среднего» сюда не годится: половина часов всегда выше среднего,
+    и окно набралось бы из случайных всплесков. Каждый час сравнивается с
+    остальными сутками целиком и проходит ту же проверку значимости.
+    """
     average = Bucket("all", outcomes).share()
-    good = sorted(row.hour for row in rows if row.share >= average)
-    return ("Разница между часами значима. Лучшие часы (UTC): "
-            + ", ".join(f"{hour:02d}" for hour in good))
+    picked = []
+    for row in rows:
+        if row.share < average:
+            continue
+        inside = Bucket("hour", [item for item in outcomes if item.hour == row.hour])
+        outside = Bucket("rest", [item for item in outcomes if item.hour != row.hour])
+        if significant(inside.hits(), inside.count, outside.hits(), outside.count):
+            picked.append(row.hour)
+    return sorted(picked)
+
+
+def hours_spec(hours: list[int]) -> str:
+    """[0,1,2,16,17] → «00-02,16-17» — готовый аргумент для /set hours."""
+    if not hours:
+        return ""
+    spans, start, previous = [], hours[0], hours[0]
+    for hour in hours[1:]:
+        if hour == previous + 1:
+            previous = hour
+            continue
+        spans.append((start, previous))
+        start = previous = hour
+    spans.append((start, previous))
+    return ",".join(f"{a:02d}" if a == b else f"{a:02d}-{b:02d}" for a, b in spans)
+
+
+def shift_hours(hours: list[int], offset: int) -> list[int]:
+    """Часы UTC в местные — с переходом через полночь."""
+    return sorted({(hour + offset) % 24 for hour in hours})
+
+
+def render_hours(outcomes: list[Outcome], offset: int = 0) -> str:
+    """Когда лучше торговать — по вашим же данным.
+
+    Показываем все часы, где набралось хоть сколько-то наблюдений, но
+    рекомендацию даём только если разница прошла проверку значимости: закрепить
+    окно по случайному всплеску значит отрезать половину потока просто так.
+    """
+    rows = hour_rows(outcomes)
+    if not rows:
+        counted = sum(1 for row in outcomes if row.hour is not None)
+        return ("🕐 <b>Когда торговать</b>\n"
+                f"Наблюдений пока {counted}: на разрез по часам нужно хотя бы "
+                f"{MIN_HOUR_SAMPLE} в одном часе. Бот копит их сам.")
+
+    average = Bucket("all", outcomes).share()
+    local = " · местное" if offset else ""
+    parts = [f"🕐 <b>Когда торговать</b> <i>(доля {TARGET}× · UTC{local})</i>",
+             f"В среднем по всем часам: {average:.1f}%\n"]
+
+    def mark_for(share: Decimal) -> str:
+        # При равных долях цветная метка ничего не значит — она бы просто врала.
+        if share == average:
+            return "·"
+        return "🟢" if share > average else "🔴"
+
+    shown = rows[:5] if len(rows) > 9 else rows
+    for row in shown:
+        mark = mark_for(row.share)
+        stamp = f"{row.hour:02d}:00"
+        if offset:
+            stamp += f" ({(row.hour + offset) % 24:02d}:00)"
+        parts.append(f"{mark} {stamp}  {row.share:.1f}%  ({row.count} шт)")
+    if len(rows) > 9:
+        parts.append("   …")
+        for row in rows[-3:]:
+            stamp = f"{row.hour:02d}:00"
+            if offset:
+                stamp += f" ({(row.hour + offset) % 24:02d}:00)"
+            parts.append(f"{mark_for(row.share)} {stamp}  {row.share:.1f}%  ({row.count} шт)")
+
+    verdict = hours_verdict(rows, outcomes)
+    parts.append(f"\n{verdict}")
+
+    best = good_hours(rows, outcomes)
+    if best and verdict.endswith("значима."):
+        spec = hours_spec(best)
+        parts.append(f"Торговать только в лучшие часы:\n<code>/set hours {spec}</code>")
+        if offset:
+            parts.append(f"По вашему времени это {hours_spec(shift_hours(best, offset))}.")
+    elif best:
+        parts.append(f"Пока лидируют часы {hours_spec(best)} UTC — но закреплять их рано.")
+    if not offset:
+        parts.append("<i>Часы показаны по UTC. Чтобы видеть своё время: "
+                     "<code>/set tz 3</code> — сдвиг вашего пояса от UTC.</i>")
+    return "\n".join(parts)
 
 
 # ----------------------------------------------------------------------- отчёт
@@ -242,18 +336,6 @@ def render_outcomes(outcomes: list[Outcome], seen: int, bought: int, window: str
         parts += [f"{row.mark} {row.share:5.0f}%  ({row.count} шт)  {esc(row.title)}"
                   for row in rows[:12]]
         parts.append("\n🟢 отсеивает слабое · 🔴 режет то, что растёт · ⚪️ данных мало")
-
-    hours = hour_rows(outcomes)
-    if hours:
-        parts.append(f"\n<b>По часам суток</b> <i>(доля {TARGET}×, UTC)</i>")
-        average = Bucket("all", outcomes).share()
-        for row in [*hours[:4], *([HourRow(-1, 0, Decimal(0))] if len(hours) > 7 else []), *hours[-3:]]:
-            if row.hour < 0:
-                parts.append("   …")
-                continue
-            mark = "🟢" if row.share >= average else "🔴"
-            parts.append(f"{mark} {row.hour:02d}:00  {row.share:.1f}%  ({row.count} шт)")
-        parts.append(hours_verdict(hours, outcomes))
 
     return "\n".join(parts)
 
