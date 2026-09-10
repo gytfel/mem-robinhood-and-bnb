@@ -584,3 +584,45 @@ async def watched_pool(session: AsyncSession, chain: str, token: str) -> SeenPai
         SeenPair.chain == chain, func.lower(SeenPair.token_address) == token.lower()
     ).order_by(SeenPair.id.desc())
     return (await session.scalars(stmt)).first()
+
+
+async def track_pool_price(session: AsyncSession, pair_id: int, price: Decimal) -> None:
+    """Запоминает первую и максимальную цену пула.
+
+    Нужно не для торговли, а для честной оценки фильтров: без этого нельзя
+    сказать, что бот отсеял — мусор или токен, который потом вырос.
+    """
+    row = await session.get(SeenPair, pair_id)
+    if row is None or price is None or price <= 0:
+        return
+    if row.first_price is None or row.first_price <= 0:
+        row.first_price = price
+    if row.peak_price is None or price > row.peak_price:
+        row.peak_price = price
+    row.price_samples = int(row.price_samples or 0) + 1
+
+
+async def outcome_pairs(
+    session: AsyncSession, chain: str, since: dt.datetime | None = None, limit: int = 5000
+) -> list[SeenPair]:
+    """Пулы, по которым есть замеры цены — материал для отчёта о фильтрах."""
+    stmt = select(SeenPair).where(SeenPair.chain == chain, SeenPair.price_samples > 0)
+    if since is not None:
+        stmt = stmt.where(SeenPair.created_at >= since)
+    return list((await session.scalars(stmt.order_by(SeenPair.id.desc()).limit(limit))).all())
+
+
+async def gas_by_kind(session: AsyncSession, user_id: int, chain: str) -> dict[str, int]:
+    """Средний расход газа на покупку и продажу — основа расчёта издержек."""
+    stmt = (
+        select(TradeLog.kind, func.avg(TradeLog.gas_used))
+        .where(
+            TradeLog.user_id == user_id,
+            TradeLog.chain == chain,
+            TradeLog.status == "success",
+            TradeLog.gas_used > 0,
+        )
+        .group_by(TradeLog.kind)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {str(kind): int(value or 0) for kind, value in rows}

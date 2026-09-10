@@ -629,72 +629,110 @@ def _fmt_limits(limits: dict, decimals: int) -> str:
     return ", ".join(parts)
 
 
-def evaluate_for_settings(report: SafetyReport, cfg) -> tuple[bool, list[str]]:
-    """Проверяет готовый отчёт против настроек конкретного пользователя.
+@dataclass(slots=True)
+class Rejection:
+    """Отказ одного фильтра: код для статистики и текст для человека."""
 
-    Отчёт строится один раз на пул, а фильтры у всех разные — поэтому
-    сравнение вынесено отдельно от сбора данных.
+    code: str
+    text: str
+
+
+# Названия фильтров для отчётов. Код живёт в коде и не меняется от правки текста.
+FILTER_TITLES = {
+    "no_liquidity": "нет ликвидности",
+    "min_liquidity": "ликвидности меньше минимума",
+    "max_liquidity": "ликвидности больше максимума",
+    "honeypot": "honeypot: продажа не проходит",
+    "no_simulation": "симуляция недоступна",
+    "buy_tax": "высокий налог на покупку",
+    "sell_tax": "высокий налог на продажу",
+    "lp_burn": "LP не сожжён",
+    "not_renounced": "владелец не отказался от прав",
+    "proxy": "обновляемый прокси",
+    "mintable": "владелец может допечатать токены",
+    "blacklist_fn": "в контракте есть чёрный список",
+    "pausable": "торговлю можно остановить",
+    "owner_share": "большая доля у владельца",
+    "pool_share": "мало предложения в пуле",
+    "min_edge": "издержки съедают цель по прибыли",
+}
+
+
+def evaluate_verdict(report: SafetyReport, cfg) -> list[Rejection]:
+    """Все сработавшие фильтры с кодами — основа и для решения, и для статистики.
+
+    Отчёт строится один раз на пул, а фильтры у всех разные, поэтому сравнение
+    вынесено отдельно от сбора данных. Пустой список означает «токен проходит».
     """
-    reasons: list[str] = []
+    found: list[Rejection] = []
+    def deny(code: str, text: str) -> None:
+        found.append(Rejection(code, text))
+
     sim = report.simulation
 
     if report.pair is None or report.pair_state is None or not report.pair_state.has_liquidity:
-        return False, ["нет ликвидности"]
+        return [Rejection("no_liquidity", "нет ликвидности")]
 
     min_liq = Decimal(str(getattr(cfg, "min_liquidity", 0) or 0))
     max_liq = Decimal(str(getattr(cfg, "max_liquidity", 0) or 0))
     liquidity = report.liquidity_native
     if min_liq and liquidity < min_liq:
-        reasons.append(f"ликвидность {liquidity:.3f} < минимума {min_liq}")
+        deny("min_liquidity", f"ликвидность {liquidity:.3f} < минимума {min_liq}")
     if max_liq and liquidity > max_liq:
-        reasons.append(f"ликвидность {liquidity:.3f} > максимума {max_liq}")
+        deny("max_liquidity", f"ликвидность {liquidity:.3f} > максимума {max_liq}")
 
     if getattr(cfg, "honeypot_check", True):
         if sim.can_sell is False or sim.can_buy is False:
-            reasons.append("honeypot: сделка не проходит в симуляции")
+            deny("honeypot", "honeypot: сделка не проходит в симуляции")
         elif getattr(cfg, "require_simulation", True) and (not sim.available or sim.can_sell is None):
-            reasons.append(sim.error or "симуляция недоступна")
+            deny("no_simulation", sim.error or "симуляция недоступна")
 
     max_buy = int(getattr(cfg, "max_buy_tax_bps", 10_000) or 10_000)
     max_sell = int(getattr(cfg, "max_sell_tax_bps", 10_000) or 10_000)
     if sim.buy_tax_bps is not None and sim.buy_tax_bps > max_buy:
-        reasons.append(f"налог на покупку {sim.buy_tax_bps / 100:.1f}% > {max_buy / 100:.0f}%")
+        deny("buy_tax", f"налог на покупку {sim.buy_tax_bps / 100:.1f}% > {max_buy / 100:.0f}%")
     if sim.sell_tax_bps is not None and sim.sell_tax_bps > max_sell:
-        reasons.append(f"налог на продажу {sim.sell_tax_bps / 100:.1f}% > {max_sell / 100:.0f}%")
+        deny("sell_tax", f"налог на продажу {sim.sell_tax_bps / 100:.1f}% > {max_sell / 100:.0f}%")
 
     # У V3 нет LP-токенов, поэтому требование к сожжённому LP там не применяется.
     min_burn = int(getattr(cfg, "min_lp_burned_pct", 0) or 0)
     if min_burn and (report.pool is None or report.pool.kind != "v3"):
         if report.lp_burned is None:
-            reasons.append("не удалось проверить блокировку LP")
+            deny("lp_burn", "не удалось проверить блокировку LP")
         elif report.lp_burned < min_burn:
-            reasons.append(f"LP сожжён на {report.lp_burned:.1f}% < {min_burn}%")
+            deny("lp_burn", f"LP сожжён на {report.lp_burned:.1f}% < {min_burn}%")
 
     if getattr(cfg, "require_renounced", False) and not report.token.renounced:
-        reasons.append("владелец контракта не отказался от прав")
+        deny("not_renounced", "владелец контракта не отказался от прав")
 
     profile = report.profile
     if getattr(cfg, "block_proxy", False) and profile.is_proxy:
-        reasons.append("обновляемый прокси: код могут подменить после покупки")
+        deny("proxy", "обновляемый прокси: код могут подменить после покупки")
     if getattr(cfg, "block_mintable", False) and "mint" in profile.powers:
-        reasons.append("владелец может допечатать токены")
+        deny("mintable", "владелец может допечатать токены")
     if getattr(cfg, "block_blacklist_fn", False) and "blacklist" in profile.powers:
-        reasons.append("в контракте есть чёрный список кошельков")
+        deny("blacklist_fn", "в контракте есть чёрный список кошельков")
     if getattr(cfg, "block_pausable", False) and "pause" in profile.powers:
-        reasons.append("торговлю можно остановить из контракта")
+        deny("pausable", "торговлю можно остановить из контракта")
 
     max_owner = int(getattr(cfg, "max_owner_share_pct", 0) or 0)
     if max_owner and profile.owner_share is not None and profile.owner_share > max_owner:
-        reasons.append(f"у владельца {profile.owner_share:.1f}% предложения > {max_owner}%")
+        deny("owner_share", f"у владельца {profile.owner_share:.1f}% предложения > {max_owner}%")
 
     min_pool = int(getattr(cfg, "min_pool_share_pct", 0) or 0)
     if min_pool and profile.pool_share is not None and profile.pool_share < min_pool:
-        reasons.append(f"в пуле лишь {profile.pool_share:.1f}% предложения < {min_pool}%")
+        deny("pool_share", f"в пуле лишь {profile.pool_share:.1f}% предложения < {min_pool}%")
 
     min_edge = int(getattr(cfg, "min_edge_pct", 0) or 0)
     target = int(getattr(cfg, "take_profit_pct", 0) or 0)
     cost = report.round_trip_cost_pct
     if min_edge and target and cost is not None and (Decimal(target) - cost) < min_edge:
-        reasons.append(f"издержки {cost:.1f}% съедают цель +{target}%")
+        deny("min_edge", f"издержки {cost:.1f}% съедают цель +{target}%")
 
-    return (not reasons), reasons
+    return found
+
+
+def evaluate_for_settings(report: SafetyReport, cfg) -> tuple[bool, list[str]]:
+    """Проходит ли токен фильтры пользователя: (да/нет, причины по-человечески)."""
+    found = evaluate_verdict(report, cfg)
+    return (not found), [item.text for item in found]

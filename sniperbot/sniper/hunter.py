@@ -24,7 +24,7 @@ from sniperbot.chain.dex_adapter import PoolRef, get_adapter
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.sniper.momentum import MomentumSignal, aggregate_swaps, evaluate_momentum, sample_age
-from sniperbot.sniper.safety import analyze_token, evaluate_for_settings
+from sniperbot.sniper.safety import analyze_token, evaluate_verdict
 from sniperbot.sniper.scanner import MAX_BLOCK_RANGE, PairEvent, PairScanner
 from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import to_wei
@@ -121,6 +121,10 @@ class MomentumHunter:
                     swaps=bucket.swaps, buys=bucket.buys, sells=bucket.sells,
                     volume_wei=bucket.volume_native,
                 )
+                # Судьбу пула запоминаем независимо от того, покупали его или нет:
+                # только так /stats может сравнить пропущенное с отсеянным.
+                if bucket.last_price:
+                    await repo.track_pool_price(session, pools[address]["row"].id, bucket.last_price)
 
         candidates = self._rank(chain_key, stats, previous, pools, subscribers)
         for signal, address, price in candidates[:MAX_CANDIDATES]:
@@ -308,8 +312,7 @@ class MomentumHunter:
         for user, cfg in subscribers:
             if not self._evaluate(price, bucket, cfg).passed:
                 continue
-            ok, _ = evaluate_for_settings(report, cfg)
-            if not ok:
+            if evaluate_verdict(report, cfg):
                 continue   # разгон не отменяет проверок: honeypot остаётся honeypot
             if not await self._risk_ok(user, cfg, chain_key, row):
                 continue

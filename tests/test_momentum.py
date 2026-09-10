@@ -270,7 +270,7 @@ def _hunter(monkeypatch, logs_by_call: list[list[dict]], bought: list):
 
     monkeypatch.setattr(hunter_module, "get_adapter", lambda client, cfg: StubAdapter())
     monkeypatch.setattr(hunter_module, "analyze_token", _fake_report)
-    monkeypatch.setattr(hunter_module, "evaluate_for_settings", lambda report, cfg: (True, []))
+    monkeypatch.setattr(hunter_module, "evaluate_verdict", lambda report, cfg: [])
     return hunter_module.MomentumHunter(StubEngine())
 
 

@@ -286,8 +286,16 @@ class SeenPair(Base):
     first_block_swaps: Mapped[int] = mapped_column(Integer, default=-1)  # -1 = не измеряли
     analysis_ms: Mapped[int] = mapped_column(Integer, default=0)         # сколько заняла проверка
     status: Mapped[str] = mapped_column(String(16), default="new")
-    # new | waiting (ждём ликвидность) | checking | sniped | rejected
+    # new | waiting (ждём ликвидность) | checking | sniped | rejected | watch
     reason: Mapped[str | None] = mapped_column(Text)
+    reject_codes: Mapped[str] = mapped_column(String(200), default="")  # коды сработавших фильтров
+
+    # --- что стало с токеном дальше ---
+    # Наблюдение за ценой идёт по всем найденным пулам, а не только по купленным:
+    # иначе невозможно узнать, что фильтры отсеяли — мусор или будущие иксы.
+    first_price: Mapped[Decimal | None] = mapped_column(Dec)
+    peak_price: Mapped[Decimal | None] = mapped_column(Dec)
+    price_samples: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 

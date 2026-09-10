@@ -16,6 +16,7 @@ from sniperbot.bot.ui import reply
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import User
+from sniperbot.pairstats import render_outcomes, round_trip_cost, to_outcomes
 from sniperbot.reports import (
     period_breakdown,
     period_label,
@@ -163,25 +164,29 @@ async def cmd_edge(message: Message, command: CommandObject, user: User) -> None
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, user: User) -> None:
+    """Поток токенов и — главное — правильно ли фильтры его режут."""
     hours = int(command.args) if (command.args or "").strip().isdigit() else None
     since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours) if hours else None
     window = f"за {hours} ч" if hours else "за всё время"
 
     lines = [f"📈 <b>Поток токенов</b> {window}\n"]
     total = 0
+    outcome_blocks: list[str] = []
     for chain_key in ctx.active_chain_keys:
+        chain = ctx.chain(chain_key)
         async with session_scope() as session:
             pairs = await repo.pairs_since(session, chain_key, since)
             counts = await repo.pair_status_counts(session, chain_key, since)
+            tracked = await repo.outcome_pairs(session, chain_key, since)
         if not pairs:
-            lines.append(f"{esc(ctx.chain(chain_key).name)}: новых пулов нет")
+            lines.append(f"{esc(chain.name)}: новых пулов нет")
             continue
         total += len(pairs)
 
         checked = [pair for pair in pairs if pair.analysis_ms > 0]
         average = sum(pair.analysis_ms for pair in checked) / len(checked) / 1000 if checked else 0
         lines.append(
-            f"<b>{esc(ctx.chain(chain_key).name)}</b>: найдено {len(pairs)}\n"
+            f"<b>{esc(chain.name)}</b>: найдено {len(pairs)}\n"
             f"   ✅ куплено {counts.get('sniped', 0)} · "
             f"⏳ ждут ликвидность {counts.get('waiting', 0)} · "
             f"⛔️ отсеяно {counts.get('rejected', 0)}"
@@ -194,16 +199,63 @@ async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, u
         for reason, count in reasons.most_common(5):
             lines.append(f"   • {esc(reason)} — {count}")
 
+        outcomes = to_outcomes(tracked)
+        if outcomes:
+            outcome_blocks.append(render_outcomes(
+                outcomes, seen=len(pairs), bought=counts.get("sniped", 0),
+                window=f"{window} · {chain.name}",
+            ))
+
     if not total:
         lines.append("\nПусто. Либо сеть тихая, либо сканер не видит фабрику — проверьте /health.")
     else:
+        lines.append("\n<i>«Ждут ликвидность» — пары созданы, но денег в пул ещё не залили; "
+                     "бот вернётся к ним сам.</i>\nСузить период: <code>/stats 24</code>")
+
+    costs = await _costs_block(ctx, user)
+    if costs:
+        lines.append(costs)
+
+    if outcome_blocks:
+        lines.append("\n" + "\n\n".join(outcome_blocks))
+    elif total:
         lines.append(
-            "\n<i>«Ждут ликвидность» — пары созданы, но денег в пул ещё не залили; "
-            "бот вернётся к ним сам.</i>\n"
-            "Частые причины отказа подскажут, какой фильтр слишком строгий: /config\n"
-            "Сузить период: <code>/stats 24</code>"
+            "\n🔬 <b>Качество фильтров</b>: данных пока нет.\n"
+            "Бот следит за ценой всех найденных пулов и через несколько часов покажет, "
+            "что он отсеял — мусор или будущие иксы. Наблюдение работает при включённом "
+            "автоснайпе (/on)."
         )
     await reply(message, "\n".join(lines))
+
+
+async def _costs_block(ctx: BotContext, user: User) -> str:
+    """Во что обходится круг «купил-продал» при текущей цене газа."""
+    chain_key = ctx.resolve_chain(user.active_chain)
+    chain = ctx.chain(chain_key)
+    async with session_scope() as session:
+        gas = await repo.gas_by_kind(session, user.id, chain_key)
+        cfg = await repo.get_settings(session, user.id, chain_key)
+    round_trip = gas.get("buy", 0) + gas.get("sell", 0)
+    if not round_trip:
+        return ""
+    try:
+        fees = await ctx.registry.get(chain_key).gas_fees()
+    except Exception as exc:  # noqa: BLE001 - без цены газа просто не показываем блок
+        log.debug("Цена газа для отчёта недоступна: %s", exc)
+        return ""
+    price = int(fees.get("gasPrice") or fees.get("maxFeePerGas") or 0)
+    if not price:
+        return ""
+
+    cost, share = round_trip_cost(round_trip, price, Decimal(str(cfg.buy_amount)),
+                                  chain.native_decimals)
+    text = (f"\n<b>Издержки</b>\n"
+            f"{fmt_amount(cost, 5)} {chain.native_symbol} за круг при входе "
+            f"{fmt_amount(cfg.buy_amount)} = <b>{share:.1f}%</b>")
+    if share >= 5:
+        text += ("\n⚠️ Газ съедает больше 5% входа — увеличьте сумму покупки "
+                 "(<code>/set buy</code>) или ждите более дешёвого газа.")
+    return text
 
 
 @router.message(Command("blacklist"))

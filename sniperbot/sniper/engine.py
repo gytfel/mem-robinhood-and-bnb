@@ -19,7 +19,7 @@ from sniperbot.notify import Notifier
 from sniperbot.settings_registry import parse_variant, variant_overlay
 from sniperbot.sniper.executor import Trader
 from sniperbot.sniper.hunter import MomentumHunter
-from sniperbot.sniper.safety import analyze_token, evaluate_for_settings
+from sniperbot.sniper.safety import analyze_token, evaluate_verdict
 from sniperbot.sniper.scanner import PairEvent, PairScanner
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr, to_wei
 
@@ -220,10 +220,12 @@ class SniperEngine:
 
         sniped = 0
         reject_reason = ""
+        reject_codes: list[str] = []
         for user, cfg in subscribers:
-            ok, reasons = evaluate_for_settings(report, cfg)
-            if not ok:
-                reject_reason = reject_reason or "; ".join(reasons)
+            denied = evaluate_verdict(report, cfg)
+            if denied:
+                reject_reason = reject_reason or "; ".join(item.text for item in denied)
+                reject_codes = reject_codes or [item.code for item in denied]
                 continue
             blocked = await self.check_limits(user.id, event.chain, cfg)
             if blocked:
@@ -242,7 +244,8 @@ class SniperEngine:
             await self.buy_for_user(user, effective, event, report, (adapter, pool), group)
             sniped += 1
 
-        await self._mark(pair_id, "sniped" if sniped else "rejected", reject_reason or None)
+        await self._mark(pair_id, "sniped" if sniped else "rejected", reject_reason or None,
+                         codes=reject_codes)
 
     async def _wait_for_liquidity(self, adapter, event: PairEvent, pool: PoolRef) -> bool:
         """Ждём, пока в пул зальют ликвидность (обычно это отдельная транзакция)."""
@@ -370,11 +373,15 @@ class SniperEngine:
                 f"❌ Покупка {symbol} ({short_addr(event.token)}) не удалась:\n{esc(result.error)}",
             )
 
-    async def _mark(self, pair_id: int | None, status: str, reason: str | None) -> None:
+    async def _mark(self, pair_id: int | None, status: str, reason: str | None,
+                    codes: list[str] | None = None) -> None:
         if pair_id is None:
             return
         async with session_scope() as session:
             await repo.mark_pair(session, pair_id, status, reason)
+            if codes:
+                # Коды нужны отчёту /stats: по тексту причины фильтр не опознать.
+                await repo.update_seen_pair(session, pair_id, reject_codes=",".join(codes)[:200])
 
 
 def _aware(value):  # noqa: ANN001 - SQLite отдаёт наивные даты
