@@ -101,6 +101,12 @@ async def balance_of(client: ChainClient, token: str, holder: str) -> int:
     return int(await client.call(token, ERC20_ABI, "balanceOf", to_checksum(holder)))
 
 
+async def balance_by_node(client: ChainClient, token: str, holder: str) -> list[int]:
+    """Что ответила каждая нода на вопрос о балансе — для честной диагностики."""
+    answers = await client.call_all(token, ERC20_ABI, "balanceOf", to_checksum(holder))
+    return [int(value) for value in answers]
+
+
 async def confirmed_balance(client: ChainClient, token: str, holder: str) -> int:
     """Баланс, подтверждённый всеми доступными нодами: берём максимум.
 

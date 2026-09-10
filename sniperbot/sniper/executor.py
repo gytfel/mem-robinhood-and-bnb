@@ -17,7 +17,13 @@ from decimal import Decimal
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.dex import apply_slippage
 from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, find_best_venue, get_adapter
-from sniperbot.chain.erc20 import allowance, balance_of, confirmed_balance, fetch_token
+from sniperbot.chain.erc20 import (
+    allowance,
+    balance_by_node,
+    balance_of,
+    confirmed_balance,
+    fetch_token,
+)
 from sniperbot.chain.wallet import WalletError, WalletService
 from sniperbot.config import Settings
 from sniperbot.db import repo
@@ -330,10 +336,19 @@ class Trader:
                                    error=f"Позиция #{existing.id} по этому токену уже открыта")
 
         token = await fetch_token(client, token_address)
-        balance = await balance_of(client, token_address, account.address)
+        # Спрашиваем все ноды: подбор — это как раз инструмент для случая, когда
+        # одна нода соврала нулём, и полагаться здесь на один ответ бессмысленно.
+        answers = await balance_by_node(client, token_address, account.address)
+        balance = max(answers, default=0)
         if balance <= 0:
-            return TradeResult(False, "buy", token_symbol=token.symbol,
-                               error="На кошельке нет этого токена — подбирать нечего")
+            detail = (f"Опросил нод: {len(answers)}, все ответили нулём."
+                      if answers else "Ни одна нода не ответила — попробуйте позже.")
+            return TradeResult(
+                False, "buy", token_symbol=token.symbol,
+                error=("На кошельке нет этого токена — подбирать нечего.\n"
+                       f"{detail}\n"
+                       f"Проверить самому: {client.config.address_url(account.address)}"),
+            )
 
         venue = await self.best_venue(chain_key, token_address,
                                       getattr(cfg, "dex_route", "auto") or "auto")

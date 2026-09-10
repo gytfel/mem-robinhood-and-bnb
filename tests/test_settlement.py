@@ -179,19 +179,19 @@ async def test_recover_adopts_tokens_sitting_in_the_wallet(db, token):
     user, cfg = await user_and_cfg()
 
     async def fake_balance(client, address, holder):  # noqa: ANN001
-        return 1000 * 10**18
+        return [0, 1000 * 10**18]        # одна нода отстала, вторая видит токены
 
     async def fake_token(client, address):  # noqa: ANN001
         return token
 
-    original_balance, original_fetch = executor_module.balance_of, executor_module.fetch_token
-    executor_module.balance_of = fake_balance
+    original_balance, original_fetch = executor_module.balance_by_node, executor_module.fetch_token
+    executor_module.balance_by_node = fake_balance
     executor_module.fetch_token = fake_token
     trader.best_venue = lambda *a, **kw: _venue()  # type: ignore[assignment]
     try:
         result = await trader.adopt(user, "bsc", TOKEN, cfg=cfg)
     finally:
-        executor_module.balance_of = original_balance
+        executor_module.balance_by_node = original_balance
         executor_module.fetch_token = original_fetch
 
     assert result.ok is True
@@ -234,18 +234,18 @@ async def test_recover_says_so_when_there_is_nothing_to_adopt(db, token):
     user, cfg = await user_and_cfg()
 
     async def fake_balance(client, address, holder):  # noqa: ANN001
-        return 0
+        return [0, 0]                    # все ноды согласны: токенов нет
 
     async def fake_token(client, address):  # noqa: ANN001
         return token
 
-    original_balance, original_fetch = executor_module.balance_of, executor_module.fetch_token
-    executor_module.balance_of = fake_balance
+    original_balance, original_fetch = executor_module.balance_by_node, executor_module.fetch_token
+    executor_module.balance_by_node = fake_balance
     executor_module.fetch_token = fake_token
     try:
         result = await trader.adopt(user, "bsc", TOKEN, cfg=cfg)
     finally:
-        executor_module.balance_of = original_balance
+        executor_module.balance_by_node = original_balance
         executor_module.fetch_token = original_fetch
 
     assert result.ok is False
@@ -352,19 +352,19 @@ async def test_recover_reopens_a_lost_position_instead_of_duplicating(db, token)
     user, cfg = await user_and_cfg()
 
     async def fake_balance(client, address, holder):  # noqa: ANN001
-        return 30_000 * 10**18
+        return [30_000 * 10**18]
 
     async def fake_token(client, address):  # noqa: ANN001
         return token
 
-    original_balance, original_fetch = executor_module.balance_of, executor_module.fetch_token
-    executor_module.balance_of = fake_balance
+    original_balance, original_fetch = executor_module.balance_by_node, executor_module.fetch_token
+    executor_module.balance_by_node = fake_balance
     executor_module.fetch_token = fake_token
     trader.best_venue = lambda *a, **kw: _venue()  # type: ignore[assignment]
     try:
         result = await trader.adopt(user, "bsc", TOKEN, cfg=cfg)
     finally:
-        executor_module.balance_of = original_balance
+        executor_module.balance_by_node = original_balance
         executor_module.fetch_token = original_fetch
 
     assert result.ok is True
@@ -375,3 +375,53 @@ async def test_recover_reopens_a_lost_position_instead_of_duplicating(db, token)
         positions = await repo.open_positions(session, user_id=1)
     assert len(positions) == 1
     assert positions[0].amount_wei == 30_000 * 10**18
+
+
+async def test_recover_survives_a_lagging_node(db, token):
+    """Подбор — инструмент как раз для ложного нуля: одного ответа тут мало."""
+    trader = trader_for(FakeClient())
+    user, cfg = await user_and_cfg()
+
+    async def one_node_lags(client, address, holder):  # noqa: ANN001
+        return [0, 0, 500 * 10**18]
+
+    async def fake_token(client, address):  # noqa: ANN001
+        return token
+
+    original, original_fetch = executor_module.balance_by_node, executor_module.fetch_token
+    executor_module.balance_by_node = one_node_lags
+    executor_module.fetch_token = fake_token
+    trader.best_venue = lambda *a, **kw: _venue()  # type: ignore[assignment]
+    try:
+        result = await trader.adopt(user, "bsc", TOKEN, cfg=cfg)
+    finally:
+        executor_module.balance_by_node = original
+        executor_module.fetch_token = original_fetch
+
+    assert result.ok is True
+    assert result.amount_out == 500 * 10**18
+
+
+async def test_recover_failure_says_how_many_nodes_were_asked(db, token):
+    """Пользователь должен видеть, на чём основан отказ, а не верить на слово."""
+    trader = trader_for(FakeClient())
+    user, cfg = await user_and_cfg()
+
+    async def all_zero(client, address, holder):  # noqa: ANN001
+        return [0, 0, 0]
+
+    async def fake_token(client, address):  # noqa: ANN001
+        return token
+
+    original, original_fetch = executor_module.balance_by_node, executor_module.fetch_token
+    executor_module.balance_by_node = all_zero
+    executor_module.fetch_token = fake_token
+    try:
+        result = await trader.adopt(user, "bsc", TOKEN, cfg=cfg)
+    finally:
+        executor_module.balance_by_node = original
+        executor_module.fetch_token = original_fetch
+
+    assert result.ok is False
+    assert "Опросил нод: 3" in (result.error or "")
+    assert "Проверить самому" in (result.error or "")
