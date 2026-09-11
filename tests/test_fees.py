@@ -319,3 +319,16 @@ def test_the_profit_fee_is_disclosed_somewhere():
     from sniperbot.bot.texts import HELP
 
     assert "с прибыльных сделок" in HELP.lower()
+
+
+def test_entry_fee_is_not_deducted_when_fees_are_off():
+    """Иначе доля вычиталась бы из покупки и оставалась лежать на кошельке."""
+    import inspect
+
+    from sniperbot.sniper.executor import Trader
+
+    source = inspect.getsource(Trader.buy)
+    head = source[:source.index("spend_wei = amount_wei - fee_wei")]
+    assert "self.fees.policy().enabled" in head, (
+        "размер комиссии со входа должен учитывать выключатель /fees"
+    )

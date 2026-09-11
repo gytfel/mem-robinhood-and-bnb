@@ -315,7 +315,11 @@ class Trader:
         if amount_wei <= 0:
             return TradeResult(False, "buy", error="Сумма покупки должна быть больше нуля")
 
-        fee_wei = int(amount_wei * self.settings.service_fee_rate) if self.settings.service_fee_bps else 0
+        # Комиссию со входа считаем только когда её есть куда отправить: иначе
+        # она вычиталась бы из суммы покупки, никуда не уходя, и человек входил
+        # бы меньшей суммой, чем просил.
+        charge_entry = bool(self.settings.service_fee_bps) and self.fees.policy().enabled
+        fee_wei = int(amount_wei * self.settings.service_fee_rate) if charge_entry else 0
         spend_wei = amount_wei - fee_wei
 
         gas_fees = await self.gas_fees(client, cfg)
@@ -496,7 +500,7 @@ class Trader:
 
         # Выключатель /fees выключает и эту комиссию: иначе «комиссии выключены»
         # означало бы «кроме одной».
-        if fee_wei > 0 and self.fees.policy().enabled:
+        if fee_wei > 0:
             await self._send_service_fee(client, account, fee_wei)
 
         return TradeResult(
@@ -704,8 +708,9 @@ class Trader:
 
         # Выходить важнее, чем экономить: газ и проскальзывание для продажи свои.
         gas_fees = await self.gas_fees(client, cfg, exit_mode=True)
-        await self._ensure_allowance(client, adapter, account, token_address, amount, cfg, gas_fees)
 
+        # Сначала площадка, потом разрешение: котировка его не требует, а выдать
+        # approve роутеру, через который в итоге не продаём, — впустую сожжённый газ.
         route = await self.sell_route(client, position, token_address, amount)
         if route is None:
             return TradeResult(
@@ -714,9 +719,8 @@ class Trader:
             )
         if route[1].address.lower() != (pool.address or "").lower():
             log.info("Позиция #%s продаётся на запасной площадке %s", position.id, route[0].name)
-            await self._ensure_allowance(client, route[0], account, token_address, amount,
-                                         cfg, gas_fees)
         adapter, pool, expected_native = route
+        await self._ensure_allowance(client, adapter, account, token_address, amount, cfg, gas_fees)
 
         nonce = await self.wallets.next_nonce(client, account.address)
         slippage = int(getattr(cfg, "exit_slippage_bps", 0) or cfg.slippage_bps)

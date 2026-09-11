@@ -148,3 +148,19 @@ async def test_sellable_share_reports_what_the_pool_takes(monkeypatch, quote, ex
     share = await instance.sellable_share(adapter, TOKEN, to_wei(100),
                                           PoolRef(address=OWN_POOL, kind="v3"))
     assert share == expected
+
+
+def test_approval_happens_after_the_venue_is_chosen():
+    """Approve роутеру, через который в итоге не продаём, — сожжённый впустую газ.
+
+    Проверка структурная: порядок двух вызовов внутри sell() не виден снаружи,
+    а фейковая нода, умеющая и котировки, и приём транзакций, стоила бы дороже,
+    чем ловит.
+    """
+    import inspect
+
+    source = inspect.getsource(Trader.sell)
+    assert source.index("sell_route(") < source.index("_ensure_allowance("), (
+        "разрешение выдаётся раньше, чем выбрана площадка"
+    )
+    assert source.count("_ensure_allowance(") == 1, "approve должен быть один"
