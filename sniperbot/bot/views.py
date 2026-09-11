@@ -161,6 +161,11 @@ def render_position(position: Position, chain: ChainConfig, price: Decimal | Non
     if price is not None:
         lines.append(f"💱 Сейчас: {fmt_amount(price, 12)} {chain.native_symbol}")
     lines.append("🤖 Автовыход: " + exit_rules(position))
+    if position.ab_group:
+        # Иначе непонятно, почему у этой позиции правила не те, что в /config.
+        lines.append(f"🧬 A/B-тест: вариант <b>{esc(position.ab_group)}</b>"
+                     + (" (настройки варианта, а не ваши обычные)"
+                        if position.ab_group == "B" else ""))
     if position.buy_tx:
         lines.append(f"<a href='{chain.tx_url(position.buy_tx)}'>Транзакция покупки</a>")
     return "\n".join(lines)
@@ -190,6 +195,9 @@ def exit_rules(position: Position) -> str:
         rules.append(f"TP ×{step_multiplier(position.take_profit_pct)}"
                      + (f" (продать {share}%)" if share < 100 else " (продать всё)")
                      + ("✅" if "tp" in done else ""))
+    if not steps and not position.take_profit_pct:
+        # Молчание здесь читается как «всё в порядке», хотя фиксации прибыли нет.
+        rules.append("TP не задан")
     if position.secure_pct:
         rules.append(f"возврат вложенного ×{step_multiplier(int(position.secure_pct))}"
                      + ("✅" if "secure" in done else ""))

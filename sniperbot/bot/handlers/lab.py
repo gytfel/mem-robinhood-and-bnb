@@ -46,7 +46,8 @@ STOP_WORDS = {"token", "coin", "the", "inu", "finance", "protocol", "network", "
 @router.message(Command("ab"))
 async def cmd_ab(message: Message, command: CommandObject, user: User,
                  cfg: ChainSettings, chain: ChainConfig) -> None:
-    parts = (command.args or "").split()
+    # Значение может содержать пробелы: [[1.5, 40], [3, 30]] — это одно значение.
+    parts = (command.args or "").split(maxsplit=2)
     action = parts[0].lower() if parts else "status"
 
     if action == "set" and len(parts) >= 3:

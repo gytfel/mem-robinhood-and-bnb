@@ -127,3 +127,23 @@ def test_card_says_when_autosell_is_off():
     from sniperbot.bot.views import exit_rules
 
     assert exit_rules(exit_position(auto_sell=False)) == "выключен"
+
+
+def test_card_says_when_there_is_no_take_profit_at_all():
+    """Молчание читается как «всё в порядке», хотя фиксации прибыли нет."""
+    from sniperbot.bot.views import exit_rules
+
+    text = exit_rules(exit_position(take_profit_pct=0, tp_ladder=""))
+    assert "TP не задан" in text
+    assert "SL −30%" in text
+
+
+def test_ab_value_with_spaces_reaches_the_setting():
+    """/ab set tp [[1.5, 40], [3, 30]] — это одно значение, а не три слова."""
+    parts = "set tp [[1.5, 40], [3, 30]]".split(maxsplit=2)
+    assert parts[1] == "tp"
+    assert parts[2] == "[[1.5, 40], [3, 30]]"
+
+    from sniperbot.settings_registry import find
+
+    assert find("tp").parse(parts[2]) == "50:40,200:30"
