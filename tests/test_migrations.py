@@ -74,6 +74,7 @@ async def test_new_tables_appear_next_to_the_old_ones(legacy_db):
 
 async def test_running_the_migration_twice_changes_nothing(legacy_db):
     """Перезапуск службы не должен ломать то, что уже мигрировано."""
+    await close_db()                     # как при остановке службы
     await init_db(f"sqlite+aiosqlite:///{legacy_db}")
     async with session_scope() as session:
         assert await session.get(Position, 7) is not None
