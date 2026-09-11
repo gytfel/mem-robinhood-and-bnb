@@ -48,6 +48,7 @@ COMMANDS = [
     BotCommand(command="check", description="Проверить токен"),
     BotCommand(command="positions", description="Открытые позиции"),
     BotCommand(command="recover", description="Подобрать потерянную позицию"),
+    BotCommand(command="apply", description="Применить настройки к открытым позициям"),
     BotCommand(command="hide", description="Убрать непродаваемую позицию"),
     BotCommand(command="report", description="Отчёт за всё время + файл"),
     BotCommand(command="pnl", description="Сделки одного режима + файл"),

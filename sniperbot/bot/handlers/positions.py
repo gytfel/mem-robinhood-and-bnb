@@ -84,6 +84,60 @@ async def cmd_sell(
     await _do_sell(message, ctx, user, position, cfg, percent)
 
 
+@router.message(Command("apply", "применить"))
+async def cmd_apply(message: Message, command: CommandObject, ctx: BotContext, user: User,
+                    cfg: ChainSettings, chain: ChainConfig) -> None:
+    """Переносит текущие правила выхода на уже открытые позиции.
+
+    Позиция запоминает правила на момент покупки — так честнее для статистики,
+    но человек, поменявший тейк, ждёт, что он подействует и на то, что открыто.
+    """
+    from sniperbot.sniper.executor import copy_exit_rules
+
+    args = (command.args or "").strip().lstrip("#")
+    only = int(args) if args.isdigit() else None
+
+    async with session_scope() as session:
+        positions = await repo.open_positions(session, user_id=user.id, chain=chain.key)
+        touched = []
+        for position in positions:
+            if only is not None and position.id != only:
+                continue
+            if copy_exit_rules(cfg, position):
+                touched.append(position)
+
+    if only is not None and not any(p.id == only for p in positions):
+        await reply(message, f"❌ Открытой позиции #{only} в сети {esc(chain.name)} нет.")
+        return
+    if not positions:
+        await reply(message, f"Открытых позиций в сети {esc(chain.name)} нет.")
+        return
+    if not touched:
+        await reply(message, "Все открытые позиции уже работают по текущим настройкам.")
+        return
+
+    names = ", ".join(f"#{position.id} {esc(position.token_symbol)}" for position in touched[:10])
+    await reply(
+        message,
+        f"✅ Новые правила выхода применены к {len(touched)} позиции(ям): {names}\n\n"
+        f"{esc(_exit_summary(cfg))}\n\n"
+        "<i>Уже сработавшие ступени не повторяются: то, что продано, продано.</i>",
+    )
+
+
+def _exit_summary(cfg: ChainSettings) -> str:
+    from sniperbot.settings_registry import find
+
+    parts = [f"Тейк: {find('tp').display(cfg)}"]
+    if cfg.stop_loss_pct:
+        parts.append(f"стоп −{cfg.stop_loss_pct}%")
+    if cfg.trailing_stop_pct:
+        parts.append(f"трейлинг {cfg.trailing_stop_pct}%")
+    if cfg.secure_pct:
+        parts.append(f"возврат вложенного +{cfg.secure_pct}%")
+    return " · ".join(parts)
+
+
 @router.message(Command("hide", "writeoff", "списать"))
 async def cmd_hide(message: Message, command: CommandObject, ctx: BotContext,
                    user: User) -> None:

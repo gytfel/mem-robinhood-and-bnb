@@ -490,3 +490,41 @@ def test_growth_settings_show_both_notations():
     cfg = ChainSettings(user_id=1, chain="bsc", take_profit_pct=300, sell_percent=40,
                         tp_ladder="")
     assert find("tp").display(cfg) == "×4 (+300%), продать 40%"
+
+
+# ------------------------------------- перенос настроек на открытые позиции
+def test_apply_copies_the_current_rules_onto_an_open_position():
+    """Позиция открывалась со старым тейком — /apply переносит новый."""
+    from sniperbot.db.models import ChainSettings
+    from sniperbot.settings_registry import find
+    from sniperbot.sniper.executor import copy_exit_rules
+
+    cfg = ChainSettings(user_id=1, chain="rh", stop_loss_pct=30, trailing_stop_pct=40,
+                        sell_percent=100, auto_sell=True, secure_pct=0, breakeven_pct=0,
+                        rug_guard_pct=0, dead_timeout_min=0, dead_min_pct=0)
+    find("tp").write(find("tp").parse("[[1.5, 40], [3, 30]]"), cfg)
+
+    pos = position(take_profit_pct=300, sell_percent=100, tp_ladder="")
+    changed = copy_exit_rules(cfg, pos)
+
+    assert "tp_ladder" in changed and "take_profit_pct" in changed
+    assert pos.tp_ladder == "50:40,200:30"
+    assert pos.take_profit_pct == 0
+
+    # Теперь ступень срабатывает там, где раньше позиция просто ехала мимо.
+    rule, percent, marker = decide_exit(pos, ctx(65))
+    assert rule.key == "ladder" and percent == 40 and marker == "50"
+
+
+def test_apply_reports_nothing_to_change():
+    from sniperbot.db.models import ChainSettings
+    from sniperbot.sniper.executor import copy_exit_rules
+
+    cfg = ChainSettings(user_id=1, chain="rh", take_profit_pct=300, stop_loss_pct=50,
+                        trailing_stop_pct=0, sell_percent=100, auto_sell=True,
+                        tp_ladder="", secure_pct=0, breakeven_pct=0, rug_guard_pct=0,
+                        dead_timeout_min=0, dead_min_pct=0)
+    pos = position(take_profit_pct=300, stop_loss_pct=50, trailing_stop_pct=0,
+                   sell_percent=100, auto_sell=True, tp_ladder="", secure_pct=0,
+                   breakeven_pct=0, rug_guard_pct=0, dead_timeout_min=0, dead_min_pct=0)
+    assert copy_exit_rules(cfg, pos) == []

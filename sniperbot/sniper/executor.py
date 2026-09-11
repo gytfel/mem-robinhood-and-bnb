@@ -80,6 +80,28 @@ class OrphanToken:
     decimals: int = 18
 
 
+# Правила выхода, которые позиция запоминает при покупке. Один список на всех:
+# снимок при входе и команда /apply обязаны копировать одно и то же.
+EXIT_RULE_FIELDS = (
+    "take_profit_pct", "stop_loss_pct", "trailing_stop_pct", "auto_sell", "sell_percent",
+    "tp_ladder", "secure_pct", "breakeven_pct", "rug_guard_pct",
+    "dead_timeout_min", "dead_min_pct",
+)
+
+
+def copy_exit_rules(cfg: ChainSettings, position: Position) -> list[str]:
+    """Переносит правила выхода из настроек в позицию. Возвращает изменённые поля."""
+    changed = []
+    for name in EXIT_RULE_FIELDS:
+        value = getattr(cfg, name)
+        if name == "tp_ladder":
+            value = value or ""
+        if getattr(position, name, None) != value:
+            changed.append(name)
+        setattr(position, name, value)
+    return changed
+
+
 def fee_settings_from(settings: Settings | None) -> FeeSettings:
     """Стартовые комиссии из .env — до того, как их поменяли командой."""
     if settings is None:
@@ -944,17 +966,7 @@ class Trader:
             )
             position.last_price = position.entry_price
             position.peak_price = max(position.peak_price or Decimal(0), position.entry_price or Decimal(0))
-            position.take_profit_pct = cfg.take_profit_pct
-            position.stop_loss_pct = cfg.stop_loss_pct
-            position.trailing_stop_pct = cfg.trailing_stop_pct
-            position.auto_sell = cfg.auto_sell
-            position.sell_percent = cfg.sell_percent
-            position.tp_ladder = cfg.tp_ladder or ""
-            position.secure_pct = cfg.secure_pct
-            position.breakeven_pct = cfg.breakeven_pct
-            position.rug_guard_pct = cfg.rug_guard_pct
-            position.dead_timeout_min = cfg.dead_timeout_min
-            position.dead_min_pct = cfg.dead_min_pct
+            copy_exit_rules(cfg, position)
             position.token_owner = token.owner
 
             # Защита от слива сравнивает текущую ликвидность с максимальной. Без

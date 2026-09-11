@@ -157,6 +157,7 @@ async def cmd_set(message: Message, command: CommandObject, ctx: BotContext,
         await reply(message, f"❌ {esc(setting.title)}: {esc(exc)}")
         return
 
+    had_ladder = bool(cfg.tp_ladder) if setting.name == "tp" else False
     await _persist(user.id, chain.key, setting, value, cfg, user)
     text = (
         f"✅ <b>{esc(setting.title)}</b> = {esc(setting.display(cfg, user, chain.native_symbol))}"
@@ -170,7 +171,29 @@ async def cmd_set(message: Message, command: CommandObject, ctx: BotContext,
     if setting.name in {"tp", "secure"}:
         # Обе настройки продают из одной позиции — показываем итог вместе.
         text += ladder_note(cfg.tp_ladder or "", int(cfg.secure_pct or 0))
+    if had_ladder and not cfg.tp_ladder:
+        # Одна ступень гасит лестницу. Молча — значит человек узнает об этом,
+        # когда фиксация не сработает.
+        text += ("\n\n⚠️ Прежние ступени фиксации отключены: теперь тейк в одну "
+                 "ступень. Вернуть: <code>/set tp [[1.5, 40], [3, 30], [10, 30]]</code>")
+    text += await _open_positions_hint(setting, user.id, chain)
     await reply(message, text)
+
+
+EXIT_SETTINGS = {"tp", "sl", "trail", "sellpct", "secure", "breakeven", "rugguard",
+                 "deadtime", "deadpct", "autosell"}
+
+
+async def _open_positions_hint(setting, user_id: int, chain: ChainConfig) -> str:  # noqa: ANN001
+    """Открытые позиции живут по правилам на момент покупки — об этом надо сказать."""
+    if setting.name not in EXIT_SETTINGS:
+        return ""
+    async with session_scope() as session:
+        open_count = await repo.count_open_positions(session, user_id, chain.key)
+    if not open_count:
+        return ""
+    return (f"\n\n📌 Открытых позиций: {open_count}. Они работают по правилам, которые "
+            "действовали при покупке.\nПрименить новые ко всем: <code>/apply</code>")
 
 
 async def _gas_warning(ctx: BotContext, user: User, chain: ChainConfig, amount) -> str:  # noqa: ANN001
