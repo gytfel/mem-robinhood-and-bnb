@@ -84,6 +84,42 @@ async def cmd_sell(
     await _do_sell(message, ctx, user, position, cfg, percent)
 
 
+@router.message(Command("hide", "writeoff", "списать"))
+async def cmd_hide(message: Message, command: CommandObject, ctx: BotContext,
+                   user: User) -> None:
+    """Убирает из активных позицию, которую невозможно продать."""
+    args = (command.args or "").split()
+    if not args or not args[0].lstrip("#").isdigit():
+        await reply(
+            message,
+            "Использование: <code>/hide &lt;id позиции&gt;</code>\n\n"
+            "Убирает позицию из активных, если продать её не получается: "
+            "она перестаёт занимать лимит и дёргать монитор.\n"
+            "В отчётах остаётся убытком — деньги потрачены на самом деле. "
+            "Вернуть можно командой <code>/recover &lt;адрес токена&gt;</code>.",
+        )
+        return
+
+    position_id = int(args[0].lstrip("#"))
+    async with session_scope() as session:
+        position = await repo.find_position(session, position_id, user.id)
+        if position is None:
+            await reply(message, "❌ Позиция не найдена.")
+            return
+        if position.status != "open":
+            await reply(message, f"Позиция #{position_id} и так закрыта.")
+            return
+        token, symbol = position.token_address, position.token_symbol
+        await repo.write_off_position(session, position_id, user.id)
+
+    await reply(
+        message,
+        f"🪦 Позиция #{position_id} ({esc(symbol)}) убрана из активных.\n"
+        "Лимит она больше не занимает, монитор её не трогает.\n\n"
+        f"Если токен снова станет продаваемым: <code>/recover {token}</code>",
+    )
+
+
 @router.message(Command("history"))
 async def cmd_history(message: Message, ctx: BotContext, user: User) -> None:
     async with session_scope() as session:

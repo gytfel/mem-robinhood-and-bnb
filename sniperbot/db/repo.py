@@ -654,7 +654,9 @@ async def lost_position_by_token(
             Position.chain == chain,
             func.lower(Position.token_address) == token.lower(),
             Position.status == "closed",
-            Position.exit_reason == "lost",
+            # «Утрачена» и «продать невозможно» возвращаются одинаково: в обоих
+            # случаях токены могут снова оказаться живыми.
+            Position.exit_reason.in_(("lost", "stuck")),
         )
         .order_by(Position.id.desc())
     )
@@ -745,3 +747,20 @@ async def set_state(session: AsyncSession, key: str, value: str) -> None:
         session.add(AppState(key=key, value=value))
     else:
         row.value = value
+
+
+async def write_off_position(session: AsyncSession, position_id: int, user_id: int,
+                             reason: str = "stuck") -> Position | None:
+    """Закрывает позицию, которую невозможно продать.
+
+    Деньги списаны и в отчётах остаются убытком — прятать их было бы обманом
+    самого себя. Из активных позиция уходит: она не должна занимать лимит и
+    дёргать монитор. Вернуть её можно командой /recover, если токен оживёт.
+    """
+    position = await session.get(Position, position_id)
+    if position is None or position.user_id != user_id or position.status != "open":
+        return None
+    position.status = "closed"
+    position.exit_reason = reason
+    position.closed_at = utcnow()
+    return position

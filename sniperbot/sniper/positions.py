@@ -203,6 +203,10 @@ def decide_exit(position: Position, ctx: ExitContext) -> tuple[Rule | None, int,
     return None, 0, ""
 
 
+class NoQuote(RuntimeError):
+    """Ни одна площадка сети не берётся посчитать продажу этой позиции."""
+
+
 class PositionMonitor:
     """Периодически переоценивает позиции и закрывает их по правилам выхода."""
 
@@ -287,7 +291,7 @@ class PositionMonitor:
         route = await self.trader.sell_route(client, position, position.token_address,
                                              position.amount_wei)
         if route is None:
-            raise RuntimeError("ни одна площадка не даёт котировку на продажу")
+            raise NoQuote("ни одна площадка не даёт котировку на продажу")
         native_out = route[2]
         tokens = from_wei(position.amount_wei, position.token_decimals)
         if tokens <= 0:
@@ -338,14 +342,16 @@ class PositionMonitor:
         except Exception as exc:  # noqa: BLE001 - пул мог опустеть
             failures = self._failures.get(position.id, 0) + 1
             self._failures[position.id] = failures
-            if failures == MAX_QUOTE_FAILURES:
+            if failures >= MAX_QUOTE_FAILURES and isinstance(exc, NoQuote):
+                # Сеть отвечает, площадки отвечают, и все отказываются считать
+                # продажу — это не сбой связи, а мёртвый пул. Держать такую
+                # позицию открытой значит занимать лимит и дёргать монитор.
+                await self._write_off(position)
+            elif failures == MAX_QUOTE_FAILURES:
                 await self.notifier.send(
                     position.user_id,
                     f"⚠️ Не могу оценить позицию #{position.id} ({esc(position.token_symbol)}): "
                     f"{esc(exc)}\n"
-                    "Пул не даёт котировку ни на одной площадке сети. Обычно это "
-                    "вынутая ликвидность или включённый после покупки налог на "
-                    "перевод.\n"
                     f"Попробовать продать часть: <code>/sell {position.id} 25</code>",
                 )
             return
@@ -436,6 +442,23 @@ class PositionMonitor:
 
         if markers:
             await self._mark_ladder_step(position.id, *markers)
+
+    async def _write_off(self, position: Position) -> None:
+        """Списывает непродаваемую позицию из активных — с объяснением человеку."""
+        async with session_scope() as session:
+            written = await repo.write_off_position(session, position.id, position.user_id)
+        if written is None:
+            return
+        self._failures.pop(position.id, None)
+        await self.notifier.send(
+            position.user_id,
+            f"🪦 <b>Позиция #{position.id}</b> ({esc(position.token_symbol)}) списана\n"
+            "Продать её не удаётся: ни одна площадка сети не даёт котировку — "
+            "ликвидность вынули или у токена появился налог на перевод.\n\n"
+            "Из активных она убрана, чтобы не занимать лимит и не мешать снайпу. "
+            "В отчётах остаётся убытком — деньги действительно потрачены.\n"
+            f"Если токен оживёт: <code>/recover {position.token_address}</code>",
+        )
 
     async def _mark_ladder_step(self, position_id: int, *markers: str) -> None:
         """Помечает ступени как сработавшие, чтобы они не повторились."""
