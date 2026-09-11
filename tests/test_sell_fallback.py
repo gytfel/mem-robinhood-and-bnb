@@ -164,3 +164,47 @@ def test_approval_happens_after_the_venue_is_chosen():
         "разрешение выдаётся раньше, чем выбрана площадка"
     )
     assert source.count("_ensure_allowance(") == 1, "approve должен быть один"
+
+
+async def test_a_working_venue_costs_exactly_one_quote(monkeypatch):
+    """Поиск замены перебирает тиры и читает пулы — это десяток запросов к ноде.
+
+    Он нужен только когда своя площадка молчит; на обычном обновлении цены его
+    быть не должно, иначе каждая проверка позиции платит за него.
+    """
+    searches = []
+
+    async def fake_find(client, token, decimals=18, route="auto"):  # noqa: ANN001
+        searches.append(token)
+        return None
+
+    monkeypatch.setattr(executor_module, "find_best_venue", fake_find)
+    own = StubAdapter("DEX V3", "v3", to_wei(2))
+    trader = Trader(FakeRegistry(), None, None)  # type: ignore[arg-type]
+    monkeypatch.setattr(trader, "adapter_for_position", lambda pos: own)
+
+    route = await trader.sell_route(FakeClient(), position(), TOKEN, to_wei(100))
+    assert route is not None and route[0] is own
+    assert searches == [], "живая площадка не должна вызывать поиск замены"
+
+
+async def test_the_same_pool_is_not_asked_twice(monkeypatch):
+    """Если поиск вернул тот же пул, второй раз спрашивать его бессмысленно."""
+    asked = []
+
+    class Counting(StubAdapter):
+        async def quote_sell(self, token, amount, pool):  # noqa: ANN001
+            asked.append(pool.address)
+            raise RuntimeError("execution reverted")
+
+    own = Counting("DEX V3", "v3", None)
+
+    async def fake_find(client, token, decimals=18, route="auto"):  # noqa: ANN001
+        return own, PoolRef(address=OWN_POOL, kind="v3"), None
+
+    monkeypatch.setattr(executor_module, "find_best_venue", fake_find)
+    trader = Trader(FakeRegistry(), None, None)  # type: ignore[arg-type]
+    monkeypatch.setattr(trader, "adapter_for_position", lambda pos: own)
+
+    assert await trader.sell_route(FakeClient(), position(), TOKEN, to_wei(100)) is None
+    assert asked == [OWN_POOL]

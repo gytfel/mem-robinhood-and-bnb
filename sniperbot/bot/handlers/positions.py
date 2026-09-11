@@ -32,9 +32,11 @@ async def cmd_positions(message: Message, ctx: BotContext, user: User) -> None:
 
 @router.callback_query(MenuCB.filter(F.section == "positions"))
 async def cb_positions(callback: CallbackQuery, ctx: BotContext, user: User) -> None:
+    # Сначала гасим часики Telegram, потом собираем экран: иначе кнопка выглядит
+    # зависшей всё время, пока идут запросы к ноде.
+    await callback.answer()
     text, markup = await _positions_view(ctx, user)
     await safe_edit(callback, text, markup)
-    await callback.answer()
 
 
 @router.callback_query(PosCB.filter(F.action == "view"))
@@ -45,9 +47,9 @@ async def cb_position(callback: CallbackQuery, callback_data: PosCB, ctx: BotCon
         await callback.answer("Позиция не найдена", show_alert=True)
         return
     chain = ctx.chain(position.chain)
+    await callback.answer()
     price = await _price(ctx, position)
     await safe_edit(callback, render_position(position, chain, price), position_actions(position.id))
-    await callback.answer()
 
 
 @router.callback_query(PosCB.filter(F.action == "sell"))

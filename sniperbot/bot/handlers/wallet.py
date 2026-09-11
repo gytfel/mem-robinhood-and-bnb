@@ -42,8 +42,8 @@ async def cmd_wallet(message: Message, ctx: BotContext, user: User, chain: Chain
 @router.callback_query(MenuCB.filter(F.section == "wallet"))
 @router.callback_query(WalletCB.filter(F.action == "refresh"))
 async def cb_wallet(callback: CallbackQuery, ctx: BotContext, user: User, chain: ChainConfig) -> None:
+    await callback.answer()          # балансы читаются из сети — не держим кнопку нажатой
     await safe_edit(callback, await render_wallet(ctx, user, chain), wallet_menu())
-    await callback.answer()
 
 
 @router.callback_query(WalletCB.filter(F.action == "deposit"))

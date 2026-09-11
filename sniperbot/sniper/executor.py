@@ -184,31 +184,39 @@ class Trader:
         пустым ответом). Тогда единственный шанс — продать там, где ликвидность
         осталась, и отказываться от него глупо: на кону вся позиция.
         """
-        candidates: list[tuple[DexAdapter, PoolRef]] = []
+        # Своя площадка — первой и в одиночку: этот путь проходят все обычные
+        # проверки цены, и он должен стоить один запрос. Поиск замены перебирает
+        # тиры комиссии и читает состояние каждого пула — это десяток запросов к
+        # ноде, и платить их, пока свой пул отвечает, незачем.
+        own_pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
+                           fee=position.pool_fee or 0)
         try:
             own = self.adapter_for_position(position)
-            candidates.append((own, PoolRef(address=position.pair_address or "",
-                                            kind=position.dex_kind or "v2",
-                                            fee=position.pool_fee or 0)))
         except TradeError:
             own = None
+        if own is not None:
+            quote = await self._quote_or_none(own, position, token, amount, own_pool)
+            if quote:
+                return own, own_pool, quote
 
         found = await find_best_venue(client, token)
-        if found is not None:
-            adapter, pool, _ = found
-            same = any(pool.address.lower() == item.address.lower() for _, item in candidates)
-            if not same:
-                candidates.append((adapter, pool))
+        if found is None:
+            return None
+        adapter, pool, _ = found
+        if pool.address.lower() == own_pool.address.lower():
+            return None                 # тот же пул уже отказался считать
+        quote = await self._quote_or_none(adapter, position, token, amount, pool)
+        return (adapter, pool, quote) if quote else None
 
-        for adapter, pool in candidates:
-            try:
-                expected = int(await adapter.quote_sell(token, amount, pool))
-            except Exception as exc:  # noqa: BLE001 - следующая площадка ещё впереди
-                log.info("Позиция #%s: %s не даёт котировку (%s)", position.id, adapter.name, exc)
-                continue
-            if expected > 0:
-                return adapter, pool, expected
-        return None
+    async def _quote_or_none(self, adapter: DexAdapter, position: Position, token: str,
+                             amount: int, pool: PoolRef) -> int | None:
+        """Котировка продажи или None, если площадка её не даёт."""
+        try:
+            expected = int(await adapter.quote_sell(token, amount, pool))
+        except Exception as exc:  # noqa: BLE001 - следующая площадка ещё впереди
+            log.info("Позиция #%s: %s не даёт котировку (%s)", position.id, adapter.name, exc)
+            return None
+        return expected or None
 
     async def sellable_share(self, adapter: DexAdapter, token: str, amount: int,
                              pool: PoolRef) -> int:
