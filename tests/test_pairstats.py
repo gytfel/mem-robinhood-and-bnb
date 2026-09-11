@@ -433,3 +433,75 @@ def test_hours_spec_compresses_ranges():
     assert hours_spec([5]) == "05"
     assert hours_spec([]) == ""
     assert shift_hours([22, 23], 3) == [1, 2]   # через полночь
+
+
+# --------------------------------------------- как смягчить режущий фильтр
+def filters_cfg(**overrides):
+    from decimal import Decimal as D
+
+    from sniperbot.db.models import ChainSettings
+
+    defaults = {
+        "user_id": 1, "chain": "bsc", "min_liquidity": D(5), "max_liquidity": D(0),
+        "max_buy_tax_bps": 1000, "max_sell_tax_bps": 1000, "min_lp_burned_pct": 50,
+        "max_owner_share_pct": 15, "min_pool_share_pct": 30, "min_edge_pct": 25,
+    }
+    defaults.update(overrides)
+    return ChainSettings(**defaults)
+
+
+def test_hint_names_the_setting_and_a_new_value():
+    """«Ослабьте фильтр» — не инструкция. Инструкция — это команда со значением."""
+    from sniperbot.sniper.safety import relax_hint
+
+    cfg = filters_cfg()
+    assert relax_hint("min_liquidity", cfg) == "/set minliq 2.5"
+    assert relax_hint("buy_tax", cfg) == "/set buytax 15"       # 10% → 15%
+    assert relax_hint("lp_burn", cfg) == "/set lpburn 25"
+    assert relax_hint("proxy", cfg) == "/set noproxy off"
+    assert relax_hint("max_liquidity", cfg) == "/set maxliq 0"
+
+
+def test_whole_number_settings_do_not_get_fractions():
+    from sniperbot.sniper.safety import relax_hint
+
+    assert relax_hint("ownershare", filters_cfg()) == ""        # такого кода нет
+    assert relax_hint("owner_share", filters_cfg()) == "/set ownershare 22"
+    assert relax_hint("min_edge", filters_cfg()) == "/set minedge 12"
+
+
+def test_hint_respects_the_settings_bounds():
+    from sniperbot.sniper.safety import relax_hint
+
+    # 80% налога × 1.5 = 120% — настройка столько не примет, упираемся в потолок.
+    assert relax_hint("buy_tax", filters_cfg(max_buy_tax_bps=8000)) == "/set buytax 100"
+
+
+def test_unknown_filter_has_no_hint():
+    from sniperbot.sniper.safety import relax_hint
+
+    assert relax_hint("нет такого", filters_cfg()) == ""
+
+
+def test_block_lists_only_the_red_ones():
+    from sniperbot.pairstats import relax_block
+
+    text = relax_block(["min_liquidity", "lp_burn"], filters_cfg())
+    assert "/set minliq 2.5" in text and "/set lpburn 25" in text
+    assert "по одной настройке" in text
+
+
+def test_protection_against_honeypots_is_not_offered_for_softening():
+    """Это проверки на то, удастся ли продать вообще, — их не крутят ради потока."""
+    from sniperbot.pairstats import relax_block
+
+    text = relax_block(["honeypot", "no_simulation"], filters_cfg())
+    assert "/set" not in text
+    assert "⛔️" in text
+
+
+def test_block_is_empty_without_red_rows_or_settings():
+    from sniperbot.pairstats import relax_block
+
+    assert relax_block([], filters_cfg()) == ""
+    assert relax_block(["min_liquidity"], None) == ""

@@ -666,6 +666,65 @@ FILTER_TITLES = {
 }
 
 
+# Чем смягчается каждый фильтр: имя настройки и в какую сторону её двигать.
+# Отдельно от FILTER_TITLES, потому что это уже не название, а действие.
+RELAX_RULES = {
+    "min_liquidity": ("minliq", "half"),
+    "max_liquidity": ("maxliq", "zero"),
+    "buy_tax": ("buytax", "up"),
+    "sell_tax": ("selltax", "up"),
+    "lp_burn": ("lpburn", "half"),
+    "not_renounced": ("renounced", "off"),
+    "proxy": ("noproxy", "off"),
+    "mintable": ("nomint", "off"),
+    "blacklist_fn": ("noblacklist", "off"),
+    "pausable": ("nopause", "off"),
+    "owner_share": ("ownershare", "up"),
+    "pool_share": ("poolshare", "half"),
+    "min_edge": ("minedge", "half"),
+}
+
+# Эти проверки отвечают не за качество токена, а за возможность вообще забрать
+# деньги обратно. Их не смягчают ради потока сделок — их отключение означает
+# покупку без единой проверки на honeypot.
+NEVER_RELAX = {"honeypot", "no_simulation", "no_liquidity"}
+
+
+def relax_hint(code: str, cfg) -> str:  # noqa: ANN001 - ChainSettings
+    """Команда, которая смягчает этот фильтр, с конкретным новым значением."""
+    from decimal import Decimal
+
+    from sniperbot.settings_registry import find
+
+    rule = RELAX_RULES.get(code)
+    if rule is None:
+        return ""
+    name, direction = rule
+    setting = find(name)
+    if setting is None:
+        return ""
+    if direction == "off":
+        return f"/set {name} off"
+    if direction == "zero":
+        return f"/set {name} 0"
+
+    current = setting.read(cfg)
+    if current is None:
+        return f"/set {name} …"
+    value = Decimal(str(current))
+    if setting.kind == "pct":
+        value /= 100                     # в настройке базисные пункты, человеку — проценты
+    wanted = value / 2 if direction == "half" else value * Decimal("1.5")
+    if setting.maximum is not None:
+        wanted = min(wanted, setting.maximum)
+    if setting.minimum is not None:
+        wanted = max(wanted, setting.minimum)
+    if setting.kind == "int":
+        wanted = Decimal(int(wanted))     # целые настройки не принимают «22.5»
+    shown = f"{wanted:.2f}".rstrip("0").rstrip(".")
+    return f"/set {name} {shown}"
+
+
 def evaluate_verdict(report: SafetyReport, cfg) -> list[Rejection]:
     """Все сработавшие фильтры с кодами — основа и для решения, и для статистики.
 

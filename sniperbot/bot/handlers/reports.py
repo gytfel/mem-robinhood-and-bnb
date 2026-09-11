@@ -195,6 +195,9 @@ async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, u
             pairs = await repo.pairs_since(session, chain_key, since)
             counts = await repo.pair_status_counts(session, chain_key, since)
             tracked = await repo.outcome_pairs(session, chain_key, since)
+            # Настройки нужны, чтобы подсказать не «ослабьте фильтр», а конкретную
+            # команду с новым значением.
+            chain_cfg = await repo.get_settings(session, user.id, chain_key)
         if not pairs:
             lines.append(f"{esc(chain.name)}: новых пулов нет")
             continue
@@ -220,7 +223,7 @@ async def cmd_stats(message: Message, command: CommandObject, ctx: BotContext, u
         if outcomes:
             outcome_blocks.append(render_outcomes(
                 outcomes, seen=len(pairs), bought=counts.get("sniped", 0),
-                window=f"{window} · {chain.name}",
+                window=f"{window} · {chain.name}", cfg=chain_cfg,
             ))
             outcome_blocks.append(render_hours(outcomes, int(user.tz_offset or 0)))
 

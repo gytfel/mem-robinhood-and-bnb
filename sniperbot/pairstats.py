@@ -316,7 +316,8 @@ def render_bucket(bucket: Bucket) -> list[str]:
     return lines
 
 
-def render_outcomes(outcomes: list[Outcome], seen: int, bought: int, window: str) -> str:
+def render_outcomes(outcomes: list[Outcome], seen: int, bought: int, window: str,
+                    cfg=None) -> str:  # noqa: ANN001 - ChainSettings, нужен для подсказок
     """Полный разбор: что фильтры пропустили, что отсеяли и кто был прав."""
     passed, denied = split(outcomes)
     parts = [
@@ -336,7 +337,42 @@ def render_outcomes(outcomes: list[Outcome], seen: int, bought: int, window: str
         parts += [f"{row.mark} {row.share:5.0f}%  ({row.count} шт)  {esc(row.title)}"
                   for row in rows[:12]]
         parts.append("\n🟢 отсеивает слабое · 🔴 режет то, что растёт · ⚪️ данных мало")
+        parts.append(relax_block([row.code for row in rows if row.mark == "🔴"], cfg))
 
+    return "\n".join(parts)
+
+
+def relax_block(codes: list[str], cfg) -> str:  # noqa: ANN001 - ChainSettings
+    """Что именно набрать, чтобы смягчить фильтры, режущие растущее.
+
+    Без этого разбор заканчивается диагнозом: человек видит красную строку и
+    остаётся один на один с вопросом, какая из двух десятков настроек за неё
+    отвечает и в какую сторону её крутить.
+    """
+    from sniperbot.sniper.safety import NEVER_RELAX, relax_hint
+
+    if not codes or cfg is None:
+        return ""
+    lines, guarded = [], []
+    for code in codes:
+        if code in NEVER_RELAX:
+            guarded.append(FILTER_TITLES.get(code, code))
+            continue
+        hint = relax_hint(code, cfg)
+        if hint:
+            lines.append(f"· {esc(FILTER_TITLES.get(code, code))} → <code>{hint}</code>")
+
+    if not lines and not guarded:
+        return ""
+    parts = ["\n<b>Как смягчить красные</b>"]
+    parts += lines
+    if lines:
+        parts.append("<i>Меняйте по одной настройке и смотрите /stats через день: "
+                     "иначе непонятно, какая правка что дала.</i>")
+    if guarded:
+        parts.append("⛔️ " + ", ".join(esc(title) for title in guarded)
+                     + " — это проверки на то, удастся ли вообще продать. "
+                       "Их не смягчают ради потока сделок.")
     return "\n".join(parts)
 
 
