@@ -30,6 +30,7 @@ from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 log = logging.getLogger(__name__)
 
 MAX_QUOTE_FAILURES = 20
+MAX_BACKOFF = 8              # во столько раз реже опрашиваем молчащий пул
 SELL_GAS_UNITS = 250_000     # типичный расход газа на продажу с запасом
 GAS_CACHE_SECONDS = 60.0     # цена газа меняется медленнее, чем опрашиваются позиции
 
@@ -251,6 +252,9 @@ class PositionMonitor:
                 age, self.settings.fast_poll_interval, self.settings.position_poll_interval,
                 self.settings.fast_watch_minutes,
             )
+            # Пул, который не отвечает, не начнёт отвечать от того, что его
+            # спрашивают каждые полторы секунды. Реже — но не бросая совсем.
+            interval *= min(MAX_BACKOFF, 1 + self._failures.get(position.id, 0))
             if now - self._last_check.get(position.id, 0.0) >= interval:
                 self._last_check[position.id] = now
                 due.append(position)
@@ -271,13 +275,20 @@ class PositionMonitor:
                        fee=position.pool_fee or 0)
 
     async def current_price(self, position: Position) -> Decimal | None:
-        """Цена выхода: сколько нативной монеты дадут за весь остаток позиции."""
+        """Цена выхода: сколько нативной монеты дадут за весь остаток позиции.
+
+        Спрашиваем там же, где будем продавать: если своя площадка перестала
+        отвечать, а соседняя отвечает, позиция должна оцениваться и закрываться
+        по ней, а не считаться потерянной.
+        """
         if position.amount_wei <= 0:
             return None
         client = self.registry.get(position.chain)
-        adapter = self.trader.adapter_for_position(position)
-        native_out = await adapter.quote_sell(position.token_address, position.amount_wei,
-                                              self._pool_of(position))
+        route = await self.trader.sell_route(client, position, position.token_address,
+                                             position.amount_wei)
+        if route is None:
+            raise RuntimeError("ни одна площадка не даёт котировку на продажу")
+        native_out = route[2]
         tokens = from_wei(position.amount_wei, position.token_decimals)
         if tokens <= 0:
             return None
@@ -330,8 +341,12 @@ class PositionMonitor:
             if failures == MAX_QUOTE_FAILURES:
                 await self.notifier.send(
                     position.user_id,
-                    f"⚠️ Не могу оценить позицию #{position.id} ({esc(position.token_symbol)}): {esc(exc)}\n"
-                    "Похоже, ликвидность вытащили (rug). Проверьте вручную.",
+                    f"⚠️ Не могу оценить позицию #{position.id} ({esc(position.token_symbol)}): "
+                    f"{esc(exc)}\n"
+                    "Пул не даёт котировку ни на одной площадке сети. Обычно это "
+                    "вынутая ликвидность или включённый после покупки налог на "
+                    "перевод.\n"
+                    f"Попробовать продать часть: <code>/sell {position.id} 25</code>",
                 )
             return
         if price is None:

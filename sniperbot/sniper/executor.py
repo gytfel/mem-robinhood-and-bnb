@@ -152,6 +152,92 @@ class Trader:
             return hint
         return await self.best_venue(chain_key, token, route)
 
+    async def sell_route(self, client, position: Position, token: str,
+                         amount: int) -> tuple[DexAdapter, PoolRef, int] | None:
+        """Где этот объём реально удаётся продать: (площадка, пул, котировка).
+
+        Позиция помнит площадку, на которой её купили, но выход к ней не привязан.
+        Пул мог опустеть, а у токена — появиться налог на перевод, которого V3 не
+        умеет (там нет свопа с поддержкой таких токенов, и котировка ревертится
+        пустым ответом). Тогда единственный шанс — продать там, где ликвидность
+        осталась, и отказываться от него глупо: на кону вся позиция.
+        """
+        candidates: list[tuple[DexAdapter, PoolRef]] = []
+        try:
+            own = self.adapter_for_position(position)
+            candidates.append((own, PoolRef(address=position.pair_address or "",
+                                            kind=position.dex_kind or "v2",
+                                            fee=position.pool_fee or 0)))
+        except TradeError:
+            own = None
+
+        found = await find_best_venue(client, token)
+        if found is not None:
+            adapter, pool, _ = found
+            same = any(pool.address.lower() == item.address.lower() for _, item in candidates)
+            if not same:
+                candidates.append((adapter, pool))
+
+        for adapter, pool in candidates:
+            try:
+                expected = int(await adapter.quote_sell(token, amount, pool))
+            except Exception as exc:  # noqa: BLE001 - следующая площадка ещё впереди
+                log.info("Позиция #%s: %s не даёт котировку (%s)", position.id, adapter.name, exc)
+                continue
+            if expected > 0:
+                return adapter, pool, expected
+        return None
+
+    async def sellable_share(self, adapter: DexAdapter, token: str, amount: int,
+                             pool: PoolRef) -> int:
+        """Какую долю объёма пул ещё берёт. 0 — не берёт никакую.
+
+        В мелком пуле весь остаток не проходит, а половина или четверть — да.
+        Знать это важнее, чем просто сказать «нет котировки».
+        """
+        for share in (50, 25, 10):
+            try:
+                if int(await adapter.quote_sell(token, amount * share // 100, pool)) > 0:
+                    return share
+            except Exception:  # noqa: BLE001 - пробуем следующую долю
+                continue
+        return 0
+
+    async def sell_failure_text(self, position: Position, amount: int) -> str:
+        """Объясняет, почему продажа невозможна, и что делать дальше."""
+        client = self.registry.get(position.chain)
+        token = to_checksum(position.token_address)
+        parts = ["Продать не получилось: ни одна площадка не дала котировку."]
+        try:
+            adapter = self.adapter_for_position(position)
+            pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
+                           fee=position.pool_fee or 0)
+            share = await self.sellable_share(adapter, token, amount, pool)
+        except Exception:  # noqa: BLE001 - диагностика не должна падать сама
+            share = 0
+        if share:
+            parts.append(f"Зато проходит часть объёма — попробуйте продать {share}%: "
+                         f"в пуле мало ликвидности на весь остаток.")
+            return "\n".join(parts)
+
+        state = None
+        try:
+            found = await find_best_venue(client, token)
+            state = found[2] if found else None
+        except Exception:  # noqa: BLE001
+            state = None
+
+        if state is not None and state.has_liquidity:
+            # Ликвидность есть, а котировки нет — так ведёт себя налог на перевод:
+            # V3 не умеет такие токены в принципе, V2 — только особым свопом.
+            parts.append("Ликвидность в пуле есть, но обмен не проходит. Обычно это "
+                         "налог на перевод, включённый после покупки: продажа такого "
+                         "токена на Uniswap V3 невозможна технически.")
+        else:
+            parts.append("Ликвидности в пуле не осталось — похоже, её вытащили (rug).")
+        parts.append(f"Проверьте вручную: {client.config.token_url(token)}")
+        return "\n".join(parts)
+
     async def _no_venue_error(self, chain_key: str, token: str, route: str) -> str:
         """Различает «пула нет вообще» и «пул есть, но его отсёк маршрут»."""
         if route in {"v2", "v3"}:
@@ -598,11 +684,17 @@ class Trader:
         gas_fees = await self.gas_fees(client, cfg, exit_mode=True)
         await self._ensure_allowance(client, adapter, account, token_address, amount, cfg, gas_fees)
 
-        try:
-            expected_native = await adapter.quote_sell(token_address, amount, pool)
-        except Exception as exc:  # noqa: BLE001
-            return TradeResult(False, "sell", error=f"Нет котировки на продажу: {exc}",
-                               token_symbol=position.token_symbol)
+        route = await self.sell_route(client, position, token_address, amount)
+        if route is None:
+            return TradeResult(
+                False, "sell", token_symbol=position.token_symbol,
+                error=await self.sell_failure_text(position, amount),
+            )
+        if route[1].address.lower() != (pool.address or "").lower():
+            log.info("Позиция #%s продаётся на запасной площадке %s", position.id, route[0].name)
+            await self._ensure_allowance(client, route[0], account, token_address, amount,
+                                         cfg, gas_fees)
+        adapter, pool, expected_native = route
 
         nonce = await self.wallets.next_nonce(client, account.address)
         slippage = int(getattr(cfg, "exit_slippage_bps", 0) or cfg.slippage_bps)
