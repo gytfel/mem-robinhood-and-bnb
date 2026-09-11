@@ -212,6 +212,13 @@ async def _doctor(args: argparse.Namespace) -> int:
     else:
         print(f"  {WARN}ALLOWED_USER_IDS пуст — бот открыт для всех")
 
+    if settings.service_fee_wallet:
+        print(f"  {OK} Комиссии включены: пополнение {settings.deposit_fee_bps / 100:g}% · "
+              f"прибыль {settings.profit_fee_bps / 100:g}% → {settings.service_fee_wallet}")
+    else:
+        print(f"  {WARN}Комиссии выключены: SERVICE_FEE_WALLET пуст "
+              "(задайте адрес — и они заработают сразу после перезапуска)")
+
     # ------------------------------------------------------------------ Telegram
     print("\nTelegram")
     if not settings.bot_token:

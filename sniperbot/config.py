@@ -13,6 +13,8 @@ from dotenv import dotenv_values
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sniperbot.utils.evm import is_address
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CHAINS_FILE = ROOT_DIR / "config" / "chains.json"
 
@@ -245,6 +247,13 @@ class Settings(BaseSettings):
             problems.append("MASTER_KEY оставлен из примера — замените на случайную строку")
         if self.service_fee_bps and not self.service_fee_wallet:
             problems.append("SERVICE_FEE_BPS > 0, но SERVICE_FEE_WALLET не задан")
+        if self.service_fee_wallet and not is_address(self.service_fee_wallet):
+            # Молчать здесь нельзя: отправка на кривой адрес падает внутри
+            # try/except, и владелец будет думать, что комиссии копятся.
+            problems.append(
+                f"SERVICE_FEE_WALLET=«{self.service_fee_wallet}» не похож на адрес "
+                "кошелька (0x и 40 символов) — комиссии не дойдут"
+            )
         return problems
 
 

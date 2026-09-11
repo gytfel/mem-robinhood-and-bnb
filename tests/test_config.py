@@ -214,3 +214,18 @@ def test_default_dex_switches_primary_venue(monkeypatch, settings):
     assert bsc.default_router.kind == "v3"
     # обе площадки остаются активными: сканер слушает и V2, и V3
     assert {r.kind for r in bsc.active_routers} == {"v2", "v3"}
+
+
+def test_a_broken_fee_wallet_is_reported_not_swallowed():
+    """Отправка на кривой адрес падает молча — значит ловим её до старта."""
+    from sniperbot.config import Settings
+
+    good = Settings(BOT_TOKEN="1:aa", MASTER_KEY="k" * 32,
+                    SERVICE_FEE_WALLET="0x" + "a" * 40)
+    assert good.validate_runtime() == []
+
+    bad = Settings(BOT_TOKEN="1:aa", MASTER_KEY="k" * 32, SERVICE_FEE_WALLET="кошелёк")
+    assert any("SERVICE_FEE_WALLET" in problem for problem in bad.validate_runtime())
+
+    off = Settings(BOT_TOKEN="1:aa", MASTER_KEY="k" * 32)
+    assert off.validate_runtime() == []      # пустой кошелёк — это просто «комиссий нет»
