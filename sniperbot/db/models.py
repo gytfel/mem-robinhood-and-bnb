@@ -374,6 +374,20 @@ class ScannerState(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class AppState(Base):
+    """Настройки самого бота, которые меняются командой, а не файлом .env.
+
+    Перезаписывать .env на живой службе нельзя: там ключи, и изменения увидит
+    только перезапуск. Здесь лежит то, что должно меняться на ходу.
+    """
+
+    __tablename__ = "app_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class BotRun(Base):
     """История запусков бота — чтобы понимать, обновился он или просто упал."""
 

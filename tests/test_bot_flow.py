@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sniperbot.access import AccessPolicy
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.middlewares import AccessMiddleware, UserMiddleware
 from sniperbot.bot.views import render_main, render_wallet
@@ -134,9 +135,60 @@ async def test_access_middleware_blocks_strangers(ctx):
         calls.append(1)
         return "ok"
 
-    middleware = AccessMiddleware(allowed={1}, admins={2})
+    policy = AccessPolicy(admins=frozenset({2}), env_allowed=frozenset({1}))
+    middleware = AccessMiddleware(policy)
     assert await middleware(handler, object(), {"event_from_user": tg_user(999)}) is None
     assert calls == []
     assert await middleware(handler, object(), {"event_from_user": tg_user(2)}) == "ok"
     assert await middleware(handler, object(), {"event_from_user": tg_user(1)}) == "ok"
     assert len(calls) == 2
+
+
+async def test_open_bot_lets_everyone_in(ctx):
+    """Главное: пустой белый список — это открытый бот, а не закрытый."""
+    async def handler(event, data):  # noqa: ANN001
+        return "ok"
+
+    middleware = AccessMiddleware(AccessPolicy(admins=frozenset({2})))
+    assert await middleware(handler, object(), {"event_from_user": tg_user(999)}) == "ok"
+
+
+async def test_access_can_be_opened_without_restart(ctx):
+    """/access меняет тот же объект политики, что читает мидлварь."""
+    async def handler(event, data):  # noqa: ANN001
+        return "ok"
+
+    policy = AccessPolicy(admins=frozenset({2}), env_allowed=frozenset({1}))
+    middleware = AccessMiddleware(policy)
+    assert await middleware(handler, object(), {"event_from_user": tg_user(999)}) is None
+
+    policy.override = "open"
+    assert await middleware(handler, object(), {"event_from_user": tg_user(999)}) == "ok"
+
+    policy.override = "private"
+    assert await middleware(handler, object(), {"event_from_user": tg_user(999)}) is None
+    policy.add(999)
+    assert await middleware(handler, object(), {"event_from_user": tg_user(999)}) == "ok"
+
+
+async def test_banned_user_is_stopped_before_any_handler(db, ctx):
+    """До этой проверки /ban был пометкой в карточке, и только."""
+    from sniperbot.bot.middlewares import UserMiddleware
+
+    await run_middleware(ctx)                       # пользователь заводится
+    async with session_scope() as session:
+        await repo.set_blocked(session, 555, True)
+
+    calls = []
+
+    async def handler(event, data):  # noqa: ANN001
+        calls.append(1)
+        return "handled"
+
+    middleware = UserMiddleware(ctx)
+    assert await middleware(handler, object(), {"event_from_user": tg_user(555)}) is None
+    assert calls == []
+
+    # Администратора собственный бан не запирает снаружи базы.
+    assert await middleware(handler, object(),
+                            {"event_from_user": tg_user(555), "is_admin": True}) == "handled"

@@ -9,6 +9,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sniperbot.db.models import (
+    AppState,
     ChainSettings,
     PoolSample,
     Position,
@@ -728,3 +729,19 @@ async def fees_total(session: AsyncSession) -> int:
     """
     rows = await session.scalars(select(User.fees_paid_wei))
     return sum(int(value or 0) for value in rows)
+
+
+
+# ------------------------------------------------------------- состояние бота
+async def get_state(session: AsyncSession, key: str, default: str = "") -> str:
+    """Значение настройки бота; default — если её ещё не задавали."""
+    row = await session.get(AppState, key)
+    return default if row is None else (row.value or "")
+
+
+async def set_state(session: AsyncSession, key: str, value: str) -> None:
+    row = await session.get(AppState, key)
+    if row is None:
+        session.add(AppState(key=key, value=value))
+    else:
+        row.value = value

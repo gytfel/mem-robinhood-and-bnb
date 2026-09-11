@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from sniperbot.access import AccessPolicy
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import ChainConfig, Settings
@@ -25,6 +26,9 @@ class BotContext:
     # переписывает сразу, поэтому читать его при каждом /version нельзя: пока
     # службу не перезапустили, там лежит код, который ещё не работает.
     build: BuildInfo = field(default_factory=build_info)
+    # Кто имеет право пользоваться ботом. Объект общий с мидлварью: /access
+    # меняет его на ходу, без перезапуска и без правки .env.
+    access: AccessPolicy = field(default_factory=AccessPolicy)
 
     @property
     def active_chain_keys(self) -> list[str]:

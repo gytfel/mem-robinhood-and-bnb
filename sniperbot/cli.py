@@ -106,7 +106,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         if args.private is not None:
             private = args.private
         elif interactive:
-            private = ask("\n3) Закрыть бота только для этих ID? (y/n)", "y").lower().startswith("y")
+            # По умолчанию бот открыт: закрытый бот — это отдельное решение, а
+            # не то, что человек получает, промотав вопрос клавишей Enter.
+            print("\n3) Закрытый бот пускает только перечисленные ID. Остальные увидят "
+                  "«Доступ ограничен».\n   Открыть для всех можно потом: /access open")
+            private = ask("   Закрыть бота только для этих ID? (y/n)", "n").lower().startswith("y")
         else:
             private = False
         if private:
@@ -203,9 +207,10 @@ async def _doctor(args: argparse.Namespace) -> int:
     problems += 0 if db_ok else 1
 
     if settings.allowed_user_ids:
-        print(f"  {OK} Доступ ограничен: {len(settings.allowed_user_ids)} польз.")
+        print(f"  {OK} Доступ по списку: {len(settings.allowed_user_ids)} польз. "
+              "(открыть всем — команда /access open в самом боте)")
     else:
-        print(f"  {WARN}ALLOWED_USER_IDS пуст — ботом сможет пользоваться кто угодно")
+        print(f"  {WARN}ALLOWED_USER_IDS пуст — бот открыт для всех")
 
     # ------------------------------------------------------------------ Telegram
     print("\nTelegram")
@@ -727,7 +732,8 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--master-key", help="свой MASTER_KEY (по умолчанию генерируется)")
     init_parser.add_argument("--bsc-rpc", help="свои RPC для BSC через запятую")
     init_parser.add_argument("--private", action="store_true", default=None,
-                             help="разрешить доступ только администраторам")
+                             help="закрыть бота: пускать только ADMIN_IDS "
+                                  "(по умолчанию бот открыт для всех)")
     init_parser.add_argument("--force", action="store_true", help="перезаписать существующий .env")
     init_parser.add_argument("-y", "--yes", action="store_true", help="без вопросов (для скриптов)")
     init_parser.set_defaults(func=cmd_init)

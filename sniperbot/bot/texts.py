@@ -97,8 +97,10 @@ HELP = (
     "/health — живы ли сканеры и ноды\n"
     "/usage — расход запросов к RPC и размер базы\n"
     "/latency — задержки всех эндпоинтов\n"
+    "/access — кому открыт бот: <code>open</code> — всем, "
+    "<code>private</code> — по списку, <code>add/del ID</code>\n"
     "/users · /userinfo ID — пользователи\n"
-    "/ban ID · /unban ID — доступ к торговле\n"
+    "/ban ID · /unban ID — доступ к боту\n"
     "/broadcast &lt;текст&gt; — сообщение всем\n"
     "/logs [N] — журнал операций · /restart confirm — перезапуск\n"
     "/fees — собранные комиссии · /exempt ID — освободить от комиссий\n\n"
@@ -124,6 +126,7 @@ EXPORT_WARNING = (
 )
 
 NOT_ALLOWED = "⛔️ Доступ к этому боту ограничен."
+BANNED = "🚫 Доступ к боту закрыт администратором."
 
 
 def route_warning(chain, route: str) -> str:  # noqa: ANN001 - ChainConfig, без кольцевого импорта

@@ -11,6 +11,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
+from sniperbot.access import STATE_EXTRA, STATE_MODE, AccessPolicy, parse_ids
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.handlers import build_router
 from sniperbot.bot.middlewares import AccessMiddleware, UserMiddleware
@@ -85,6 +86,7 @@ COMMANDS = [
 ADMIN_COMMANDS = [
     BotCommand(command="fees", description="🔒 Собранные комиссии"),
     BotCommand(command="exempt", description="🔒 Освободить пользователя от комиссий"),
+    BotCommand(command="access", description="🔒 Кому открыт бот"),
     BotCommand(command="users", description="🔒 Список пользователей"),
     BotCommand(command="userinfo", description="🔒 Карточка пользователя"),
     BotCommand(command="ban", description="🔒 Заблокировать пользователя"),
@@ -96,6 +98,25 @@ ADMIN_COMMANDS = [
     BotCommand(command="logs", description="🔒 Журнал операций"),
     BotCommand(command="restart", description="🔒 Перезапуск бота"),
 ]
+
+
+async def load_access(settings: Settings) -> AccessPolicy:
+    """Собирает правило доступа: .env как стартовое состояние, база — как решение.
+
+    Команда /access должна переживать перезапуск, поэтому её выбор хранится в
+    базе и перекрывает ALLOWED_USER_IDS. Файл с ключами при этом не трогается.
+    """
+    from sniperbot.db import repo
+
+    async with session_scope() as session:
+        override = await repo.get_state(session, STATE_MODE)
+        extra = await repo.get_state(session, STATE_EXTRA)
+    return AccessPolicy(
+        admins=frozenset(settings.admin_ids),
+        env_allowed=frozenset(settings.allowed_user_ids),
+        extra=parse_ids(extra),
+        override=override,
+    )
 
 
 async def publish_commands(bot: Bot, admins: set[int]) -> None:
@@ -186,14 +207,16 @@ async def run_bot() -> None:
     deposits = DepositWatcher(registry, notifier, settings, wallets=wallets, trader=trader)
 
     running_build = build_info()
+    policy = await load_access(settings)
     ctx = BotContext(
         settings=settings, registry=registry, wallets=wallets,
         trader=trader, engine=engine, notifier=notifier, build=running_build,
+        access=policy,
     )
 
     dp = Dispatcher(storage=MemoryStorage())
     dp["ctx"] = ctx
-    access = AccessMiddleware(settings.allowed_user_ids, settings.admin_ids)
+    access = AccessMiddleware(policy)
     users = UserMiddleware(ctx)
     for observer in (dp.message, dp.callback_query):
         observer.middleware(access)

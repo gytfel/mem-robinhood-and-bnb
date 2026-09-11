@@ -14,6 +14,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from sqlalchemy import func, select
 
+from sniperbot.access import OPEN, PRIVATE, STATE_EXTRA, STATE_MODE
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.ui import reply
 from sniperbot.chain.clients import ChainClient
@@ -243,6 +244,82 @@ async def _set_block(message: Message, command: CommandObject, is_admin: bool, b
         return
     await reply(message, f"{'🚫 Заблокирован' if blocked else '✅ Разблокирован'}: <code>{raw}</code>"
                          + ("\nАвтоснайп для него остановлен, позиции остаются." if blocked else ""))
+
+
+@router.message(Command("access"))
+async def cmd_access(message: Message, command: CommandObject, ctx: BotContext,
+                     is_admin: bool = False) -> None:
+    """Открыть бота всем или вернуть белый список — без правки .env и рестарта."""
+    if _deny(is_admin):
+        await _refuse(message)
+        return
+
+    policy = ctx.access
+    parts = (command.args or "").strip().lower().split()
+    action = parts[0] if parts else ""
+    argument = parts[1] if len(parts) > 1 else ""
+
+    if action in {"open", "всем", "открыть"}:
+        policy.override = OPEN
+        await _save_access(policy)
+        await reply(message, "🔓 <b>Бот открыт для всех.</b>\n"
+                             "Любой, кто нажмёт /start, получит кошелёк и сможет торговать.\n"
+                             "Закрыть обратно: <code>/access private</code>")
+        return
+
+    if action in {"private", "closed", "закрыть"}:
+        policy.override = PRIVATE
+        await _save_access(policy)
+        await reply(message, "🔒 <b>Бот закрыт.</b> Доступ только у администраторов и "
+                             f"белого списка ({len(policy.allowed_ids())} чел.).\n"
+                             "Добавить: <code>/access add ID</code>")
+        return
+
+    if action in {"add", "del", "remove"} and argument.lstrip("-").isdigit():
+        user_id = int(argument)
+        if action == "add":
+            changed = policy.add(user_id)
+            text = ("✅ Добавлен в белый список" if changed else "Он уже в списке")
+        else:
+            changed = policy.remove(user_id)
+            text = ("✅ Убран из белого списка" if changed else
+                    "Его нет среди добавленных командой (список из .env отсюда не меняется)")
+        if changed:
+            await _save_access(policy)
+        await reply(message, f"{text}: <code>{user_id}</code>\n{_access_status(policy)}")
+        return
+
+    if action:
+        await reply(message, "Использование:\n"
+                             "<code>/access open</code> — открыть бота всем\n"
+                             "<code>/access private</code> — только белый список\n"
+                             "<code>/access add ID</code> · <code>/access del ID</code>")
+        return
+
+    await reply(message, _access_status(policy))
+
+
+def _access_status(policy) -> str:  # noqa: ANN001 - AccessPolicy
+    lines = [f"👥 <b>Доступ к боту</b>: {'🔓 открыт всем' if policy.is_open else '🔒 по списку'}"]
+    if policy.is_open:
+        lines.append("Любой, кто нажмёт /start, получит кошелёк и сможет торговать.")
+        lines.append("\nЗакрыть: <code>/access private</code>")
+    else:
+        allowed = policy.allowed_ids()
+        lines.append(f"Кроме администраторов пускаем {len(allowed)} чел.")
+        if allowed:
+            lines.append(" ".join(f"<code>{uid}</code>" for uid in allowed[:20]))
+        lines.append("\nОткрыть всем: <code>/access open</code> · "
+                     "добавить: <code>/access add ID</code>")
+    lines.append("Заблокировать отдельного: <code>/ban ID</code>")
+    return "\n".join(lines)
+
+
+async def _save_access(policy) -> None:  # noqa: ANN001 - AccessPolicy
+    """Решение переживает перезапуск: .env остаётся нетронутым."""
+    async with session_scope() as session:
+        await repo.set_state(session, STATE_MODE, policy.override)
+        await repo.set_state(session, STATE_EXTRA, policy.extra_value())
 
 
 @router.message(Command("broadcast"))

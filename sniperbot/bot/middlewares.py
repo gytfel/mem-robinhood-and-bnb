@@ -10,8 +10,9 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from aiogram.types import User as TgUser
 
+from sniperbot.access import AccessPolicy
 from sniperbot.bot.context import BotContext
-from sniperbot.bot.texts import NOT_ALLOWED
+from sniperbot.bot.texts import BANNED, NOT_ALLOWED
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 
@@ -19,24 +20,32 @@ log = logging.getLogger(__name__)
 
 
 class AccessMiddleware(BaseMiddleware):
-    """Белый список пользователей (если задан ALLOWED_USER_IDS)."""
+    """Пускать или нет. Само правило живёт в :class:`AccessPolicy`.
 
-    def __init__(self, allowed: set[int], admins: set[int]) -> None:
-        self.allowed = allowed
-        self.admins = admins
+    Политика — общий изменяемый объект: команда /access меняет её на ходу, и
+    мидлварь видит новое правило со следующего же сообщения.
+    """
+
+    def __init__(self, policy: AccessPolicy) -> None:
+        self.policy = policy
 
     async def __call__(self, handler, event: TelegramObject, data: dict[str, Any]) -> Any:  # noqa: ANN001
         tg_user: TgUser | None = data.get("event_from_user")
         if tg_user is None:
             return await handler(event, data)
-        if self.allowed and tg_user.id not in self.allowed and tg_user.id not in self.admins:
-            if isinstance(event, Message):
-                await event.answer(NOT_ALLOWED)
-            elif isinstance(event, CallbackQuery):
-                await event.answer(NOT_ALLOWED, show_alert=True)
+        if not self.policy.allows(tg_user.id):
+            await refuse(event, NOT_ALLOWED)
             return None
-        data["is_admin"] = tg_user.id in self.admins
+        data["is_admin"] = tg_user.id in self.policy.admins
         return await handler(event, data)
+
+
+async def refuse(event: TelegramObject, text: str) -> None:
+    """Отказ понятным сообщением, а не молчанием."""
+    if isinstance(event, Message):
+        await event.answer(text)
+    elif isinstance(event, CallbackQuery):
+        await event.answer(text, show_alert=True)
 
 
 class UserMiddleware(BaseMiddleware):
@@ -71,6 +80,14 @@ class UserMiddleware(BaseMiddleware):
                 created = True
             user.active_chain = self.ctx.resolve_chain(user.active_chain)
             cfg = await repo.get_settings(session, user.id, user.active_chain)
+            blocked = bool(user.is_blocked)
+
+        # Бан проверяется здесь, а не в AccessMiddleware: там нет обращения к
+        # базе, и без этой проверки /ban оставался бы пометкой в карточке, а
+        # забаненный продолжал бы пользоваться ботом.
+        if blocked and not data.get("is_admin"):
+            await refuse(event, BANNED)
+            return None
 
         data["user"] = user
         data["cfg"] = cfg
