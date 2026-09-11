@@ -426,13 +426,20 @@ async def analyze_best(
     amount_native_wei: int,
     settings=None,
     run_simulation: bool = True,
+    route: str = "auto",
 ) -> SafetyReport:
-    """Проверяет токен на самой ликвидной площадке сети (V2 или V3)."""
+    """Проверяет токен на самой ликвидной площадке сети (V2 или V3).
+
+    ``route`` повторяет ограничение из `/route`: отчёт должен показывать тот
+    пул, на котором сделка и пройдёт, иначе налоги и цена будут не от него.
+    """
     token = await fetch_token(client, token_address)
-    found = await find_best_venue(client, token.address, token.decimals)
+    found = await find_best_venue(client, token.address, token.decimals, route=route)
     if found is None:
+        limited = f" (маршрут /route {route})" if route in {"v2", "v3"} else ""
         report = SafetyReport(token=token, chain_key=client.config.key, router="")
-        report.checks.append(Check("pair", "Пул на DEX", False, "пул с ликвидностью не найден", critical=True))
+        report.checks.append(Check("pair", "Пул на DEX", False,
+                                   f"пул с ликвидностью не найден{limited}", critical=True))
         return report
     adapter, pool, _ = found
     return await analyze_token(
@@ -655,6 +662,7 @@ FILTER_TITLES = {
     "owner_share": "большая доля у владельца",
     "pool_share": "мало предложения в пуле",
     "min_edge": "издержки съедают цель по прибыли",
+    "route": "площадка не по маршруту (/route)",
 }
 
 

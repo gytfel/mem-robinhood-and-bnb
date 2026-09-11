@@ -16,7 +16,13 @@ from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.dex import apply_slippage
-from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, find_best_venue, get_adapter
+from sniperbot.chain.dex_adapter import (
+    DexAdapter,
+    PoolRef,
+    find_best_venue,
+    get_adapter,
+    route_allows,
+)
 from sniperbot.chain.erc20 import (
     allowance,
     balance_by_node,
@@ -116,6 +122,33 @@ class Trader:
         found = await find_best_venue(self.registry.get(chain_key), token, route=route)
         return (found[0], found[1]) if found else None
 
+    async def resolve_venue(self, chain_key: str, token: str, route: str,
+                            hint: tuple[DexAdapter, PoolRef] | None = None):
+        """Площадка для входа с учётом маршрута (`/route`).
+
+        Подсказка сканера проверяется тем же правилом, что и свободный поиск:
+        деньги уходят в одном месте, значит и маршрут должен соблюдаться в одном
+        месте — кто бы ни позвал. Пул не той версии равнозначен отсутствию
+        подсказки, и тогда площадка ищется заново уже по маршруту.
+        """
+        if hint is not None and route_allows(route, hint[1].kind):
+            return hint
+        return await self.best_venue(chain_key, token, route)
+
+    async def _no_venue_error(self, chain_key: str, token: str, route: str) -> str:
+        """Различает «пула нет вообще» и «пул есть, но его отсёк маршрут»."""
+        if route in {"v2", "v3"}:
+            other = await self.best_venue(chain_key, token)
+            if other is not None:
+                return (f"Маршрут ограничен {route.upper()} (/route {route}), "
+                        f"а пула {route.upper()} у этого токена нет.\n"
+                        f"Ликвидность есть на {other[1].kind.upper()} — "
+                        "снять ограничение: /route auto")
+            return (f"Не нашёл пул {route.upper()} с ликвидностью. "
+                    "Другие площадки не проверял: маршрут ограничен /route "
+                    f"{route}")
+        return "Не нашёл пул с ликвидностью ни на одном DEX этой сети"
+
     def adapter_for_position(self, position: Position) -> DexAdapter:
         client = self.registry.get(position.chain)
         for cfg in client.config.active_routers:
@@ -145,10 +178,11 @@ class Trader:
         chain = client.config
         token_address = to_checksum(token_address)
 
-        venue = venue or await self.best_venue(chain_key, token_address,
-                                               getattr(cfg, "dex_route", "auto") or "auto")
+        route = (getattr(cfg, "dex_route", "auto") or "auto").lower()
+        venue = await self.resolve_venue(chain_key, token_address, route, venue)
         if venue is None:
-            return TradeResult(False, "buy", error="Не нашёл пул с ликвидностью ни на одном DEX этой сети")
+            return TradeResult(False, "buy",
+                               error=await self._no_venue_error(chain_key, token_address, route))
         adapter, pool = venue
 
         account = self.wallets.account(user)
@@ -376,8 +410,10 @@ class Trader:
                        f"Проверить самому: {client.config.address_url(account.address)}"),
             )
 
-        venue = await self.best_venue(chain_key, token_address,
-                                      getattr(cfg, "dex_route", "auto") or "auto")
+        # Здесь маршрут не применяем: подбор не выбирает площадку для входа, а
+        # оценивает монеты, которые уже лежат в кошельке. Купленную на V2
+        # позицию нельзя терять из-за того, что вход переключили на V3.
+        venue = await self.best_venue(chain_key, token_address)
         if venue is None:
             return TradeResult(False, "buy", token_symbol=token.symbol,
                                error="Пул с ликвидностью не найден — цену взять неоткуда")

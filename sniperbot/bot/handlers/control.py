@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.keyboards import MenuCB, main_menu
+from sniperbot.bot.texts import route_warning
 from sniperbot.bot.ui import reply
 from sniperbot.chain.wallet import WalletError
 from sniperbot.config import ChainConfig
@@ -309,5 +310,6 @@ async def cmd_speed(message: Message, user: User, cfg: ChainSettings, chain: Cha
         f"Маршрут: <b>{route.get(cfg.dex_route, cfg.dex_route)}</b>\n"
         f"Пауза между покупками: <b>{cfg.cooldown_seconds} c</b>\n\n"
         "Изменить: <code>/set gasmode turbo</code>, <code>/set route v3</code>, "
-        "<code>/set buy 0.05</code>",
+        "<code>/set buy 0.05</code>"
+        + route_warning(chain, cfg.dex_route),
     )

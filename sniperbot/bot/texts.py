@@ -70,7 +70,8 @@ HELP = (
 
     "<b>🔀 Маршруты и диагностика</b>\n"
     "/paths &lt;адрес&gt; — где вообще торгуется токен\n"
-    "/route auto|v2|v3 — на какой площадке торговать\n"
+    "/route auto|v2|v3 — где торговать. v2/v3 — жёсткое ограничение: "
+    "и снайп новых пар, и разгон, и ручная покупка пойдут только там\n"
     "/calibrate &lt;адрес&gt; — полная симуляция с деталями\n"
     "/tip — совет по газу по вашим неудачным покупкам\n\n"
 
@@ -119,3 +120,29 @@ EXPORT_WARNING = (
 )
 
 NOT_ALLOWED = "⛔️ Доступ к этому боту ограничен."
+
+
+def route_warning(chain, route: str) -> str:  # noqa: ANN001 - ChainConfig, без кольцевого импорта
+    """Предупреждение, если выбранной маршрутом площадки в сети нет.
+
+    Без него бот просто замолкает: маршрут отсекает все пулы, и снаружи это
+    неотличимо от тихого рынка — человек ждёт сделок, которых уже не будет.
+    """
+    from sniperbot.chain.dex_adapter import available_kinds
+    from sniperbot.config import env_prefix
+
+    wanted = (route or "auto").strip().lower()
+    if wanted not in {"v2", "v3"} or wanted in available_kinds(chain):
+        return ""
+
+    prefix = env_prefix(chain.key)
+    if wanted == "v3":
+        need = f"{prefix}_V3_ROUTER, {prefix}_V3_FACTORY, {prefix}_V3_QUOTER"
+    else:
+        need = f"{prefix}_ROUTER, {prefix}_FACTORY"
+    return (
+        f"\n\n⚠️ В сети {chain.name} нет ни одной настроенной площадки {wanted.upper()}. "
+        "С этим маршрутом бот не купит ничего.\n"
+        f"Заполните в .env: <code>{need}</code> — и перезапустите бота. "
+        "Вернуть прежнее поведение: <code>/route auto</code>"
+    )

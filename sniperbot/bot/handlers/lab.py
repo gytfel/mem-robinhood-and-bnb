@@ -14,8 +14,9 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from sniperbot.bot.context import BotContext
+from sniperbot.bot.texts import route_warning
 from sniperbot.bot.ui import reply
-from sniperbot.chain.dex_adapter import adapters_for
+from sniperbot.chain.dex_adapter import adapters_for, route_allows
 from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -252,7 +253,7 @@ async def cmd_bundles(message: Message, command: CommandObject, chain: ChainConf
 # ------------------------------------------------------------------ маршруты
 @router.message(Command("paths"))
 async def cmd_paths(message: Message, command: CommandObject, ctx: BotContext,
-                    chain: ChainConfig) -> None:
+                    cfg: ChainSettings, chain: ChainConfig) -> None:
     token = extract_address(command.args or "")
     if not token:
         await reply(message, "Использование: <code>/paths 0xАдресТокена</code>\n"
@@ -261,9 +262,12 @@ async def cmd_paths(message: Message, command: CommandObject, ctx: BotContext,
 
     status = await reply(message, "🔀 Ищу пулы на всех площадках…")
     client = ctx.registry.get(chain.key)
+    route = cfg.dex_route or "auto"
     lines = [f"🔀 <b>Маршруты</b> для <code>{token}</code>\n{esc(chain.name)}\n"]
     found = 0
+    usable = 0
     for adapter in adapters_for(client):
+        allowed = route_allows(route, adapter.kind)
         try:
             pool = await adapter.find_pool(token)
             if pool is None:
@@ -274,14 +278,22 @@ async def cmd_paths(message: Message, command: CommandObject, ctx: BotContext,
             lines.append(f"· {esc(adapter.name)}: ошибка — {esc(str(exc)[:60])}")
             continue
         found += 1
+        usable += int(allowed)
+        mark = "✅" if allowed else "🚫"
+        note = "" if allowed else f"  <i>(отключена маршрутом {esc(route)})</i>"
         lines.append(
-            f"✅ <b>{esc(adapter.name)}</b> ({pool.label})\n"
+            f"{mark} <b>{esc(adapter.name)}</b> ({pool.label}){note}\n"
             f"    ликвидность {fmt_amount(state.liquidity_native, 4)} {chain.native_symbol}\n"
             f"    <code>{pool.address}</code>"
         )
 
-    lines.append(f"\nБот выбирает самый глубокий пул автоматически ({found} найдено). "
-                 "Жёстко закрепить: <code>/set route v2</code> или <code>/set route v3</code>.")
+    if route in {"v2", "v3"}:
+        lines.append(f"\nМаршрут: <b>{esc(route)}</b> — бот торгует только здесь "
+                     f"(подходит пулов: {usable} из {found}). "
+                     "Разрешить любые: <code>/route auto</code>")
+    else:
+        lines.append(f"\nМаршрут: <b>auto</b> — бот берёт самый глубокий пул ({found} найдено). "
+                     "Жёстко закрепить: <code>/route v2</code> или <code>/route v3</code>.")
     await status.edit_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
@@ -308,7 +320,8 @@ async def cmd_route(message: Message, command: CommandObject, user: User,
         stored = await repo.get_settings(session, user.id, chain.key)
         stored.dex_route = parsed
     cfg.dex_route = parsed
-    await reply(message, f"✅ Маршрут: <b>{esc(parsed)}</b> ({esc(chain.name)})")
+    await reply(message, f"✅ Маршрут: <b>{esc(parsed)}</b> ({esc(chain.name)})"
+                         + route_warning(chain, parsed))
 
 
 # ------------------------------------------------------- диагностика и советы
@@ -456,7 +469,7 @@ async def cmd_trending(message: Message, ctx: BotContext, cfg: ChainSettings,
 
 @router.message(Command("watch"))
 async def cmd_watch(message: Message, command: CommandObject, ctx: BotContext,
-                    chain: ChainConfig) -> None:
+                    cfg: ChainSettings, chain: ChainConfig) -> None:
     """Добавляет токен в список наблюдения за разгоном."""
     token = extract_address(command.args or "")
     if not token:
@@ -472,10 +485,15 @@ async def cmd_watch(message: Message, command: CommandObject, ctx: BotContext,
     from sniperbot.chain.dex_adapter import find_best_venue
 
     client = ctx.registry.get(chain.key)
-    venue = await find_best_venue(client, token)
+    # Наблюдать имеет смысл за тем пулом, на котором сделка и пройдёт.
+    venue = await find_best_venue(client, token, route=cfg.dex_route)
     if venue is None:
+        limited = ((f"\nМаршрут ограничен {esc(cfg.dex_route)}: другие площадки не смотрел. "
+                    "Снять: <code>/route auto</code>")
+                   if cfg.dex_route in {"v2", "v3"} else "")
         await status.edit_text(
-            "❌ Пул с ликвидностью не найден — наблюдать не за чем.", parse_mode="HTML"
+            "❌ Пул с ликвидностью не найден — наблюдать не за чем." + limited,
+            parse_mode="HTML",
         )
         return
     adapter, pool, state = venue

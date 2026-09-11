@@ -532,12 +532,17 @@ async def pair_status_counts(session: AsyncSession, chain: str,
 
 # ------------------------------------------------------------------ перехват разгона
 async def momentum_watchlist(
-    session: AsyncSession, chain: str, since: dt.datetime, limit: int = 300
+    session: AsyncSession, chain: str, since: dt.datetime, limit: int = 300,
+    kinds: set[str] | None = None,
 ) -> list[SeenPair]:
     """Пулы под наблюдением: недавно найденные плюс добавленные вручную.
 
     Отвергнутые пулы тоже остаются в списке: причина отказа часто временная —
     пустой пул наполняется, а «мало ликвидности» перестаёт быть правдой.
+
+    ``kinds`` отсекает площадки, запрещённые маршрутом (`/route`): иначе при
+    жёстком v3 список на три сотни мест забивают пулы V2, которые всё равно
+    некому купить, и до нужных пулов очередь не доходит.
     """
     stmt = (
         select(SeenPair)
@@ -548,6 +553,13 @@ async def momentum_watchlist(
         .order_by(SeenPair.created_at.desc())
         .limit(limit)
     )
+    if kinds is not None:
+        # У старых записей версия не заполнена: пул без пометки — это V2.
+        wanted = list(kinds)
+        condition = SeenPair.dex_kind.in_(wanted)
+        if "v2" in kinds:
+            condition = or_(condition, SeenPair.dex_kind.is_(None), SeenPair.dex_kind == "")
+        stmt = stmt.where(condition)
     return list((await session.scalars(stmt)).all())
 
 

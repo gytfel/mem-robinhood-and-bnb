@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Message
 
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.keyboards import GroupCB, MenuCB, SetCB, cancel_kb, group_menu, main_menu, settings_menu
+from sniperbot.bot.texts import route_warning
 from sniperbot.bot.ui import reply, safe_edit
 from sniperbot.config import ChainConfig
 from sniperbot.db import repo
@@ -163,6 +164,8 @@ async def cmd_set(message: Message, command: CommandObject, ctx: BotContext,
     )
     if setting.name == "buy":
         text += await _gas_warning(ctx, user, chain, value)
+    if setting.name == "route":
+        text += route_warning(chain, value)
     await reply(message, text)
 
 
@@ -305,7 +308,8 @@ async def on_value(message: Message, state: FSMContext, ctx: BotContext, user: U
     await state.clear()
     await reply(
         message,
-        f"✅ <b>{esc(setting.title)}</b> = {esc(setting.display(cfg, user, chain.native_symbol))}",
+        f"✅ <b>{esc(setting.title)}</b> = {esc(setting.display(cfg, user, chain.native_symbol))}"
+        + (route_warning(chain, value) if setting.name == "route" else ""),
         group_menu(setting.group, cfg, chain.native_symbol, user),
     )
 

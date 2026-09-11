@@ -139,6 +139,7 @@ async def show_token(
             amount_native_wei=to_wei(cfg.buy_amount, chain.native_decimals),
             settings=cfg,
             run_simulation=cfg.honeypot_check,
+            route=cfg.dex_route,
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("Анализ токена %s не удался: %s", token, exc)

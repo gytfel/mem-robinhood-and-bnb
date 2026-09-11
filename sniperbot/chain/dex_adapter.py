@@ -50,6 +50,8 @@ log = logging.getLogger(__name__)
 Q96 = Decimal(2) ** 96
 MAX_UINT256 = 2**256 - 1
 
+ROUTE_CHOICES = ("auto", "v2", "v3")
+
 # Какой вариант роутера/квотера реально работает — запоминаем по адресу,
 # чтобы не перебирать кодировки на каждой сделке.
 _variant_cache: dict[str, str] = {}
@@ -388,6 +390,24 @@ def get_adapter(client: ChainClient, cfg: RouterConfig) -> DexAdapter:
     return V3Adapter(client, cfg) if cfg.is_v3 else V2Adapter(client, cfg)
 
 
+def route_allows(route: str | None, kind: str | None) -> bool:
+    """Подходит ли площадка под выбранный маршрут (`/route`).
+
+    Единственное место, где решается этот вопрос: маршрут ограничивает вход и в
+    снайпе новых пар, и в перехвате разгона, и в ручной покупке. Пустое значение
+    и `auto` означают «любая площадка».
+    """
+    wanted = (route or "auto").strip().lower()
+    if wanted not in {"v2", "v3"}:
+        return True
+    return (kind or "v2").strip().lower() == wanted
+
+
+def available_kinds(config) -> set[str]:  # noqa: ANN001 - ChainConfig, без кольцевого импорта
+    """Версии протокола, которые в этой сети действительно настроены."""
+    return {(cfg.kind or "v2").lower() for cfg in config.active_routers}
+
+
 async def find_best_venue(client: ChainClient, token: str, decimals: int = 18, route: str = "auto"):
     """Самый ликвидный пул токена среди всех DEX сети: (адаптер, пул, состояние).
 
@@ -396,7 +416,7 @@ async def find_best_venue(client: ChainClient, token: str, decimals: int = 18, r
     best = None
     best_liquidity = Decimal(-1)
     for adapter in adapters_for(client):
-        if route in {"v2", "v3"} and adapter.kind != route:
+        if not route_allows(route, adapter.kind):
             continue
         try:
             pool = await adapter.find_pool(token)

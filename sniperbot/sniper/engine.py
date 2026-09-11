@@ -9,7 +9,7 @@ import time
 from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
-from sniperbot.chain.dex_adapter import PoolRef, get_adapter
+from sniperbot.chain.dex_adapter import PoolRef, get_adapter, route_allows
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import Settings
 from sniperbot.db import repo
@@ -187,6 +187,16 @@ class SniperEngine:
         pair_id = event.pair_id
 
         if not subscribers:
+            return
+
+        # Маршрут ограничивает вход: при /route v3 пара V2 не наша, и тратить на
+        # неё ожидание ликвидности с симуляцией тем более незачем.
+        subscribers = [(user, cfg) for user, cfg in subscribers
+                       if route_allows(getattr(cfg, "dex_route", "auto"), event.kind)]
+        if not subscribers:
+            await self._mark(pair_id, "rejected",
+                             f"пул {event.kind.upper()} не подходит под маршрут (/route)",
+                             codes=["route"])
             return
 
         adapter = get_adapter(client, event.router)

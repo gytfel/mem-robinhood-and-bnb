@@ -20,7 +20,7 @@ import time
 from decimal import Decimal
 
 from sniperbot.chain.abi import V2_SWAP_TOPIC, V3_SWAP_TOPIC
-from sniperbot.chain.dex_adapter import PoolRef, get_adapter
+from sniperbot.chain.dex_adapter import PoolRef, get_adapter, route_allows
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.sniper.momentum import MomentumSignal, aggregate_swaps, evaluate_momentum, sample_age
@@ -91,6 +91,7 @@ class MomentumHunter:
             rows = await repo.momentum_watchlist(
                 session, chain_key, now - dt.timedelta(hours=max_age),
                 limit=self.settings.momentum_watch_limit,
+                kinds=self._wanted_kinds(subscribers),
             )
         self.watched[chain_key] = len(rows)
         if not rows:
@@ -220,12 +221,15 @@ class MomentumHunter:
         window = self.settings.momentum_interval
         ranked: list[tuple[MomentumSignal, str, Decimal | None]] = []
         for address, bucket in stats.items():
+            interested = self._interested(subscribers, pools[address]["kind"])
+            if not interested:
+                continue    # маршрут запрещает эту площадку всем — место в очереди не занимаем
             sample = previous.get(address)
             price = sample.price if sample is not None else None
             if sample is not None and sample_age(sample.created_at) > window * STALE_WINDOWS:
                 price = None   # разрыв в наблюдении: рост за такой срок — это не разгон
             best: MomentumSignal | None = None
-            for _, cfg in subscribers:
+            for _, cfg in interested:
                 signal = self._evaluate(price, bucket, cfg)
                 if best is None or (signal.passed and not best.passed):
                     best = signal
@@ -240,6 +244,23 @@ class MomentumHunter:
             (signal, address, pools[address]["token"]) for signal, address, _ in ranked[:20]
         ]
         return [item for item in ranked if item[0].passed]
+
+    @staticmethod
+    def _wanted_kinds(subscribers: list) -> set[str] | None:
+        """Площадки, которые вообще кому-то нужны. None — ограничений нет."""
+        kinds: set[str] = set()
+        for _, cfg in subscribers:
+            route = (getattr(cfg, "dex_route", "auto") or "auto").strip().lower()
+            if route not in {"v2", "v3"}:
+                return None
+            kinds.add(route)
+        return kinds or None
+
+    @staticmethod
+    def _interested(subscribers: list, kind: str | None) -> list:
+        """Подписчики, которым эта площадка разрешена маршрутом (`/route`)."""
+        return [(user, cfg) for user, cfg in subscribers
+                if route_allows(getattr(cfg, "dex_route", "auto"), kind)]
 
     @staticmethod
     def _evaluate(price, bucket, cfg) -> MomentumSignal:
@@ -263,6 +284,9 @@ class MomentumHunter:
     async def _consider(self, chain_key: str, row, bucket, price, signal: MomentumSignal,
                         subscribers: list) -> None:
         """Полная проверка кандидата и покупка тем, кому он подходит."""
+        subscribers = self._interested(subscribers, row.dex_kind)
+        if not subscribers:
+            return
         address = row.pair_address.lower()
         if self._cooling_down(address):
             return
