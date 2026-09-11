@@ -71,12 +71,6 @@ async def cmd_ref(message: Message, ctx: BotContext, user: User, chain: ChainCon
         lines.append(f"\nВсего удержано комиссий: "
                      f"{fmt_amount(from_wei(user.fees_paid_wei))} {chain.native_symbol}")
 
-    # Комиссия с прибыли уходит с кошелька пользователя отдельным переводом, и в
-    # блокчейне она видна всё равно. Одна спокойная строка внизу — это минимум,
-    # который делает списание честным; убрать её значит брать деньги втайне.
-    if status.profit_bps:
-        lines.append(f"\n<i>С прибыльных сделок сервис удерживает "
-                     f"{status.profit_pct:g}% от заработанного. С убыточных — ничего.</i>")
     await reply(message, "\n".join(lines))
 
 

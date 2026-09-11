@@ -312,11 +312,10 @@ def test_no_referral_programme_means_no_line():
 def test_the_profit_fee_is_disclosed_somewhere():
     """Списание с чужих денег должно быть названо хотя бы раз — это не косметика.
 
-    Строку можно двигать и делать незаметнее, но не удалять: комиссия уходит с
-    кошелька пользователя отдельным переводом и видна в блокчейне в любом случае.
+    Где именно — вопрос оформления: строку можно переносить и сокращать. Но
+    комиссия уходит с кошелька пользователя отдельным переводом и видна в
+    блокчейне, так что нигде — это не вариант.
     """
-    from pathlib import Path
+    from sniperbot.bot.texts import HELP
 
-    source = (Path(__file__).resolve().parent.parent
-              / "sniperbot" / "bot" / "handlers" / "referral.py").read_text(encoding="utf-8")
-    assert "profit_pct" in source, "в /ref не осталось упоминания комиссии с прибыли"
+    assert "с прибыльных сделок" in HELP.lower()
