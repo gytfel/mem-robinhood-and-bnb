@@ -140,7 +140,8 @@ def test_card_says_when_there_is_no_take_profit_at_all():
 
 def test_ab_value_with_spaces_reaches_the_setting():
     """/ab set tp [[1.5, 40], [3, 30]] — это одно значение, а не три слова."""
-    parts = "set tp [[1.5, 40], [3, 30]]".split(maxsplit=2)
+    typed = "set tp [[1.5, 40], [3, 30]]"      # то, что человек набирает в боте
+    parts = typed.split(maxsplit=2)           # ровно так их делит /ab
     assert parts[1] == "tp"
     assert parts[2] == "[[1.5, 40], [3, 30]]"
 
