@@ -470,6 +470,44 @@ async def _check(args: argparse.Namespace) -> int:
     return 0 if report.verdict != "danger" else 2
 
 
+# ------------------------------------------------------------------------ env-sync
+def cmd_env_sync(args: argparse.Namespace) -> int:
+    """Дописывает в .env настройки, появившиеся в новых версиях."""
+    from sniperbot.envsync import merge
+
+    env_path = Path(args.env_file).resolve()
+    if not env_path.exists():
+        die(f"Файл {env_path} не найден. Первая настройка: sniper init")
+
+    example = ROOT / ".env.example"
+    if not example.exists():
+        die(f"Не нашёл {example} — нечего сравнивать")
+
+    current = env_path.read_text(encoding="utf-8")
+    merged, added = merge(example.read_text(encoding="utf-8"), current)
+    if not added:
+        print(f"{OK} В {env_path} есть все настройки — добавлять нечего.")
+        return 0
+
+    if args.dry_run:
+        print(f"Добавилось бы {len(added)}: {', '.join(added)}")
+        return 0
+
+    # Копия рядом: файл с ключами, и цена ошибки здесь — потерянный кошелёк.
+    backup = env_path.with_suffix(env_path.suffix + ".bak")
+    backup.write_text(current, encoding="utf-8")
+    backup.chmod(0o600)
+    env_path.write_text(merged, encoding="utf-8")
+    env_path.chmod(0o600)
+
+    print(f"{OK} Добавлено настроек: {len(added)}")
+    for key in added:
+        print(f"   · {key}")
+    print(f"\nСтарый файл сохранён как {backup.name}")
+    print("Значения пустые — заполните нужные и перезапустите бота.\n")
+    return 0
+
+
 # -------------------------------------------------------------------------- discover
 async def probe_router(client, router: str) -> dict:
     """Определяет версию роутера и достаёт у него фабрику и WETH.
@@ -673,6 +711,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  sniper doctor                   проверить конфигурацию и связь\n"
             "  sniper run                      запустить бота\n"
             "  sniper check 0xТокен            проверить токен из терминала\n"
+            "  sniper env-sync                 дописать в .env настройки новых версий\n"
             "  sniper discover 0xРоутер        достать адреса фабрики и WETH для .env\n"
             "  sniper wallets                  кошельки пользователей и балансы\n"
         ),
@@ -706,6 +745,12 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--amount", default="0.01", help="сумма для симуляции (по умолчанию 0.01)")
     check_parser.add_argument("--no-simulation", action="store_true", help="без симуляции сделки")
     check_parser.set_defaults(func=cmd_check)
+
+    sync_parser = subparsers.add_parser(
+        "env-sync", help="дописать в .env настройки из новых версий")
+    sync_parser.add_argument("--dry-run", action="store_true",
+                             help="только показать, что добавится")
+    sync_parser.set_defaults(func=cmd_env_sync)
 
     discover_parser = subparsers.add_parser(
         "discover", help="по адресу роутера DEX найти фабрику и WETH для .env")

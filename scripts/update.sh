@@ -110,6 +110,9 @@ if id -u "$APP_USER" >/dev/null 2>&1; then
     chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 fi
 
+say "Дописываю в .env новые настройки"
+"$APP_DIR/.venv/bin/sniper" --env-file "$APP_DIR/.env" env-sync || true
+
 systemctl list-unit-files "$SERVICE_NAME.service" --no-legend 2>/dev/null | grep -q . \
     || fail "systemd-сервиса $SERVICE_NAME нет.
 Если он называется иначе:  sudo SERVICE_NAME=имя bash scripts/update.sh
