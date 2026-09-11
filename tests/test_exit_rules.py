@@ -393,8 +393,8 @@ def walk(pos, prices) -> list[tuple[str, int]]:
             pos.amount_wei -= sold
             done = [step for step in (pos.tp_done or "").split(",") if step]
             pos.tp_done = ",".join(done + [m for m in markers if m not in done])
-            if rule.key in {"secure", "ladder"}:
-                pos.breakeven_armed = True
+            if markers:
+                pos.breakeven_armed = True      # так делает _mark_ladder_step
             trades.append((rule.key, percent))
             if pos.amount_wei <= 0:
                 return trades
@@ -428,3 +428,61 @@ def test_secure_on_a_big_jump_covers_the_whole_ladder():
 
     assert [rule for rule, _ in trades] == ["secure"]
     assert pos.amount_wei > 0
+
+
+# --------------------------------------------------- тейк-профит частями
+def test_partial_take_profit_fires_once_not_every_check():
+    """Иначе доля 40% съедала бы позицию целиком за несколько секунд опроса."""
+    pos = position(take_profit_pct=300, sell_percent=40, trailing_stop_pct=0,
+                   secure_pct=0, native_spent_wei=to_wei(100),
+                   native_returned_wei=0, token_decimals=18)
+    trades = walk(pos, [320, 350, 400])
+
+    assert trades == [("take_profit", 40)]
+    assert pos.amount_wei > 0                 # остаток едет дальше
+    assert "tp" in pos.tp_done
+
+
+def test_a_full_take_profit_closes_the_position():
+    pos = position(take_profit_pct=300, sell_percent=100, trailing_stop_pct=0,
+                   secure_pct=0, native_spent_wei=to_wei(100),
+                   native_returned_wei=0, token_decimals=18)
+    assert walk(pos, [320]) == [("take_profit", 100)]
+    assert pos.amount_wei == 0
+
+
+def test_the_remainder_is_protected_after_a_partial_take():
+    """После фиксации прибыль уже снята — стоп переносится в безубыток."""
+    pos = position(take_profit_pct=300, sell_percent=40, trailing_stop_pct=0,
+                   secure_pct=0, native_spent_wei=to_wei(100),
+                   native_returned_wei=0, token_decimals=18)
+    walk(pos, [320])
+    assert pos.breakeven_armed is True
+
+    rule, percent, _ = decide_exit(pos, ctx(-1))
+    assert rule.key == "breakeven" and percent == 100
+
+
+def test_take_profit_in_multiples_means_the_same_thing():
+    from sniperbot.settings_registry import find, parse_growth
+
+    assert parse_growth("4x") == 300
+    assert parse_growth("×2") == 100
+    assert parse_growth("300") == 300          # голое число остаётся процентами
+    assert find("tp").parse("4x") == 300
+    assert find("tp").parse("300") == 300
+
+
+def test_a_multiplier_below_one_is_refused():
+    from sniperbot.settings_registry import find
+
+    with pytest.raises(ValueError, match="больше 1"):
+        find("tp").parse("0.5x")
+
+
+def test_growth_settings_show_both_notations():
+    from sniperbot.db.models import ChainSettings
+    from sniperbot.settings_registry import find
+
+    cfg = ChainSettings(user_id=1, chain="bsc", take_profit_pct=300)
+    assert find("tp").display(cfg) == "+300% (×4)"

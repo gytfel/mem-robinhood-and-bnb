@@ -163,7 +163,11 @@ def render_position(position: Position, chain: ChainConfig, price: Decimal | Non
     rules = []
     if position.auto_sell:
         if position.take_profit_pct:
-            rules.append(f"TP +{position.take_profit_pct}% ({position.sell_percent}%)")
+            from sniperbot.settings_registry import step_multiplier
+
+            share = position.sell_percent or 100
+            rules.append(f"TP ×{step_multiplier(position.take_profit_pct)} "
+                         + (f"(продать {share}%)" if share < 100 else "(продать всё)"))
         if position.stop_loss_pct:
             rules.append(f"SL −{position.stop_loss_pct}%")
         if position.trailing_stop_pct:

@@ -185,9 +185,13 @@ def decide_exit(position: Position, ctx: ExitContext) -> tuple[Rule | None, int,
         if ctx.change >= growth:
             return RULE_LADDER, ladder_percent(position, share), marker
 
-    # 6. Обычный тейк-профит (если лестница не задана).
-    if not position.tp_ladder and position.take_profit_pct and ctx.change >= position.take_profit_pct:
-        return RULE_TAKE, max(1, min(100, position.sell_percent or 100)), ""
+    # 6. Обычный тейк-профит (если лестница не задана). Срабатывает один раз:
+    # без метки частичная фиксация повторялась бы на каждой проверке и за
+    # несколько секунд распродала бы позицию целиком — ровно то, чего человек
+    # избегал, ставя долю меньше сотни.
+    if (not position.tp_ladder and position.take_profit_pct and "tp" not in done
+            and ctx.change >= position.take_profit_pct):
+        return RULE_TAKE, max(1, min(100, position.sell_percent or 100)), "tp"
 
     # 7. Трейлинг-стоп от максимума.
     if position.trailing_stop_pct and ctx.peak_price > 0:

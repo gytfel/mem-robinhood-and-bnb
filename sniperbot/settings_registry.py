@@ -40,6 +40,9 @@ class Setting:
     minimum: Decimal | None = None
     maximum: Decimal | None = None
     choices: tuple[str, ...] = field(default_factory=tuple)
+    # Порог роста от цены входа: думать иксами удобнее, чем процентами, поэтому
+    # такие настройки принимают и «300», и «4x», и показывают то и другое.
+    growth: bool = False
 
     # ------------------------------------------------------------- значения
     def read(self, cfg, user=None):
@@ -64,6 +67,8 @@ class Setting:
             return format_ladder(str(value)) if value else "выключена"
         if self.kind == "hours":
             return format_hours(str(value))
+        if self.growth and int(value) > 0:
+            return f"+{value}{self.unit} (×{step_multiplier(int(value))})"
         return f"{value}{self.unit}"
 
     def parse(self, raw: str):
@@ -87,7 +92,10 @@ class Setting:
         if self.kind == "hours":
             return parse_hours(text)
 
-        number = parse_decimal(text)
+        if self.growth:
+            number = parse_growth(text)
+        else:
+            number = parse_decimal(text)
         if number is None:
             raise ValueError("нужно число")
         if self.minimum is not None and number < self.minimum:
@@ -139,8 +147,9 @@ SETTINGS: tuple[Setting, ...] = (
 
     # ----------------------------------------------------------------- выходы
     Setting("tp", "take_profit_pct", "chain", "int", "Тейк-профит",
-            "Рост в процентах для фиксации прибыли. 0 — выключить",
-            "exits", unit="%", minimum=Decimal(0), maximum=Decimal(100_000)),
+            "На сколько вырасти, чтобы фиксировать прибыль: «300» или «4x». "
+            "Доля продажи — sellpct, остальное едет дальше. 0 — выключить",
+            "exits", growth=True, unit="%", minimum=Decimal(0), maximum=Decimal(100_000)),
     Setting("sl", "stop_loss_pct", "chain", "int", "Стоп-лосс",
             "Падение в процентах для выхода. 0 — выключить",
             "exits", unit="%", minimum=Decimal(0), maximum=Decimal(99)),
@@ -148,7 +157,8 @@ SETTINGS: tuple[Setting, ...] = (
             "Откат от максимума в процентах. 0 — выключить",
             "exits", unit="%", minimum=Decimal(0), maximum=Decimal(99)),
     Setting("sellpct", "sell_percent", "chain", "int", "Доля продажи по TP",
-            "Сколько процентов позиции продавать по тейк-профиту",
+            "Какую часть позиции продать на тейк-профите. Меньше 100 — фиксация "
+            "частями: остальное остаётся в позиции и едет дальше",
             "exits", unit="%", minimum=Decimal(1), maximum=Decimal(100)),
     Setting("autosell", "auto_sell", "chain", "bool", "Автопродажа",
             "Закрывать позиции по правилам без участия человека", "exits"),
@@ -159,10 +169,10 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("secure", "secure_pct", "chain", "int", "Возврат вложенного",
             "После роста на N% продать ровно столько, чтобы вернуть потраченное — "
             "дальше сделка не может стать убыточной. Остаток едет дальше. 0 — выключено",
-            "exits", unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
+            "exits", growth=True, unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
     Setting("breakeven", "breakeven_pct", "chain", "int", "Стоп в безубыток",
             "После роста на N% стоп-лосс переносится в точку входа. 0 — выключено",
-            "exits", unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
+            "exits", growth=True, unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
     Setting("rugguard", "rug_guard_pct", "chain", "int", "Защита от слива ликвидности",
             "Выйти, если ликвидность пула упала на N% от максимума. 0 — выключено",
             "exits", unit="%", minimum=Decimal(0), maximum=Decimal(99)),
@@ -493,6 +503,23 @@ def _step_growth(raw: str, multiplier_by_default: bool) -> int:
             f"множитель ×{number:g}, напишите <code>{number:g}x</code> или {LADDER_EXAMPLE}"
         )
     return int(number)
+
+
+def parse_growth(text: str) -> Decimal | None:
+    """Порог роста в процентах. «4x» и «×4» — это +300%, «300» — тоже.
+
+    Множитель распознаётся только по явному x: голое число остаётся процентами,
+    иначе «/set tp 4» тихо превратилось бы из +4% в ×4.
+    """
+    value = str(text).strip().lower().replace("×", "x").replace("+", "")
+    if not (value.startswith("x") or value.endswith("x")):
+        return parse_decimal(value)
+    number = parse_decimal(value.strip("x").strip())
+    if number is None:
+        return None
+    if number <= 1:
+        raise ValueError(f"множитель должен быть больше 1: ×2 — это +100%, а ×{number:g} — убыток")
+    return (number - 1) * 100
 
 
 def parse_ladder(text: str) -> str:
