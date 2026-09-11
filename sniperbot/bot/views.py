@@ -160,22 +160,46 @@ def render_position(position: Position, chain: ChainConfig, price: Decimal | Non
         lines.append(f"🎯 Вход: {fmt_amount(position.entry_price, 12)} {chain.native_symbol}")
     if price is not None:
         lines.append(f"💱 Сейчас: {fmt_amount(price, 12)} {chain.native_symbol}")
-    rules = []
-    if position.auto_sell:
-        if position.take_profit_pct:
-            from sniperbot.settings_registry import step_multiplier
-
-            share = position.sell_percent or 100
-            rules.append(f"TP ×{step_multiplier(position.take_profit_pct)} "
-                         + (f"(продать {share}%)" if share < 100 else "(продать всё)"))
-        if position.stop_loss_pct:
-            rules.append(f"SL −{position.stop_loss_pct}%")
-        if position.trailing_stop_pct:
-            rules.append(f"трейлинг {position.trailing_stop_pct}%")
-    lines.append("🤖 Автовыход: " + (", ".join(rules) if rules else "выключен"))
+    lines.append("🤖 Автовыход: " + exit_rules(position))
     if position.buy_tx:
         lines.append(f"<a href='{chain.tx_url(position.buy_tx)}'>Транзакция покупки</a>")
     return "\n".join(lines)
+
+
+def exit_rules(position: Position) -> str:
+    """Правила выхода этой позиции — те, что записаны в ней самой.
+
+    Позиция живёт по снимку настроек на момент покупки, поэтому показывать надо
+    именно его: человек, поменявший тейк вчера, должен видеть здесь старое
+    правило, а не новое, и понимать, что нужен /apply.
+    """
+    from sniperbot.settings_registry import ladder_steps, step_multiplier
+
+    if not position.auto_sell:
+        return "выключен"
+
+    rules = []
+    done = {step.strip() for step in (position.tp_done or "").split(",") if step.strip()}
+    steps = ladder_steps(position.tp_ladder)
+    if steps:
+        shown = [f"×{step_multiplier(growth)}→{share}%" + ("✅" if str(growth) in done else "")
+                 for growth, share in steps]
+        rules.append("TP " + " · ".join(shown))
+    elif position.take_profit_pct:
+        share = position.sell_percent or 100
+        rules.append(f"TP ×{step_multiplier(position.take_profit_pct)}"
+                     + (f" (продать {share}%)" if share < 100 else " (продать всё)")
+                     + ("✅" if "tp" in done else ""))
+    if position.secure_pct:
+        rules.append(f"возврат вложенного ×{step_multiplier(int(position.secure_pct))}"
+                     + ("✅" if "secure" in done else ""))
+    if position.stop_loss_pct:
+        rules.append(f"SL −{position.stop_loss_pct}%")
+    if position.breakeven_armed:
+        rules.append("стоп в безубытке")
+    if position.trailing_stop_pct:
+        rules.append(f"трейлинг {position.trailing_stop_pct}%")
+    return ", ".join(rules) if rules else "выключен"
 
 
 def render_positions_list(positions: list[Position], chain_names: dict[str, str]) -> str:

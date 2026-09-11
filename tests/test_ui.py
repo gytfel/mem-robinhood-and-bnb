@@ -76,3 +76,54 @@ def test_boundary_sizes(size):
     parts = split_message("x" * size)
     assert all(len(part) <= TELEGRAM_LIMIT for part in parts)
     assert "".join(parts) == "x" * size
+
+
+# ------------------------------------------- правила выхода в карточке позиции
+def exit_position(**kwargs):
+    from sniperbot.db.models import Position
+
+    defaults = {
+        "id": 1, "user_id": 1, "chain": "rh", "token_address": "0x1", "token_symbol": "M",
+        "auto_sell": True, "take_profit_pct": 0, "sell_percent": 100, "tp_ladder": "",
+        "tp_done": "", "secure_pct": 0, "stop_loss_pct": 30, "trailing_stop_pct": 40,
+        "breakeven_armed": False,
+    }
+    defaults.update(kwargs)
+    return Position(**defaults)
+
+
+def test_card_shows_the_ladder_not_silence():
+    """Позиция со ступенями раньше показывала выход вообще без тейка."""
+    from sniperbot.bot.views import exit_rules
+
+    text = exit_rules(exit_position(tp_ladder="50:40,200:30,900:30"))
+    assert "×1.5→40%" in text and "×3→30%" in text and "×10→30%" in text
+
+
+def test_card_marks_the_steps_that_already_fired():
+    from sniperbot.bot.views import exit_rules
+
+    text = exit_rules(exit_position(tp_ladder="50:40,200:30", tp_done="50"))
+    assert "×1.5→40%✅" in text
+    assert "×3→30%," in text + ","        # вторая ступень ещё впереди
+
+
+def test_card_shows_the_single_step_form_too():
+    from sniperbot.bot.views import exit_rules
+
+    assert "TP ×4 (продать всё)" in exit_rules(exit_position(take_profit_pct=300))
+    assert "продать 40%" in exit_rules(exit_position(take_profit_pct=300, sell_percent=40))
+
+
+def test_card_shows_stake_recovery_and_breakeven():
+    from sniperbot.bot.views import exit_rules
+
+    text = exit_rules(exit_position(secure_pct=40, tp_done="secure", breakeven_armed=True))
+    assert "возврат вложенного ×1.4✅" in text
+    assert "стоп в безубытке" in text
+
+
+def test_card_says_when_autosell_is_off():
+    from sniperbot.bot.views import exit_rules
+
+    assert exit_rules(exit_position(auto_sell=False)) == "выключен"
