@@ -49,7 +49,7 @@ def test_config_screen_fits_after_splitting():
             setting.write(True, cfg, user)
         elif setting.kind == "choice":
             setting.write(setting.choices[0], cfg, user)
-        elif setting.kind == "ladder":
+        elif setting.kind in {"ladder", "tp"}:
             setting.write("", cfg, user)
         elif setting.kind == "decimal":
             setting.write(Decimal("0.01"), cfg, user)

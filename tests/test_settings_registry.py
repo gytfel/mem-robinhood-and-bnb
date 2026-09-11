@@ -125,7 +125,7 @@ def filled_cfg() -> tuple[ChainSettings, User]:
             setting.write(True, cfg, user)
         elif setting.kind == "choice":
             setting.write(setting.choices[0], cfg, user)
-        elif setting.kind == "ladder":
+        elif setting.kind in {"ladder", "tp"}:
             setting.write("100:50", cfg, user)
         elif setting.kind == "decimal":
             setting.write(D("0.01"), cfg, user)
@@ -181,7 +181,7 @@ def test_ladder_card_shows_example_and_off_switch():
     from sniperbot.settings_registry import find, render_one
 
     cfg, user = filled_cfg()
-    card = render_one(find("ladder"), cfg, user, "BNB")
+    card = render_one(find("ladder"), cfg, user, "BNB")   # старое имя ведёт на /set tp
     assert "[[1.5, 40]" in card        # запись множителями — основная
     assert "50:40,200:30" in card      # и та же лестница в процентах роста
     assert "off" in card
@@ -227,7 +227,7 @@ def test_presets_keep_exit_rules_consistent():
     from sniperbot.settings_registry import PRESETS, ladder_steps, parse_ladder
 
     for preset in PRESETS:
-        steps = ladder_steps(parse_ladder(preset.values.get("ladder", "")))
+        steps = ladder_steps(parse_ladder(preset.values.get("tp", "")))
         trail = int(preset.values.get("trail", 0))
         assert steps, f"{preset.name}: без лестницы прибыль не фиксируется"
         first_step = steps[0][0]
@@ -364,3 +364,62 @@ def test_ladder_note_warns_which_steps_the_secure_sale_will_take():
     # Высокий порог возврата продаёт мало и лестницу не трогает.
     high = ladder_note("50:40,200:30,900:30", secure_pct=400)
     assert "закроет ступени" not in high
+
+
+# ------------------------------------------------ тейк: одна форма настройки
+def test_tp_takes_one_step_or_several():
+    from sniperbot.db.models import ChainSettings
+    from sniperbot.settings_registry import find
+
+    tp = find("tp")
+    cfg = ChainSettings(user_id=1, chain="bsc")
+
+    tp.write(tp.parse("4x"), cfg)
+    assert cfg.take_profit_pct == 300 and cfg.tp_ladder == ""
+
+    tp.write(tp.parse("[[1.5, 40], [3, 30]]"), cfg)
+    assert cfg.tp_ladder == "50:40,200:30"
+    assert cfg.take_profit_pct == 0, "одна форма должна гасить другую"
+
+    tp.write(tp.parse("300"), cfg)
+    assert cfg.take_profit_pct == 300 and cfg.tp_ladder == ""
+
+
+def test_the_old_ladder_name_still_works():
+    """Оно есть в наборах, в подсказках прошлых версий и в чужих записках."""
+    from sniperbot.settings_registry import find
+
+    assert find("ladder") is find("tp")
+
+
+def test_tp_display_tells_which_form_is_active():
+    from sniperbot.db.models import ChainSettings
+    from sniperbot.settings_registry import find
+
+    cfg = ChainSettings(user_id=1, chain="bsc", tp_ladder="50:40,200:30")
+    assert find("tp").display(cfg) == "×1.5 → 40% · ×3 → 30%"
+
+    cfg = ChainSettings(user_id=1, chain="bsc", take_profit_pct=0, tp_ladder="")
+    assert find("tp").display(cfg) == "выключен"
+
+
+def test_broken_tp_input_is_explained():
+    from sniperbot.settings_registry import find
+
+    with pytest.raises(ValueError, match="ступени"):
+        find("tp").parse("скоро")
+    with pytest.raises(ValueError, match="больше 1"):
+        find("tp").parse("0.5x")
+
+
+def test_ab_variant_writes_the_right_tp_field():
+    """У тейка два поля — вариант B должен менять то же, что и /set."""
+    from sniperbot.settings_registry import variant_overlay
+
+    cfg = make_cfg()
+    cfg.take_profit_pct = 100
+    single = variant_overlay(cfg, {"tp": "4x"})
+    assert single.take_profit_pct == 300 and single.tp_ladder == ""
+
+    stepped = variant_overlay(cfg, {"tp": "[[2, 50]]"})
+    assert stepped.tp_ladder == "100:50" and stepped.take_profit_pct == 0

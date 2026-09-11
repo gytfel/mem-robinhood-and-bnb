@@ -65,6 +65,14 @@ class Setting:
             return str(value)
         if self.kind == "ladder":
             return format_ladder(str(value)) if value else "выключена"
+        if self.kind == "tp":
+            if cfg.tp_ladder:
+                return format_ladder(str(cfg.tp_ladder))
+            if not cfg.take_profit_pct:
+                return "выключен"
+            share = cfg.sell_percent or 100
+            return (f"×{step_multiplier(int(cfg.take_profit_pct))} (+{cfg.take_profit_pct}%), "
+                    + (f"продать {share}%" if share < 100 else "продать всё"))
         if self.kind == "hours":
             return format_hours(str(value))
         if self.growth and int(value) > 0:
@@ -89,6 +97,15 @@ class Setting:
         if self.kind == "ladder":
             return parse_ladder(text)
 
+        if self.kind == "tp":
+            # Одна ступень или несколько — решает сама запись, а не вторая настройка.
+            if any(mark in text for mark in "[,;:"):
+                return parse_ladder(text)
+            growth = parse_growth(text)
+            if growth is None:
+                raise ValueError(f"нужен рост («300», «4x») или ступени {LADDER_EXAMPLE}")
+            return int(growth)
+
         if self.kind == "hours":
             return parse_hours(text)
 
@@ -111,9 +128,24 @@ class Setting:
             return int(number)
         return number
 
+    def targets(self, value) -> dict:
+        """Какие поля модели меняет это значение.
+
+        Обычно одно, но у тейка их два: одна ступень живёт в take_profit_pct,
+        несколько — в tp_ladder. Держать оба заполненными нельзя, иначе одно
+        молча отменяет другое, и человек узнаёт об этом по несработавшей
+        фиксации. Поэтому запись всегда чистит вторую форму.
+        """
+        if self.kind == "tp":
+            ladder = isinstance(value, str)
+            return {"tp_ladder": value if ladder else "",
+                    "take_profit_pct": 0 if ladder else int(value)}
+        return {self.field: value}
+
     def write(self, value, cfg, user=None) -> None:
         target = user if self.scope == "user" else cfg
-        setattr(target, self.field, value)
+        for field_name, item in self.targets(value).items():
+            setattr(target, field_name, item)
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -146,10 +178,11 @@ SETTINGS: tuple[Setting, ...] = (
             "Покупать новые пулы автоматически", "trade"),
 
     # ----------------------------------------------------------------- выходы
-    Setting("tp", "take_profit_pct", "chain", "int", "Тейк-профит",
-            "На сколько вырасти, чтобы фиксировать прибыль: «300» или «4x». "
-            "Доля продажи — sellpct, остальное едет дальше. 0 — выключить",
-            "exits", growth=True, unit="%", minimum=Decimal(0), maximum=Decimal(100_000)),
+    Setting("tp", "tp_ladder", "chain", "tp", "Тейк-профит",
+            "Одна ступень — «4x» или «300» (доля продажи в sellpct). "
+            "Несколько — [[1.5, 40], [3, 30], [10, 30]]: 40% позиции на ×1.5, "
+            "30% на ×3, 30% на ×10. 0 — выключить",
+            "exits"),
     Setting("sl", "stop_loss_pct", "chain", "int", "Стоп-лосс",
             "Падение в процентах для выхода. 0 — выключить",
             "exits", unit="%", minimum=Decimal(0), maximum=Decimal(99)),
@@ -162,10 +195,6 @@ SETTINGS: tuple[Setting, ...] = (
             "exits", unit="%", minimum=Decimal(1), maximum=Decimal(100)),
     Setting("autosell", "auto_sell", "chain", "bool", "Автопродажа",
             "Закрывать позиции по правилам без участия человека", "exits"),
-    Setting("ladder", "tp_ladder", "chain", "ladder", "Лестница фиксаций",
-            "Ступени фиксации прибыли [[множитель, доля], …]: [[1.5, 40], [3, 30], [10, 30]] — "
-            "продать 40% на ×1.5, ещё 30% на ×3 и 30% на ×10. Пусто — обычный TP",
-            "exits"),
     Setting("secure", "secure_pct", "chain", "int", "Возврат вложенного",
             "После роста на N% продать ровно столько, чтобы вернуть потраченное — "
             "дальше сделка не может стать убыточной. Остаток едет дальше. 0 — выключено",
@@ -295,6 +324,9 @@ SETTINGS: tuple[Setting, ...] = (
 )
 
 BY_NAME = {setting.name: setting for setting in SETTINGS}
+# Лестница переехала в саму настройку тейка. Старое имя оставлено рабочим:
+# оно есть в наборах, в подсказках прошлых версий и в чужих записках.
+BY_NAME["ladder"] = BY_NAME["tp"]
 @dataclass(frozen=True, slots=True)
 class Preset:
     """Согласованный набор настроек под одну манеру торговли.
@@ -317,7 +349,7 @@ PRESETS: tuple[Preset, ...] = (
         "не терять, чем поймать иксы.",
         {
             "slippage": "20", "gasmode": "fast",
-            "tp": "120", "sl": "35", "trail": "40", "ladder": "[[1.6, 40], [3, 30]]", "secure": "35",
+            "tp": "[[1.6, 40], [3, 30]]", "sl": "35", "trail": "40", "secure": "35",
             "breakeven": "40", "rugguard": "40", "deadtime": "45", "deadpct": "15",
             "exitgas": "2", "exitslip": "35",
             "minliq": "3", "buytax": "8", "selltax": "8", "ownershare": "10",
@@ -333,7 +365,7 @@ PRESETS: tuple[Preset, ...] = (
         "мягче, зато покупка идёт по факту движения.",
         {
             "slippage": "25", "gasmode": "fast",
-            "tp": "100", "sl": "30", "trail": "35", "ladder": "[[1.5, 40], [2.5, 30]]", "secure": "40",
+            "tp": "[[1.5, 40], [2.5, 30]]", "sl": "30", "trail": "35", "secure": "40",
             "breakeven": "30", "rugguard": "40", "deadtime": "30", "deadpct": "10",
             "exitgas": "2", "exitslip": "35",
             "minliq": "2", "buytax": "10", "selltax": "10", "ownershare": "15",
@@ -349,7 +381,7 @@ PRESETS: tuple[Preset, ...] = (
         "сделок будет больше — расчёт на редкие крупные иксы.",
         {
             "slippage": "30", "gasmode": "turbo",
-            "tp": "200", "sl": "45", "trail": "45", "ladder": "[[2, 50], [4, 25]]", "secure": "60",
+            "tp": "[[2, 50], [4, 25]]", "sl": "45", "trail": "45", "secure": "60",
             "breakeven": "50", "rugguard": "50", "deadtime": "60", "deadpct": "20",
             "exitgas": "2.5", "exitslip": "40",
             "minliq": "1", "buytax": "12", "selltax": "12", "ownershare": "20",
@@ -675,7 +707,7 @@ def variant_overlay(cfg, variant: dict):
         if setting is None or setting.scope != "chain":
             continue
         try:
-            overrides[setting.field] = setting.parse(str(raw))
+            overrides.update(setting.targets(setting.parse(str(raw))))
         except ValueError:
             continue
     return VariantOverlay(cfg, overrides) if overrides else cfg
@@ -729,7 +761,7 @@ def render_one(setting: Setting, cfg, user=None, native: str = "") -> str:
         allowed = "on / off"
     elif setting.kind == "choice":
         allowed = " · ".join(f"<code>{choice}</code>" for choice in setting.choices)
-    elif setting.kind == "ladder":
+    elif setting.kind in {"ladder", "tp"}:
         allowed = (f"множителями <code>{LADDER_EXAMPLE}</code> — ×1.5 → 40%, ×3 → 30%, ×10 → 30%\n"
                    "или ростом в процентах <code>50:40,200:30,900:30</code> — это то же самое\n"
                    "<code>off</code> — выключить")

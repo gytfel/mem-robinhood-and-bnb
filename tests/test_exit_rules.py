@@ -484,5 +484,9 @@ def test_growth_settings_show_both_notations():
     from sniperbot.db.models import ChainSettings
     from sniperbot.settings_registry import find
 
-    cfg = ChainSettings(user_id=1, chain="bsc", take_profit_pct=300)
-    assert find("tp").display(cfg) == "+300% (×4)"
+    cfg = ChainSettings(user_id=1, chain="bsc", secure_pct=50)
+    assert find("secure").display(cfg) == "+50% (×1.5)"
+
+    cfg = ChainSettings(user_id=1, chain="bsc", take_profit_pct=300, sell_percent=40,
+                        tp_ladder="")
+    assert find("tp").display(cfg) == "×4 (+300%), продать 40%"
