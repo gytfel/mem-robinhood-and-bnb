@@ -307,3 +307,16 @@ def test_nothing_is_shown_when_there_is_nothing_to_earn():
 
 def test_no_referral_programme_means_no_line():
     assert progress_for(0, needed=0) == ""
+
+
+def test_the_profit_fee_is_disclosed_somewhere():
+    """Списание с чужих денег должно быть названо хотя бы раз — это не косметика.
+
+    Строку можно двигать и делать незаметнее, но не удалять: комиссия уходит с
+    кошелька пользователя отдельным переводом и видна в блокчейне в любом случае.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent
+              / "sniperbot" / "bot" / "handlers" / "referral.py").read_text(encoding="utf-8")
+    assert "profit_pct" in source, "в /ref не осталось упоминания комиссии с прибыли"

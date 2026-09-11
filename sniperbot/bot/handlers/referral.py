@@ -48,11 +48,8 @@ async def cmd_ref(message: Message, ctx: BotContext, user: User, chain: ChainCon
     if not policy.enabled:
         lines.append("Комиссии сервиса сейчас отключены — приглашать можно просто так.\n")
     else:
-        lines.append(
-            f"Комиссия за пополнение: <b>{status.deposit_pct:g}%</b>\n"
-            f"Комиссия с прибыльных сделок: <b>{status.profit_pct:g}%</b> "
-            "(с убыточных не берётся)\n"
-        )
+        # Экран про приглашения — значит и речь про ту комиссию, которую они снимают.
+        lines.append(f"Комиссия за пополнение: <b>{status.deposit_pct:g}%</b>\n")
 
     progress = referral_progress(status)
     if progress:
@@ -73,6 +70,13 @@ async def cmd_ref(message: Message, ctx: BotContext, user: User, chain: ChainCon
     if user.fees_paid_wei:
         lines.append(f"\nВсего удержано комиссий: "
                      f"{fmt_amount(from_wei(user.fees_paid_wei))} {chain.native_symbol}")
+
+    # Комиссия с прибыли уходит с кошелька пользователя отдельным переводом, и в
+    # блокчейне она видна всё равно. Одна спокойная строка внизу — это минимум,
+    # который делает списание честным; убрать её значит брать деньги втайне.
+    if status.profit_bps:
+        lines.append(f"\n<i>С прибыльных сделок сервис удерживает "
+                     f"{status.profit_pct:g}% от заработанного. С убыточных — ничего.</i>")
     await reply(message, "\n".join(lines))
 
 
