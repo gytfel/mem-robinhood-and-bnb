@@ -213,6 +213,31 @@ def status_for(*, referrals: int, is_admin: bool, exempt: bool, policy: FeePolic
     )
 
 
+MAX_BAR = 10        # длиннее полоска перестаёт читаться и начинает мешать
+
+
+def referral_progress(status: FeeStatus) -> str:
+    """Одна строка: сколько друзей нужно и сколько осталось.
+
+    Условие акции бесполезно, если его видно только в /ref: комиссию человек
+    замечает в момент пополнения, и именно там должно быть написано, сколько ещё
+    приглашений отделяет его от бесплатных пополнений.
+    """
+    if status.needed <= 0:
+        return ""
+    if status.free_deposit:
+        if status.referrals >= status.needed:
+            return (f"✅ Пополнения без комиссии — приглашено "
+                    f"{status.referrals} из {status.needed}")
+        return ""           # освобождён по другой причине — считать друзей незачем
+
+    done = max(0, min(status.referrals, status.needed))
+    bar = ("▰" * done + "▱" * (status.needed - done)) if status.needed <= MAX_BAR else ""
+    left = status.left_to_free
+    return (f"👥 Друзья: {done} из {status.needed}{' ' + bar if bar else ''} · "
+            f"осталось {left} — и пополнения станут без комиссии навсегда")
+
+
 def deposit_fee(amount_wei: int, *, referrals: int, is_admin: bool, exempt: bool,
                 policy: FeePolicy, gas_cost_wei: int = 0) -> int:
     """Комиссия с суммы пополнения в wei. 0 — брать не нужно."""

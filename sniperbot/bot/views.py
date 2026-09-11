@@ -6,7 +6,10 @@ from decimal import Decimal
 
 from sniperbot.bot.context import BotContext
 from sniperbot.config import ChainConfig
+from sniperbot.db import repo
+from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, Position, User
+from sniperbot.fees import referral_progress, status_for
 from sniperbot.sniper.safety import SafetyReport
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr
 
@@ -15,6 +18,27 @@ VERDICT_LABEL = {
     "risky": "🟠 Есть риски — решайте сами",
     "danger": "🔴 Опасно — покупка не рекомендуется",
 }
+
+
+async def referral_line(ctx: BotContext, user: User) -> str:
+    """Сколько друзей нужно пригласить и сколько осталось — одной строкой.
+
+    Показывается там, где человек видит свои деньги: условие акции бесполезно,
+    если за ним нужно идти в отдельную команду.
+    """
+    policy = ctx.fees.policy()
+    if not policy.enabled:
+        return ""
+    async with session_scope() as session:
+        referrals = await repo.referral_count(session, user.id)
+    status = status_for(
+        referrals=referrals,
+        is_admin=user.id in ctx.settings.admin_ids,
+        exempt=bool(user.fee_exempt),
+        policy=policy,
+    )
+    line = referral_progress(status)
+    return f"\n{line}\nВаша ссылка: /ref" if line else ""
 
 
 async def render_main(ctx: BotContext, user: User, cfg: ChainSettings, chain: ChainConfig, open_positions: int) -> str:
@@ -26,8 +50,9 @@ async def render_main(ctx: BotContext, user: User, cfg: ChainSettings, chain: Ch
         f"💰 Баланс: <b>{balance}</b>\n"
         f"📊 Открытых позиций: <b>{open_positions}</b>\n"
         f"🎯 Автоснайп: <b>{'включён' if cfg.auto_snipe else 'выключен'}</b>\n"
-        f"💵 Сумма покупки: <b>{fmt_amount(cfg.buy_amount)} {chain.native_symbol}</b>\n\n"
-        f"Пришлите адрес токена, чтобы проверить и купить его."
+        f"💵 Сумма покупки: <b>{fmt_amount(cfg.buy_amount)} {chain.native_symbol}</b>\n"
+        + await referral_line(ctx, user)
+        + "\nПришлите адрес токена, чтобы проверить и купить его."
     )
 
 
@@ -47,7 +72,32 @@ async def render_wallet(ctx: BotContext, user: User, chain: ChainConfig) -> str:
         f"(сеть {esc(chain.name)}).\n"
         "Адрес одинаковый во всех EVM-сетях бота — не отправляйте монеты других блокчейнов."
     )
+    # Комиссия снимается именно с пополнения, поэтому условие её отмены должно
+    # стоять на том же экране, а не в отдельной команде.
+    fees = await _deposit_fee_line(ctx, user, chain)
+    if fees:
+        lines.append(fees)
     return "\n".join(lines)
+
+
+async def _deposit_fee_line(ctx: BotContext, user: User, chain: ChainConfig) -> str:
+    policy = ctx.fees.policy()
+    if not policy.enabled:
+        return ""
+    async with session_scope() as session:
+        referrals = await repo.referral_count(session, user.id)
+    status = status_for(
+        referrals=referrals,
+        is_admin=user.id in ctx.settings.admin_ids,
+        exempt=bool(user.fee_exempt),
+        policy=policy,
+    )
+    progress = referral_progress(status)
+    if status.free_deposit:
+        # Достигнутую цель строка прогресса называет сама — второй раз не повторяем.
+        return f"\n{progress}" if progress else "\n✅ Пополнения без комиссии."
+    head = f"🧾 Комиссия за пополнение: <b>{status.deposit_pct:g}%</b>."
+    return f"\n{head}\n{progress}\nВаша ссылка: /ref" if progress else f"\n{head}"
 
 
 def render_report(report: SafetyReport, chain: ChainConfig) -> str:

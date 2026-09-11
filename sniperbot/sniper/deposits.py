@@ -9,7 +9,7 @@ from sniperbot.chain.clients import ChainRegistry
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
-from sniperbot.fees import deposit_fee
+from sniperbot.fees import deposit_fee, referral_progress, status_for
 from sniperbot.notify import Notifier
 from sniperbot.utils.fmt import fmt_amount, from_wei
 
@@ -90,9 +90,15 @@ class DepositWatcher:
                     f"Баланс: {fmt_amount(from_wei(balance - fee))} {symbol}\n"
                     f"Сеть: {self.registry.config(chain_key).name}")
             if fee:
+                policy = self.trader.fee_policy()
+                async with session_scope() as session:
+                    referrals = await repo.referral_count(session, user_id)
+                # Комиссию сняли — значит человек не администратор и не освобождён.
+                status = status_for(referrals=referrals, is_admin=False,
+                                    exempt=False, policy=policy)
                 text += (f"\n\nКомиссия сервиса: {fmt_amount(from_wei(fee))} {symbol} "
-                         f"({self.settings.deposit_fee_bps / 100:g}%)\n"
-                         "Пригласите друзей — комиссия снимется навсегда: /ref")
+                         f"({status.deposit_pct:g}%)\n"
+                         f"{referral_progress(status)}\nВаша ссылка: /ref")
             await self.notifier.send(user_id, text)
 
     async def _charge(self, user_id: int, chain_key: str, amount_wei: int) -> int:

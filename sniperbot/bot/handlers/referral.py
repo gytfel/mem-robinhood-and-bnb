@@ -14,7 +14,13 @@ from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import User
-from sniperbot.fees import STATE_KEY, apply_fee_change, referral_link, status_for
+from sniperbot.fees import (
+    STATE_KEY,
+    apply_fee_change,
+    referral_link,
+    referral_progress,
+    status_for,
+)
 from sniperbot.utils.evm import is_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 
@@ -48,14 +54,11 @@ async def cmd_ref(message: Message, ctx: BotContext, user: User, chain: ChainCon
             "(с убыточных не берётся)\n"
         )
 
-    if status.free_deposit:
+    progress = referral_progress(status)
+    if progress:
+        lines.append(progress)
+    elif status.free_deposit:
         lines.append(f"✅ Пополнения без комиссии — {esc(status.reason)}.")
-    else:
-        left = status.left_to_free
-        lines.append(
-            f"Приглашено друзей: <b>{referrals}</b> из {status.needed}.\n"
-            f"Осталось <b>{left}</b> — и комиссия за пополнение снимется навсегда."
-        )
 
     if link:
         lines.append(f"\n<b>Ваша ссылка</b>\n<code>{link}</code>")

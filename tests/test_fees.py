@@ -260,3 +260,50 @@ def test_switch_stops_every_fee_including_the_entry_one():
     fees = settings_for(off=True)
     assert fees.policy().enabled is False
     assert fees.policy().wallet == ""        # некуда отправлять — значит не берём
+
+
+# ----------------------------------------------- сколько друзей ещё нужно
+def progress_for(referrals: int, *, needed: int = 3, is_admin: bool = False,
+                 exempt: bool = False, wallet: str = "0x" + "f" * 40) -> str:
+    from sniperbot.fees import referral_progress
+
+    policy = FeePolicy(wallet=wallet, deposit_bps=200, profit_bps=500, referrals_needed=needed)
+    return referral_progress(status_for(referrals=referrals, is_admin=is_admin,
+                                        exempt=exempt, policy=policy))
+
+
+def test_progress_names_the_target_and_what_is_left():
+    line = progress_for(1)
+    assert "1 из 3" in line
+    assert "осталось 2" in line
+
+
+def test_progress_shows_a_bar_of_the_right_length():
+    assert "▰▱▱" in progress_for(1)
+    assert "▰▰▱" in progress_for(2)
+    assert "▱▱▱" in progress_for(0)
+
+
+def test_long_targets_drop_the_bar_instead_of_wrapping():
+    line = progress_for(2, needed=25)
+    assert "2 из 25" in line and "▰" not in line
+
+
+def test_finished_progress_congratulates_instead_of_counting_down():
+    line = progress_for(3)
+    assert "без комиссии" in line and "осталось" not in line
+
+
+def test_extra_referrals_do_not_overflow_the_bar():
+    assert "из 3" in progress_for(9)
+
+
+def test_nothing_is_shown_when_there_is_nothing_to_earn():
+    """Админам и освобождённым считать друзей незачем — комиссии и так нет."""
+    assert progress_for(0, is_admin=True) == ""
+    assert progress_for(0, exempt=True) == ""
+    assert progress_for(0, wallet="") == ""           # комиссии выключены
+
+
+def test_no_referral_programme_means_no_line():
+    assert progress_for(0, needed=0) == ""

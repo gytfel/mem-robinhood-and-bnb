@@ -192,3 +192,45 @@ async def test_banned_user_is_stopped_before_any_handler(db, ctx):
     # Администратора собственный бан не запирает снаружи базы.
     assert await middleware(handler, object(),
                             {"event_from_user": tg_user(555), "is_admin": True}) == "handled"
+
+
+async def test_screens_show_how_many_friends_are_left(db, ctx):
+    """Условие акции должно быть там, где человек видит деньги, а не только в /ref."""
+    from sniperbot.bot.views import render_main, render_wallet
+    from sniperbot.fees import FeeSettings
+
+    ctx.fees = FeeSettings(wallet="0x" + "f" * 40, deposit_bps=200, profit_bps=500,
+                           referrals_needed=3)
+    data = await run_middleware(ctx)
+    user, cfg, chain = data["user"], data["cfg"], data["chain"]
+
+    main = await render_main(ctx, user, cfg, chain, open_positions=0)
+    assert "0 из 3" in main and "осталось 3" in main
+
+    wallet = await render_wallet(ctx, user, chain)
+    assert "Комиссия за пополнение" in wallet and "0 из 3" in wallet
+
+
+async def test_screens_stay_clean_when_fees_are_off(db, ctx):
+    from sniperbot.bot.views import render_main, render_wallet
+
+    data = await run_middleware(ctx)
+    user, cfg, chain = data["user"], data["cfg"], data["chain"]
+
+    assert "Друзья" not in await render_main(ctx, user, cfg, chain, open_positions=0)
+    assert "Комиссия" not in await render_wallet(ctx, user, chain)
+
+
+async def test_invited_friends_are_counted_on_the_screens(db, ctx):
+    from sniperbot.bot.views import render_main
+    from sniperbot.fees import FeeSettings
+
+    ctx.fees = FeeSettings(wallet="0x" + "f" * 40, deposit_bps=200, referrals_needed=3)
+    data = await run_middleware(ctx)
+    async with session_scope() as session:
+        for friend_id in (777, 888):
+            await repo.get_or_create_user(session, friend_id)
+            await repo.set_referrer(session, friend_id, data["user"].id)
+
+    main = await render_main(ctx, data["user"], data["cfg"], data["chain"], open_positions=0)
+    assert "2 из 3" in main and "осталось 1" in main
