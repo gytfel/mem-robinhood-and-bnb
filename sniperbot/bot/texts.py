@@ -103,7 +103,11 @@ HELP = (
     "/ban ID · /unban ID — доступ к боту\n"
     "/broadcast &lt;текст&gt; — сообщение всем\n"
     "/logs [N] — журнал операций · /restart confirm — перезапуск\n"
-    "/fees — собранные комиссии · /exempt ID — освободить от комиссий\n\n"
+    "/fees — комиссии: сколько собрано и управление\n"
+    "   <code>/fees on</code> · <code>/fees off</code> · "
+    "<code>/fees wallet 0x…</code> · <code>/fees deposit 2</code> · "
+    "<code>/fees profit 5</code>\n"
+    "/exempt ID — освободить пользователя от комиссий\n\n"
 
     "<b>Как начать</b>\n"
     "1. 💼 «Кошелёк» → скопируйте адрес и пополните его.\n"

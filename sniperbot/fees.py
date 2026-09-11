@@ -37,6 +37,128 @@ class FeePolicy:
         return bool(self.wallet)
 
 
+STATE_KEY = "fees"                  # где решение команды /fees лежит в базе
+MAX_FEE_BPS = 5_000                 # 50%: выше это уже не комиссия, а опечатка
+
+
+@dataclass
+class FeeSettings:
+    """Изменяемые настройки комиссий.
+
+    `.env` задаёт стартовые значения, команда `/fees` — итоговое решение, и оно
+    важнее файла. Флаг `off` выключает комиссии, не забывая кошелёк: включить
+    обратно должно быть так же просто, как выключить.
+    """
+
+    wallet: str = ""
+    deposit_bps: int = 0
+    profit_bps: int = 0
+    referrals_needed: int = 3
+    min_ratio_to_gas: int = 3
+    off: bool = False
+
+    def policy(self) -> FeePolicy:
+        """Правила для расчётов: неизменяемые и на один момент времени."""
+        return FeePolicy(
+            wallet="" if self.off else self.wallet,
+            deposit_bps=self.deposit_bps,
+            profit_bps=self.profit_bps,
+            referrals_needed=self.referrals_needed,
+            min_ratio_to_gas=self.min_ratio_to_gas,
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self.policy().enabled
+
+    def to_state(self) -> str:
+        """Строка для базы: «off;wallet;deposit;profit;refs»."""
+        return ";".join([
+            "1" if self.off else "0", self.wallet,
+            str(self.deposit_bps), str(self.profit_bps), str(self.referrals_needed),
+        ])
+
+    def apply_state(self, raw: str) -> None:
+        """Накладывает сохранённое решение поверх значений из .env."""
+        parts = (raw or "").split(";")
+        if len(parts) != 5:
+            return          # мусор в базе не должен ронять бота и трогать .env
+        off, wallet, deposit, profit, referrals = parts
+        self.off = off == "1"
+        self.wallet = wallet
+        for field_name, value in (("deposit_bps", deposit), ("profit_bps", profit),
+                                  ("referrals_needed", referrals)):
+            if value.lstrip("-").isdigit():
+                setattr(self, field_name, int(value))
+
+
+def _percent(raw: str) -> int:
+    """Проценты от человека в базисные пункты: «2.5» → 250."""
+    try:
+        value = Decimal(raw.replace(",", ".").rstrip("%"))
+    except Exception as exc:  # noqa: BLE001 - текст от пользователя
+        raise ValueError("нужно число, например 2 или 2.5") from exc
+    bps = int(value * 100)
+    if bps < 0 or bps > MAX_FEE_BPS:
+        raise ValueError(f"допустимо от 0 до {MAX_FEE_BPS / 100:g}%")
+    return bps
+
+
+def apply_fee_change(fees: FeeSettings, args: str, *, is_address=None) -> tuple[bool, str]:  # noqa: ANN001
+    """Выполняет команду управления комиссиями. Возвращает (менялось, ответ).
+
+    Разбор отделён от Telegram: правила про деньги должны читаться и проверяться
+    без бота. `is_address` передаётся снаружи, чтобы модуль остался без зависимостей.
+    """
+    parts = (args or "").strip().split()
+    action = parts[0].lower() if parts else ""
+    value = parts[1] if len(parts) > 1 else ""
+
+    if action in {"on", "вкл", "включить"}:
+        if not fees.wallet:
+            return False, ("Сначала укажите кошелёк сбора:\n"
+                           "<code>/fees wallet 0xВашАдрес</code>")
+        fees.off = False
+        return True, (f"✅ Комиссии включены: пополнение {fees.deposit_bps / 100:g}% · "
+                      f"прибыль {fees.profit_bps / 100:g}%\n"
+                      f"Уходят на <code>{fees.wallet}</code>")
+
+    if action in {"off", "выкл", "выключить"}:
+        if fees.off:
+            return False, "Комиссии и так выключены."
+        fees.off = True
+        return True, ("🚫 Комиссии выключены. Кошелёк сохранён — включить обратно: "
+                      "<code>/fees on</code>")
+
+    if action in {"wallet", "кошелёк"}:
+        if is_address is not None and not is_address(value):
+            return False, ("Нужен адрес кошелька: <code>/fees wallet 0x…</code>\n"
+                           "Это ваш личный адрес, а не кошелёк пользователя бота.")
+        fees.wallet = value
+        fees.off = False
+        return True, (f"✅ Кошелёк сбора: <code>{value}</code>\n"
+                      "Комиссии включены.")
+
+    if action in {"deposit", "пополнение", "profit", "прибыль", "refs", "друзья"}:
+        try:
+            if action in {"refs", "друзья"}:
+                if not value.isdigit():
+                    raise ValueError("нужно целое число друзей")
+                fees.referrals_needed = int(value)
+                return True, (f"✅ Пополнения без комиссии после "
+                              f"{fees.referrals_needed} приглашённых друзей")
+            bps = _percent(value)
+        except ValueError as exc:
+            return False, f"❌ {exc}"
+        if action in {"deposit", "пополнение"}:
+            fees.deposit_bps = bps
+            return True, f"✅ Комиссия за пополнение: {bps / 100:g}%"
+        fees.profit_bps = bps
+        return True, f"✅ Комиссия с прибыли: {bps / 100:g}%"
+
+    return False, ""      # команда не распознана — показываем экран состояния
+
+
 @dataclass(frozen=True, slots=True)
 class FeeStatus:
     """Что пользователь платит прямо сейчас и почему."""

@@ -20,6 +20,8 @@ from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import Settings, get_chains, get_settings
 from sniperbot.db.base import close_db, init_db, session_scope
+from sniperbot.fees import STATE_KEY as FEES_STATE_KEY
+from sniperbot.fees import FeeSettings
 from sniperbot.notify import TelegramNotifier
 from sniperbot.security.keyvault import KeyVault
 from sniperbot.sniper.deposits import DepositWatcher
@@ -84,7 +86,7 @@ COMMANDS = [
 
 # Видны только тем, чьи id перечислены в ADMIN_IDS.
 ADMIN_COMMANDS = [
-    BotCommand(command="fees", description="🔒 Собранные комиссии"),
+    BotCommand(command="fees", description="🔒 Комиссии: включить, выключить, ставки"),
     BotCommand(command="exempt", description="🔒 Освободить пользователя от комиссий"),
     BotCommand(command="access", description="🔒 Кому открыт бот"),
     BotCommand(command="users", description="🔒 Список пользователей"),
@@ -117,6 +119,18 @@ async def load_access(settings: Settings) -> AccessPolicy:
         extra=parse_ids(extra),
         override=override,
     )
+
+
+async def load_fees(settings: Settings) -> FeeSettings:
+    """Комиссии: .env как стартовое значение, решение команды /fees — сверху."""
+    from sniperbot.db import repo
+    from sniperbot.sniper.executor import fee_settings_from
+
+    fees = fee_settings_from(settings)
+    async with session_scope() as session:
+        stored = await repo.get_state(session, FEES_STATE_KEY)
+    fees.apply_state(stored)
+    return fees
 
 
 async def publish_commands(bot: Bot, admins: set[int]) -> None:
@@ -185,7 +199,8 @@ async def run_bot() -> None:
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     notifier = TelegramNotifier(bot)
-    trader = Trader(registry, wallets, settings)
+    fees = await load_fees(settings)
+    trader = Trader(registry, wallets, settings, fees=fees)
 
     async def announce_late_result(user, result) -> None:  # noqa: ANN001 - User, TradeResult
         """Итог транзакции, которая подтвердилась уже после ответа боту."""
@@ -211,7 +226,7 @@ async def run_bot() -> None:
     ctx = BotContext(
         settings=settings, registry=registry, wallets=wallets,
         trader=trader, engine=engine, notifier=notifier, build=running_build,
-        access=policy,
+        access=policy, fees=fees,
     )
 
     dp = Dispatcher(storage=MemoryStorage())

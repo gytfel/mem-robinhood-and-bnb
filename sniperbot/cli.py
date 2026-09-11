@@ -217,7 +217,7 @@ async def _doctor(args: argparse.Namespace) -> int:
               f"прибыль {settings.profit_fee_bps / 100:g}% → {settings.service_fee_wallet}")
     else:
         print(f"  {WARN}Комиссии выключены: SERVICE_FEE_WALLET пуст "
-              "(задайте адрес — и они заработают сразу после перезапуска)")
+              "(или задайте кошелёк прямо в боте: /fees wallet 0x…)")
 
     # ------------------------------------------------------------------ Telegram
     print("\nTelegram")

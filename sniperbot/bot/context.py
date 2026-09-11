@@ -8,6 +8,7 @@ from sniperbot.access import AccessPolicy
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import ChainConfig, Settings
+from sniperbot.fees import FeeSettings
 from sniperbot.notify import Notifier
 from sniperbot.sniper.engine import SniperEngine
 from sniperbot.sniper.executor import Trader
@@ -29,6 +30,8 @@ class BotContext:
     # Кто имеет право пользоваться ботом. Объект общий с мидлварью: /access
     # меняет его на ходу, без перезапуска и без правки .env.
     access: AccessPolicy = field(default_factory=AccessPolicy)
+    # Комиссии: тот же объект, что держит Trader, — /fees меняет его на ходу.
+    fees: FeeSettings = field(default_factory=FeeSettings)
 
     @property
     def active_chain_keys(self) -> list[str]:

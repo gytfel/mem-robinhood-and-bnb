@@ -35,7 +35,7 @@ from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, Position, User, utcnow
-from sniperbot.fees import FeePolicy, profit_fee
+from sniperbot.fees import FeePolicy, FeeSettings, profit_fee
 from sniperbot.settings_registry import effective_gas_multiplier
 from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import from_wei, to_wei
@@ -80,13 +80,30 @@ class OrphanToken:
     decimals: int = 18
 
 
+def fee_settings_from(settings: Settings | None) -> FeeSettings:
+    """Стартовые комиссии из .env — до того, как их поменяли командой."""
+    if settings is None:
+        return FeeSettings()        # без настроек комиссий нет
+    return FeeSettings(
+        wallet=settings.service_fee_wallet,
+        deposit_bps=settings.deposit_fee_bps,
+        profit_bps=settings.profit_fee_bps,
+        referrals_needed=settings.referrals_for_free_deposit,
+        min_ratio_to_gas=settings.min_fee_gas_ratio,
+    )
+
+
 class Trader:
     """Покупка и продажа через DEX выбранной сети."""
 
-    def __init__(self, registry: ChainRegistry, wallets: WalletService, settings: Settings) -> None:
+    def __init__(self, registry: ChainRegistry, wallets: WalletService, settings: Settings,
+                 fees: FeeSettings | None = None) -> None:
         self.registry = registry
         self.wallets = wallets
         self.settings = settings
+        # Общий изменяемый объект: команда /fees меняет его, и следующая же
+        # сделка считается по новым правилам — без перезапуска службы.
+        self.fees = fees if fees is not None else fee_settings_from(settings)
         # Куда сообщить о судьбе транзакции, которая подтвердилась уже после
         # ответа пользователю. Ставится приложением; без неё бот просто молчит.
         self.on_late_result: Callable[[User, TradeResult], Awaitable[None]] | None = None
@@ -369,7 +386,9 @@ class Trader:
             except Exception as exc:  # noqa: BLE001 - покупка уже состоялась
                 log.warning("Предварительный approve не удался: %s", exc)
 
-        if fee_wei > 0 and self.settings.service_fee_wallet:
+        # Выключатель /fees выключает и эту комиссию: иначе «комиссии выключены»
+        # означало бы «кроме одной».
+        if fee_wei > 0 and self.fees.policy().enabled:
             await self._send_service_fee(client, account, fee_wei)
 
         return TradeResult(
@@ -894,14 +913,8 @@ class Trader:
         return max(fallback // 4, min(estimated * GAS_BUFFER_BPS // 10_000, 5_000_000))
 
     def fee_policy(self) -> FeePolicy:
-        """Правила комиссий из настроек сервиса."""
-        return FeePolicy(
-            wallet=self.settings.service_fee_wallet,
-            deposit_bps=self.settings.deposit_fee_bps,
-            profit_bps=self.settings.profit_fee_bps,
-            referrals_needed=self.settings.referrals_for_free_deposit,
-            min_ratio_to_gas=self.settings.min_fee_gas_ratio,
-        )
+        """Правила комиссий на этот момент времени."""
+        return self.fees.policy()
 
     async def charge_profit_fee(self, user: User, chain_key: str, position: Position,
                                 spent_wei: int, returned_wei: int) -> int:
@@ -950,7 +963,7 @@ class Trader:
 
     async def _send_service_fee(self, client, account, fee_wei: int) -> None:
         try:
-            await self.wallets.send_native(client, account, self.settings.service_fee_wallet, fee_wei)
+            await self.wallets.send_native(client, account, self.fees.policy().wallet, fee_wei)
         except Exception as exc:  # noqa: BLE001 - комиссия не должна ломать сделку
             log.warning("Не удалось отправить сервисную комиссию: %s", exc)
 

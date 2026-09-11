@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from sniperbot.bot.context import BotContext
@@ -14,7 +14,8 @@ from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import User
-from sniperbot.fees import referral_link, status_for
+from sniperbot.fees import STATE_KEY, apply_fee_change, referral_link, status_for
+from sniperbot.utils.evm import is_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 
 log = logging.getLogger(__name__)
@@ -73,11 +74,23 @@ async def cmd_ref(message: Message, ctx: BotContext, user: User, chain: ChainCon
 
 
 @router.message(Command("fees"))
-async def cmd_fees(message: Message, ctx: BotContext, chain: ChainConfig,
-                   is_admin: bool = False) -> None:
+async def cmd_fees(message: Message, command: CommandObject, ctx: BotContext,
+                   chain: ChainConfig, is_admin: bool = False) -> None:
     """Сколько собрано комиссий — команда владельца."""
     if not is_admin:
         await reply(message, "🔒 Команда только для администратора. Ваши комиссии: /ref")
+        return
+
+    changed, answer = apply_fee_change(ctx.fees, command.args or "", is_address=is_address)
+    if changed:
+        # Решение переживает перезапуск и важнее .env — как и у /access.
+        async with session_scope() as session:
+            await repo.set_state(session, STATE_KEY, ctx.fees.to_state())
+    if answer:
+        await reply(message, answer)
+        return
+    if (command.args or "").strip():
+        await reply(message, _fees_usage())
         return
 
     policy = ctx.trader.fee_policy()
@@ -97,13 +110,27 @@ async def cmd_fees(message: Message, ctx: BotContext, chain: ChainConfig,
         f"Плательщиков: {len(payers)} из {len(users)}",
     ]
     if not policy.enabled:
-        lines.append("\n⚠️ Комиссии выключены: не задан <code>SERVICE_FEE_WALLET</code> в .env")
+        reason = ("выключены командой <code>/fees off</code>" if ctx.fees.off
+                  else "не задан кошелёк сбора")
+        lines.append(f"\n⚠️ <b>Комиссии не берутся</b> — {reason}.\n"
+                     "Включить: <code>/fees wallet 0xВашАдрес</code>")
     for item in payers[:10]:
         lines.append(f"   · {esc(item.username or str(item.id))}: "
                      f"{fmt_amount(from_wei(item.fees_paid_wei))}")
     lines.append("\nОсвободить пользователя: <code>/exempt ID</code> · "
                  "вернуть комиссию: <code>/exempt ID off</code>")
+    lines.append(_fees_usage())
     await reply(message, "\n".join(lines))
+
+
+def _fees_usage() -> str:
+    """Управление комиссиями прямо из бота — без правки .env и перезапуска."""
+    return ("\n<b>Управление</b>\n"
+            "<code>/fees on</code> · <code>/fees off</code> — включить и выключить\n"
+            "<code>/fees wallet 0x…</code> — куда собирать\n"
+            "<code>/fees deposit 2</code> — % с пополнения\n"
+            "<code>/fees profit 5</code> — % с прибыли сделки\n"
+            "<code>/fees refs 3</code> — сколько друзей снимают комиссию за пополнение")
 
 
 @router.message(Command("exempt"))

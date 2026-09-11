@@ -154,3 +154,109 @@ async def test_collected_fees_add_up(db):
 async def test_free_deposit_threshold_matches_the_promise(referrals, expected):
     charged = deposit_fee(ONE, referrals=referrals, is_admin=False, exempt=False, policy=POLICY) > 0
     assert charged is expected
+
+
+# ------------------------------------------------- включение и выключение в боте
+def settings_for(**overrides) -> object:
+    from sniperbot.fees import FeeSettings
+
+    defaults = {"wallet": "0x" + "f" * 40, "deposit_bps": 200, "profit_bps": 500}
+    defaults.update(overrides)
+    return FeeSettings(**defaults)
+
+
+def test_switch_off_keeps_the_wallet_for_switching_back_on():
+    """Выключение не должно стирать адрес: включать обратно — одна команда."""
+    from sniperbot.fees import apply_fee_change
+
+    fees = settings_for()
+    changed, answer = apply_fee_change(fees, "off")
+    assert changed and fees.off and not fees.policy().enabled
+    assert fees.wallet, "кошелёк должен сохраниться"
+    assert "/fees on" in answer
+
+    changed, _ = apply_fee_change(fees, "on")
+    assert changed and fees.policy().enabled
+
+
+def test_switching_on_without_a_wallet_explains_what_is_missing():
+    from sniperbot.fees import apply_fee_change
+
+    fees = settings_for(wallet="")
+    changed, answer = apply_fee_change(fees, "on")
+    assert not changed
+    assert "wallet" in answer
+
+
+def test_setting_a_wallet_turns_fees_on():
+    from sniperbot.fees import apply_fee_change
+
+    fees = settings_for(wallet="", off=True)
+    changed, _ = apply_fee_change(fees, f"wallet 0x{'a' * 40}", is_address=lambda v: True)
+    assert changed and fees.policy().enabled
+
+
+def test_a_bad_wallet_is_refused():
+    from sniperbot.fees import apply_fee_change
+
+    fees = settings_for()
+    changed, answer = apply_fee_change(fees, "wallet кошелёк", is_address=lambda v: False)
+    assert not changed and "адрес" in answer
+    assert fees.wallet == "0x" + "f" * 40      # старое значение не потеряно
+
+
+def test_percentages_are_entered_as_percent_not_basis_points():
+    from sniperbot.fees import apply_fee_change
+
+    fees = settings_for()
+    assert apply_fee_change(fees, "deposit 2.5")[0] and fees.deposit_bps == 250
+    assert apply_fee_change(fees, "profit 10")[0] and fees.profit_bps == 1000
+    assert apply_fee_change(fees, "refs 5")[0] and fees.referrals_needed == 5
+
+
+def test_absurd_percentages_are_rejected():
+    """Опечатка «/fees profit 500» не должна забрать у людей пятикратную прибыль."""
+    from sniperbot.fees import apply_fee_change
+
+    fees = settings_for()
+    changed, answer = apply_fee_change(fees, "profit 500")
+    assert not changed and "до 50%" in answer
+    assert fees.profit_bps == 500
+
+    assert apply_fee_change(fees, "deposit много")[0] is False
+
+
+def test_unknown_command_falls_through_to_the_status_screen():
+    from sniperbot.fees import apply_fee_change
+
+    assert apply_fee_change(settings_for(), "") == (False, "")
+    assert apply_fee_change(settings_for(), "непонятно") == (False, "")
+
+
+def test_decision_survives_a_restart():
+    from sniperbot.fees import FeeSettings, apply_fee_change
+
+    fees = settings_for()
+    apply_fee_change(fees, "deposit 3")
+    apply_fee_change(fees, "off")
+
+    restored = FeeSettings(wallet="из .env", deposit_bps=200, profit_bps=500)
+    restored.apply_state(fees.to_state())
+    assert restored.off is True
+    assert restored.deposit_bps == 300
+    assert restored.wallet == fees.wallet        # команда важнее .env
+
+
+def test_garbage_in_the_state_does_not_break_startup():
+    from sniperbot.fees import FeeSettings
+
+    fees = FeeSettings(wallet="0x1", deposit_bps=200)
+    fees.apply_state("мусор")
+    assert fees.wallet == "0x1" and fees.deposit_bps == 200
+
+
+def test_switch_stops_every_fee_including_the_entry_one():
+    """«Комиссии выключены» не может означать «кроме одной»."""
+    fees = settings_for(off=True)
+    assert fees.policy().enabled is False
+    assert fees.policy().wallet == ""        # некуда отправлять — значит не берём
