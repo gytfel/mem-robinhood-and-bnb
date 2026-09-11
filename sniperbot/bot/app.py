@@ -87,6 +87,7 @@ COMMANDS = [
 # Видны только тем, чьи id перечислены в ADMIN_IDS.
 ADMIN_COMMANDS = [
     BotCommand(command="fees", description="🔒 Комиссии: включить, выключить, ставки"),
+    BotCommand(command="treasury", description="🔒 Кошелёк комиссий: баланс и вывод"),
     BotCommand(command="exempt", description="🔒 Освободить пользователя от комиссий"),
     BotCommand(command="access", description="🔒 Кому открыт бот"),
     BotCommand(command="users", description="🔒 Список пользователей"),

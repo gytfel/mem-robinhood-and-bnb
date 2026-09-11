@@ -65,7 +65,7 @@ class WalletService:
         self.nonces = NonceManager()
 
     # ------------------------------------------------------------- создание
-    def generate(self, user_id: int) -> tuple[str, str]:
+    def generate(self, user_id: int | str) -> tuple[str, str]:
         """Новый кошелёк: возвращает (адрес, зашифрованный приватный ключ)."""
         account: LocalAccount = Account.from_key(secrets.token_bytes(32))
         encrypted = self.vault.encrypt(account.key.hex(), aad=str(user_id))
@@ -95,8 +95,12 @@ class WalletService:
     def account(self, user: User) -> LocalAccount:
         if not user.encrypted_key:
             raise WalletError("У пользователя нет кошелька")
+        return self.account_from(user.encrypted_key, str(user.id))
+
+    def account_from(self, encrypted: str, aad: str) -> LocalAccount:
+        """Аккаунт по зашифрованному ключу. Служебные кошельки живут не в users."""
         try:
-            private_key = self.vault.decrypt(user.encrypted_key, aad=str(user.id))
+            private_key = self.vault.decrypt(encrypted, aad=aad)
         except VaultError as exc:
             raise WalletError(str(exc)) from exc
         return Account.from_key(private_key)

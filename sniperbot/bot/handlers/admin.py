@@ -322,6 +322,177 @@ async def _save_access(policy) -> None:  # noqa: ANN001 - AccessPolicy
         await repo.set_state(session, STATE_EXTRA, policy.extra_value())
 
 
+@router.message(Command("treasury"))
+async def cmd_treasury(message: Message, command: CommandObject, ctx: BotContext,
+                       chain: ChainConfig, is_admin: bool = False) -> None:
+    """Кошелёк комиссий внутри бота: завести, посмотреть, вывести, забрать ключ."""
+    if _deny(is_admin):
+        await _refuse(message)
+        return
+
+    parts = (command.args or "").strip().split()
+    action = parts[0].lower() if parts else ""
+
+    if action in {"new", "создать"}:
+        await _treasury_create(message, ctx)
+        return
+    if action in {"key", "ключ"}:
+        await _treasury_key(message, ctx)
+        return
+    if action in {"withdraw", "вывод", "вывести"}:
+        await _treasury_withdraw(message, ctx, chain, parts[1:])
+        return
+    if action:
+        await reply(message, _treasury_usage())
+        return
+
+    await _treasury_status(message, ctx, chain)
+
+
+async def _treasury_create(message: Message, ctx: BotContext) -> None:
+    from sniperbot import treasury as treasury_service
+    from sniperbot.fees import STATE_KEY as FEES_STATE_KEY
+
+    existing = await treasury_service.get()
+    if existing is not None:
+        await reply(message, "Кошелёк комиссий уже заведён:\n"
+                             f"<code>{existing.address}</code>\n\n"
+                             "Второй не создаём: ключ один, и старый адрес стал бы "
+                             "недоступен вместе с тем, что на нём лежит.")
+        return
+
+    wallet = await treasury_service.create(ctx.wallets)
+    # Заводят его ровно затем, чтобы комиссии шли сюда — не заставляем повторять это руками.
+    ctx.fees.wallet = wallet.address
+    ctx.fees.off = False
+    async with session_scope() as session:
+        await repo.set_state(session, FEES_STATE_KEY, ctx.fees.to_state())
+
+    await reply(
+        message,
+        "✅ <b>Кошелёк комиссий создан</b>\n"
+        f"<code>{wallet.address}</code>\n\n"
+        f"Комиссии уже идут сюда: пополнение {ctx.fees.deposit_bps / 100:g}% · "
+        f"прибыль {ctx.fees.profit_bps / 100:g}%.\n"
+        "Вывести: <code>/treasury withdraw 0xВашАдрес</code>\n"
+        "Забрать приватный ключ: <code>/treasury key</code> — сделайте это сразу "
+        "и храните ключ вне сервера.",
+    )
+
+
+async def _treasury_key(message: Message, ctx: BotContext) -> None:
+    from sniperbot import treasury as treasury_service
+
+    wallet = await treasury_service.get()
+    if wallet is None:
+        await reply(message, "Кошелька комиссий ещё нет: <code>/treasury new</code>")
+        return
+    try:
+        account = treasury_service.account(ctx.wallets, wallet)
+    except Exception as exc:  # noqa: BLE001 - MASTER_KEY мог смениться
+        await reply(message, f"❌ Не могу расшифровать ключ: {esc(exc)}")
+        return
+    await reply(
+        message,
+        "🔐 <b>Приватный ключ кошелька комиссий</b>\n"
+        f"<code>{account.key.hex()}</code>\n\n"
+        "Кто владеет ключом — владеет деньгами. Сохраните и удалите это сообщение.",
+    )
+
+
+async def _treasury_withdraw(message: Message, ctx: BotContext, chain: ChainConfig,
+                             args: list[str]) -> None:
+    from sniperbot import treasury as treasury_service
+    from sniperbot.chain.wallet import WalletError
+    from sniperbot.utils.evm import extract_address, is_address
+    from sniperbot.utils.fmt import parse_decimal, to_wei
+
+    wallet = await treasury_service.get()
+    if wallet is None:
+        await reply(message, "Кошелька комиссий ещё нет: <code>/treasury new</code>")
+        return
+    address = extract_address(args[0]) if args else None
+    if not address or not is_address(address):
+        await reply(message, "Использование: <code>/treasury withdraw 0xАдрес [сумма]</code>\n"
+                             "Без суммы уходит весь баланс за вычетом газа.")
+        return
+    amount = parse_decimal(args[1]) if len(args) > 1 else None
+    if len(args) > 1 and amount is None:
+        await reply(message, "❌ Некорректная сумма.")
+        return
+
+    status = await reply(message, f"⏳ Вывожу из кошелька комиссий в сети {esc(chain.name)}…")
+    try:
+        account = treasury_service.account(ctx.wallets, wallet)
+        sent, actual = await ctx.wallets.send_native(
+            ctx.registry.get(chain.key), account, address,
+            to_wei(amount, chain.native_decimals) if amount is not None else None,
+        )
+    except WalletError as exc:
+        await status.edit_text(f"❌ {esc(exc)}", parse_mode="HTML")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Вывод комиссий не удался: %s", exc)
+        await status.edit_text(f"❌ Не удалось вывести: {esc(exc)}", parse_mode="HTML")
+        return
+
+    await status.edit_text(
+        f"✅ Отправлено {fmt_amount(from_wei(actual, chain.native_decimals))} "
+        f"{chain.native_symbol}\n<code>{address}</code>\n"
+        f"<a href='{chain.tx_url(sent.tx_hash)}'>Транзакция</a>",
+        parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
+async def _treasury_status(message: Message, ctx: BotContext, chain: ChainConfig) -> None:
+    from sniperbot import treasury as treasury_service
+
+    wallet = await treasury_service.get()
+    if wallet is None:
+        await reply(
+            message,
+            "💰 <b>Кошелёк комиссий</b>\n\n"
+            "Отдельный адрес внутри бота, на который приходят комиссии.\n"
+            "Завести: <code>/treasury new</code>\n\n"
+            "Если предпочитаете свой внешний кошелёк — "
+            "<code>/fees wallet 0xАдрес</code>.",
+        )
+        return
+
+    lines = ["💰 <b>Кошелёк комиссий</b>", f"<code>{wallet.address}</code>\n", "<b>Балансы</b>"]
+    for key in ctx.active_chain_keys:
+        config = ctx.chain(key)
+        try:
+            balance = await ctx.registry.get(key).native_balance(wallet.address)
+            value = f"{fmt_amount(from_wei(balance, config.native_decimals))} {config.native_symbol}"
+        except Exception as exc:  # noqa: BLE001 - нода могла не ответить
+            value = f"не узнал ({esc(str(exc)[:40])})"
+        mark = "▸" if key == chain.key else "·"
+        lines.append(f"{mark} {esc(config.name)}: <b>{value}</b>")
+
+    async with session_scope() as session:
+        collected = await repo.fees_total(session)
+    lines.append(f"\nУдержано комиссий всего: <b>{fmt_amount(from_wei(collected))}</b>")
+
+    if (ctx.fees.wallet or "").lower() != wallet.address.lower():
+        lines.append(f"\n⚠️ Комиссии сейчас идут на другой адрес: "
+                     f"<code>{esc(ctx.fees.wallet or 'не задан')}</code>\n"
+                     f"Вернуть сюда: <code>/fees wallet {wallet.address}</code>")
+    elif ctx.fees.off:
+        lines.append("\n⚠️ Комиссии выключены: <code>/fees on</code>")
+
+    lines.append(_treasury_usage())
+    await reply(message, "\n".join(lines))
+
+
+def _treasury_usage() -> str:
+    return ("\n<b>Команды</b>\n"
+            "<code>/treasury withdraw 0xАдрес [сумма]</code> — вывести "
+            "(без суммы — всё за вычетом газа, из текущей сети)\n"
+            "<code>/treasury key</code> — приватный ключ\n"
+            "<code>/treasury new</code> — завести, если ещё нет")
+
+
 @router.message(Command("broadcast"))
 async def cmd_broadcast(message: Message, command: CommandObject, ctx: BotContext,
                         is_admin: bool = False) -> None:

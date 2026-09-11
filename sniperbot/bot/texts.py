@@ -107,6 +107,8 @@ HELP = (
     "   <code>/fees on</code> · <code>/fees off</code> · "
     "<code>/fees wallet 0x…</code> · <code>/fees deposit 2</code> · "
     "<code>/fees profit 5</code>\n"
+    "/treasury — отдельный кошелёк для комиссий внутри бота: "
+    "<code>new</code> · баланс · <code>withdraw 0x…</code> · <code>key</code>\n"
     "/exempt ID — освободить пользователя от комиссий\n\n"
 
     "<b>Как начать</b>\n"
