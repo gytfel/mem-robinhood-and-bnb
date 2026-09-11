@@ -153,8 +153,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("autosell", "auto_sell", "chain", "bool", "Автопродажа",
             "Закрывать позиции по правилам без участия человека", "exits"),
     Setting("ladder", "tp_ladder", "chain", "ladder", "Лестница фиксаций",
-            "Ступени тейк-профита «рост:доля», например 100:50,300:30 — "
-            "продать половину на +100% и ещё треть на +300%. Пусто — обычный TP",
+            "Ступени фиксации прибыли [[множитель, доля], …]: [[1.5, 40], [3, 30], [10, 30]] — "
+            "продать 40% на ×1.5, ещё 30% на ×3 и 30% на ×10. Пусто — обычный TP",
             "exits"),
     Setting("secure", "secure_pct", "chain", "int", "Возврат вложенного",
             "После роста на N% продать ровно столько, чтобы вернуть потраченное — "
@@ -307,7 +307,7 @@ PRESETS: tuple[Preset, ...] = (
         "не терять, чем поймать иксы.",
         {
             "slippage": "20", "gasmode": "fast",
-            "tp": "120", "sl": "35", "trail": "40", "ladder": "60:40,200:30", "secure": "35",
+            "tp": "120", "sl": "35", "trail": "40", "ladder": "[[1.6, 40], [3, 30]]", "secure": "35",
             "breakeven": "40", "rugguard": "40", "deadtime": "45", "deadpct": "15",
             "exitgas": "2", "exitslip": "35",
             "minliq": "3", "buytax": "8", "selltax": "8", "ownershare": "10",
@@ -323,7 +323,7 @@ PRESETS: tuple[Preset, ...] = (
         "мягче, зато покупка идёт по факту движения.",
         {
             "slippage": "25", "gasmode": "fast",
-            "tp": "100", "sl": "30", "trail": "35", "ladder": "50:40,150:30", "secure": "40",
+            "tp": "100", "sl": "30", "trail": "35", "ladder": "[[1.5, 40], [2.5, 30]]", "secure": "40",
             "breakeven": "30", "rugguard": "40", "deadtime": "30", "deadpct": "10",
             "exitgas": "2", "exitslip": "35",
             "minliq": "2", "buytax": "10", "selltax": "10", "ownershare": "15",
@@ -339,7 +339,7 @@ PRESETS: tuple[Preset, ...] = (
         "сделок будет больше — расчёт на редкие крупные иксы.",
         {
             "slippage": "30", "gasmode": "turbo",
-            "tp": "200", "sl": "45", "trail": "45", "ladder": "100:50,300:25", "secure": "60",
+            "tp": "200", "sl": "45", "trail": "45", "ladder": "[[2, 50], [4, 25]]", "secure": "60",
             "breakeven": "50", "rugguard": "50", "deadtime": "60", "deadpct": "20",
             "exitgas": "2.5", "exitslip": "40",
             "minliq": "1", "buytax": "12", "selltax": "12", "ownershare": "20",
@@ -443,33 +443,83 @@ def trading_allowed(value: str | None, now=None) -> bool:  # noqa: ANN001 - date
     return moment.hour in hours
 
 
-def parse_ladder(text: str) -> str:
-    """Разбирает «100:50,300:30» в нормализованную строку ступеней.
+LADDER_EXAMPLE = "[[1.5, 40], [3, 30], [10, 30]]"
+MIN_STEP_GROWTH = 5      # ступень ниже — почти наверняка перепутанный множитель
 
-    Пустая строка выключает лестницу. Суммарная доля не может превышать 100%.
+
+def _ladder_pairs(text: str) -> list[tuple[str, str, bool]]:
+    """Пары «ступень, доля» из обеих записей вместе с признаком множителя.
+
+    Множителями думать удобнее: ×3 понятнее, чем +200%. Скобочная запись целиком
+    про множители, запись через двоеточие исторически про рост в процентах —
+    каждая читается однозначно, и гадать по величине числа не приходится.
     """
-    text = (text or "").strip().lower()
-    if text in {"", "off", "выкл", "нет", "0"}:
-        return ""
-    steps: list[tuple[int, int]] = []
-    total = 0
+    if "[" in text or "]" in text:
+        flat = [chunk.strip() for chunk in
+                text.replace("[", " ").replace("]", " ").replace(";", ",").split(",")
+                if chunk.strip()]
+        if not flat or len(flat) % 2:
+            raise ValueError(f"формат: {LADDER_EXAMPLE}")
+        return [(flat[i], flat[i + 1], True) for i in range(0, len(flat), 2)]
+
+    pairs: list[tuple[str, str, bool]] = []
     for chunk in text.replace(";", ",").split(","):
         chunk = chunk.strip()
         if not chunk:
             continue
         if ":" not in chunk:
-            raise ValueError("формат: рост:доля, например 100:50,300:30")
-        growth_raw, share_raw = chunk.split(":", 1)
-        growth = parse_decimal(growth_raw)
-        share = parse_decimal(share_raw)
-        if growth is None or share is None:
-            raise ValueError("формат: рост:доля, например 100:50,300:30")
-        if growth <= 0 or share <= 0 or share > 100:
-            raise ValueError("рост > 0, доля от 1 до 100")
+            raise ValueError(f"формат: {LADDER_EXAMPLE} или 100:50,300:30")
+        step, share = chunk.split(":", 1)
+        pairs.append((step, share, False))
+    return pairs
+
+
+def _step_growth(raw: str, multiplier_by_default: bool) -> int:
+    """Ступень в процентах роста: ×1.5 и +50% — одно и то же."""
+    value = raw.strip().lower().replace("×", "x").replace("+", "")
+    as_multiplier = value.startswith("x") or value.endswith("x")
+    as_percent = value.endswith("%")
+    number = parse_decimal(value.strip("x%").strip())
+    if number is None:
+        raise ValueError(f"не понял ступень «{raw.strip()}». Формат: {LADDER_EXAMPLE}")
+
+    if as_multiplier or (multiplier_by_default and not as_percent):
+        if number <= 1:
+            raise ValueError(f"множитель должен быть больше 1: ×1.5 — это +50%, а ×{number:g} — убыток")
+        return int(round((number - 1) * 100))
+    if number < MIN_STEP_GROWTH:
+        raise ValueError(
+            f"ступень +{number:g}% слишком близко ко входу. Если имелся в виду "
+            f"множитель ×{number:g}, напишите <code>{number:g}x</code> или {LADDER_EXAMPLE}"
+        )
+    return int(number)
+
+
+def parse_ladder(text: str) -> str:
+    """Разбирает лестницу в нормализованную строку ступеней «рост:доля».
+
+    Принимает и множители — [[1.5, 40], [3, 30]] или 1.5x:40 — и проценты роста
+    (100:50). Внутри всё живёт в процентах: так ступень одинаково понимается и в
+    настройках, и в уже открытых позициях. Пустая строка выключает лестницу,
+    суммарная доля не может превышать 100%.
+    """
+    text = (text or "").strip().lower()
+    if text in {"", "off", "выкл", "нет", "0", "[]"}:
+        return ""
+
+    steps: list[tuple[int, int]] = []
+    total = 0
+    for step_raw, share_raw, multiplier in _ladder_pairs(text):
+        growth = _step_growth(step_raw, multiplier)
+        share = parse_decimal(share_raw.strip().rstrip("%"))
+        if share is None:
+            raise ValueError(f"не понял долю «{share_raw.strip()}». Формат: {LADDER_EXAMPLE}")
+        if share <= 0 or share > 100:
+            raise ValueError("доля ступени — от 1 до 100%")
         total += int(share)
         if total > 100:
-            raise ValueError("сумма долей больше 100%")
-        steps.append((int(growth), int(share)))
+            raise ValueError("сумма долей больше 100%: продать больше позиции нельзя")
+        steps.append((growth, int(share)))
     if not steps:
         return ""
     steps.sort()
@@ -492,11 +542,56 @@ def ladder_steps(value: str | None) -> list[tuple[int, int]]:
     return sorted(steps)
 
 
+def step_multiplier(growth: int) -> str:
+    """Ступень как множитель цены: +200% это ×3.
+
+    Хвостовые нули убираются вручную: normalize() превращает 10 в 1E+1.
+    """
+    text = f"{Decimal(100 + growth) / 100:f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def format_ladder(value: str) -> str:
     steps = ladder_steps(value)
     if not steps:
         return "выключена"
-    return " · ".join(f"+{growth}% → {share}%" for growth, share in steps)
+    return " · ".join(f"×{step_multiplier(growth)} → {share}%" for growth, share in steps)
+
+
+def ladder_note(value: str, secure_pct: int = 0) -> str:
+    """Та же лестница в процентах роста — чтобы не гадать, что понял бот.
+
+    Если включён возврат вложенного, он продаёт из той же позиции и закрывает
+    ступени, которые уже перекрыл по объёму. Об этом лучше сказать сразу, чем
+    оставить человека выяснять, почему ступень ×3 не сработала.
+    """
+    steps = ladder_steps(value)
+    if not steps:
+        return ""
+    growth = " · ".join(f"+{step}% → {share}%" for step, share in steps)
+    total = sum(share for _, share in steps)
+    lead = "Сами ступени" if secure_pct > 0 else "Ступени"
+    tail = (f"{lead} фиксируют {total}% позиции, остальные {100 - total}% едут дальше."
+            if total < 100 else f"{lead} продают позицию целиком — бегунка не останется.")
+    note = f"\nТо есть: {growth}\n{tail}"
+
+    if secure_pct > 0:
+        sold = Decimal(10_000) / (100 + secure_pct)      # доля, возвращающая вложенное
+        covered, running = [], Decimal(0)
+        for step, share in steps:
+            running += share
+            if running > sold:
+                break
+            covered.append(f"×{step_multiplier(step)}")
+        left = max(Decimal(0), 100 - sold)
+        note += (f"\n\n🛟 Возврат вложенного на +{secure_pct}% продаст около {sold:.0f}% позиции"
+                 + (f" и закроет ступени {', '.join(covered)}" if covered else "")
+                 + f" — дальше поедет примерно {left:.0f}%.")
+        if covered:
+            note += ("\nЧтобы ступени срабатывали сами, поднимите порог возврата "
+                     "(<code>/set secure 100</code>) или выключите его "
+                     "(<code>/set secure 0</code>).")
+    return note
 
 
 def find(name: str) -> Setting | None:
@@ -608,7 +703,9 @@ def render_one(setting: Setting, cfg, user=None, native: str = "") -> str:
     elif setting.kind == "choice":
         allowed = " · ".join(f"<code>{choice}</code>" for choice in setting.choices)
     elif setting.kind == "ladder":
-        allowed = "например <code>100:50,300:30</code> · <code>off</code> — выключить"
+        allowed = (f"множителями <code>{LADDER_EXAMPLE}</code> — ×1.5 → 40%, ×3 → 30%, ×10 → 30%\n"
+                   "или ростом в процентах <code>50:40,200:30,900:30</code> — это то же самое\n"
+                   "<code>off</code> — выключить")
     else:
         bounds = [str(setting.minimum) if setting.minimum is not None else "",
                   str(setting.maximum) if setting.maximum is not None else ""]

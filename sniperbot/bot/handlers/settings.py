@@ -26,6 +26,7 @@ from sniperbot.settings_registry import (
     PRESETS_BY_NAME,
     SETTINGS,
     find,
+    ladder_note,
     preset_changes,
     render_compact,
     render_full,
@@ -166,6 +167,9 @@ async def cmd_set(message: Message, command: CommandObject, ctx: BotContext,
         text += await _gas_warning(ctx, user, chain, value)
     if setting.name == "route":
         text += route_warning(chain, value)
+    if setting.name in {"ladder", "secure"}:
+        # Обе настройки продают из одной позиции — показываем итог вместе.
+        text += ladder_note(cfg.tp_ladder or "", int(cfg.secure_pct or 0))
     await reply(message, text)
 
 
@@ -309,7 +313,9 @@ async def on_value(message: Message, state: FSMContext, ctx: BotContext, user: U
     await reply(
         message,
         f"✅ <b>{esc(setting.title)}</b> = {esc(setting.display(cfg, user, chain.native_symbol))}"
-        + (route_warning(chain, value) if setting.name == "route" else ""),
+        + (route_warning(chain, value) if setting.name == "route" else "")
+        + (ladder_note(cfg.tp_ladder or "", int(cfg.secure_pct or 0))
+           if setting.name in {"ladder", "secure"} else ""),
         group_menu(setting.group, cfg, chain.native_symbol, user),
     )
 

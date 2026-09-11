@@ -182,7 +182,8 @@ def test_ladder_card_shows_example_and_off_switch():
 
     cfg, user = filled_cfg()
     card = render_one(find("ladder"), cfg, user, "BNB")
-    assert "100:50" in card
+    assert "[[1.5, 40]" in card        # запись множителями — основная
+    assert "50:40,200:30" in card      # и та же лестница в процентах роста
     assert "off" in card
 
 
@@ -223,10 +224,10 @@ def test_preset_changes_skip_values_already_set():
 
 def test_presets_keep_exit_rules_consistent():
     """Трейлинг не должен срабатывать раньше первой ступени фиксации."""
-    from sniperbot.settings_registry import PRESETS, ladder_steps
+    from sniperbot.settings_registry import PRESETS, ladder_steps, parse_ladder
 
     for preset in PRESETS:
-        steps = ladder_steps(preset.values.get("ladder", ""))
+        steps = ladder_steps(parse_ladder(preset.values.get("ladder", "")))
         trail = int(preset.values.get("trail", 0))
         assert steps, f"{preset.name}: без лестницы прибыль не фиксируется"
         first_step = steps[0][0]
@@ -272,3 +273,94 @@ def test_trading_allowed_respects_the_window():
     assert trading_allowed("20,21,22", inside) is True
     assert trading_allowed("20,21,22", outside) is False
     assert trading_allowed("", outside) is True        # пусто — круглосуточно
+
+
+# --------------------------------------------------------- лестница фиксаций
+def test_ladder_reads_the_multiplier_notation():
+    """Ровно та запись, которую человек пишет руками: [[множитель, доля], …]."""
+    from sniperbot.settings_registry import parse_ladder
+
+    assert parse_ladder("[[1.5, 40], [3, 30], [10, 30]]") == "50:40,200:30,900:30"
+    assert parse_ladder("[[1.5,40],[3,30]]") == "50:40,200:30"
+    assert parse_ladder("1.5x:40, 3x:30") == "50:40,200:30"
+    assert parse_ladder("×2:50") == "100:50"
+
+
+def test_ladder_still_reads_growth_in_percent():
+    """Старые значения и старые привычки продолжают работать."""
+    from sniperbot.settings_registry import parse_ladder
+
+    assert parse_ladder("100:50,300:30") == "100:50,300:30"
+    assert parse_ladder("50%:40") == "50:40"
+
+
+def test_ladder_steps_are_sorted_by_growth():
+    from sniperbot.settings_registry import parse_ladder
+
+    assert parse_ladder("[[3, 30], [1.5, 40]]") == "50:40,200:30"
+
+
+def test_a_multiplier_written_as_percent_is_caught():
+    """1.5:40 — это почти наверняка ×1.5, а не ступень в полутора процентах."""
+    from sniperbot.settings_registry import parse_ladder
+
+    with pytest.raises(ValueError, match="1.5x"):
+        parse_ladder("1.5:40")
+
+
+def test_multiplier_below_one_is_rejected():
+    from sniperbot.settings_registry import parse_ladder
+
+    with pytest.raises(ValueError, match="больше 1"):
+        parse_ladder("[[0.9, 40]]")
+
+
+def test_broken_ladder_input_is_explained():
+    from sniperbot.settings_registry import parse_ladder
+
+    with pytest.raises(ValueError, match=r"\[\[1.5, 40\]"):
+        parse_ladder("[[1.5, 40], [3]]")
+    with pytest.raises(ValueError, match="больше 100"):
+        parse_ladder("[[1.5, 60], [3, 60]]")
+    with pytest.raises(ValueError, match="от 1 до 100"):
+        parse_ladder("[[1.5, 0]]")
+
+
+def test_ladder_switches_off():
+    from sniperbot.settings_registry import parse_ladder
+
+    for text in ("", "off", "выкл", "[]"):
+        assert parse_ladder(text) == ""
+
+
+def test_ladder_is_shown_as_multipliers():
+    from sniperbot.settings_registry import format_ladder
+
+    assert format_ladder("50:40,200:30,900:30") == "×1.5 → 40% · ×3 → 30% · ×10 → 30%"
+    assert format_ladder("") == "выключена"
+
+
+def test_ladder_note_spells_out_the_growth_and_the_remainder():
+    """Чтобы не гадать, что бот понял из [[1.5, 40], [3, 30]]."""
+    from sniperbot.settings_registry import ladder_note
+
+    note = ladder_note("50:40,200:30")
+    assert "+50% → 40%" in note and "+200% → 30%" in note
+    assert "остальные 30%" in note
+
+    assert "целиком" in ladder_note("50:40,200:30,900:30")
+
+
+def test_ladder_note_warns_which_steps_the_secure_sale_will_take():
+    """Иначе остаётся вопрос, почему ступень ×3 так и не сработала."""
+    from sniperbot.settings_registry import ladder_note
+
+    note = ladder_note("50:40,200:30,900:30", secure_pct=40)
+    assert "71% позиции" in note              # 1/1.4 — столько вернёт вложенное
+    assert "×1.5, ×3" in note                 # эти ступени возврат закрывает
+    assert "×10" not in note.split("закроет ступени")[1].split("—")[0]
+    assert "/set secure 0" in note
+
+    # Высокий порог возврата продаёт мало и лестницу не трогает.
+    high = ladder_note("50:40,200:30,900:30", secure_pct=400)
+    assert "закроет ступени" not in high
