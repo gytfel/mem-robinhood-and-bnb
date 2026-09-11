@@ -12,8 +12,11 @@ import pytest
 from sniperbot.db.models import Position
 from sniperbot.reports import (
     EXIT_TITLES,
+    peak_change,
     render_report,
+    render_secure,
     render_summary,
+    secure_grid,
     summarize,
     to_rows,
     trades_csv,
@@ -340,3 +343,57 @@ def test_reason_rows_rank_by_money_not_by_count():
 
     assert ranked[0].reason == "слив ликвидности"   # одна сделка, но дороже всех
     assert ranked[0].count == 1
+
+
+# ----------------------------------------------------- возврат вложенного
+def peaked(symbol: str, spent: str, returned: str, peak: str, **kwargs) -> Position:
+    """Сделка, которая доходила до `peak`× от цены входа."""
+    return trade(symbol, spent, returned, entry_price=Decimal(1),
+                 peak_price=Decimal(peak), **kwargs)
+
+
+def test_peak_change_needs_both_prices():
+    assert peak_change(to_rows([peaked("A", "0.1", "0.04", "1.8")])[0]) == Decimal(80)
+    assert peak_change(to_rows([trade("B", "0.1", "0.04")])[0]) is None
+
+
+def test_grid_counts_rescued_losses_and_clipped_profits():
+    rows = to_rows([
+        peaked("LOSS", "0.1", "0.04", "1.8"),     # доходила до +80%, закрылась в минусе
+        peaked("FLAT", "0.1", "0.09", "1.05"),    # выше +5% не поднималась
+        peaked("WIN", "0.1", "0.35", "3.5"),      # закрылась в плюсе намного выше порога
+    ])
+    grid = {row.trigger: row for row in secure_grid(rows, (40,))}
+    row = grid[40]
+
+    assert row.touched == 2                       # FLAT до порога не дошла
+    assert row.rescued == 1                       # убыточная перестала быть убыточной
+    # Убыточная вернула бы 0.1 − 0.04×(1/1.4); прибыльной срезали бы 0.35×(1/1.4).
+    assert row.delta == pytest.approx(Decimal("0.1") - Decimal("0.04") / Decimal("1.4")
+                                      + Decimal("0.1") - Decimal("0.35") / Decimal("1.4"))
+
+
+def test_grid_is_honest_about_cutting_winners_short():
+    """Если прибыльные уходят далеко вверх, возврат вложенного только мешает."""
+    rows = to_rows([peaked(f"WIN{i}", "0.1", "1.0", "10") for i in range(5)])
+    assert all(row.delta < 0 for row in secure_grid(rows, (40, 100)))
+
+
+def test_small_sample_shows_nothing():
+    """На пяти сделках такая таблица только убеждает в случайном."""
+    rows = to_rows([peaked(f"T{i}", "0.1", "0.04", "1.8") for i in range(5)])
+    assert render_secure(rows, "BNB") == ""
+
+
+def test_render_names_the_best_threshold():
+    rows = to_rows([peaked(f"T{i}", "0.1", "0.04", "1.8") for i in range(12)])
+    text = render_secure(rows, "BNB", current=0)
+
+    assert "Возврат вложенного" in text
+    assert "/set secure" in text
+    assert "убыток снят с 12" in text
+
+
+def test_render_marks_the_threshold_already_set():
+    rows = to_rows([peaked(f"T{i}", "0.1", "0.04", "1.8") for i in range(12)])
+    assert "▸ +40%" in render_secure(rows, "BNB", current=40)

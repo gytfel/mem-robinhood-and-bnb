@@ -30,6 +30,8 @@ from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 log = logging.getLogger(__name__)
 
 MAX_QUOTE_FAILURES = 20
+SELL_GAS_UNITS = 250_000     # типичный расход газа на продажу с запасом
+GAS_CACHE_SECONDS = 60.0     # цена газа меняется медленнее, чем опрашиваются позиции
 
 
 def check_interval(age_minutes: float, fast_interval: float, normal_interval: float,
@@ -64,6 +66,7 @@ class ExitContext:
     liquidity: Decimal | None = None
     peak_liquidity: Decimal | None = None
     age_minutes: float = 0.0
+    exit_cost: Decimal = Decimal(0)      # во что обойдётся сама продажа (газ)
 
 
 RULE_RUG = Rule("rug", "Ликвидность уходит из пула", "🚨")
@@ -74,6 +77,11 @@ RULE_TAKE = Rule("take_profit", "Тейк-профит", "🎉")
 RULE_TRAIL = Rule("trailing", "Трейлинг-стоп", "📉")
 RULE_DEAD = Rule("dead", "Позиция не растёт", "🥱")
 RULE_COLLAPSE = Rule("collapse", "Обвал цены — стоп не успел", "💥")
+RULE_SECURE = Rule("secure", "Возврат вложенного", "🛟")
+
+# После возврата вложенного должно остаться хоть что-то: если продать
+# приходится почти всё, это уже не частичная фиксация, а обычный выход.
+MIN_REMAINDER_PCT = 5
 
 # Падение глубже этого порога за один шаг наблюдения — это не движение цены,
 # а вынутая ликвидность: между проверками промежуточных значений не было.
@@ -90,6 +98,46 @@ def ladder_percent(position: Position, share: int) -> int:
     if wanted >= current:
         return 100
     return max(1, min(100, math.ceil(wanted * 100 / current)))
+
+
+def secure_share(need: Decimal, value: Decimal) -> int:
+    """Какую долю остатка продать, чтобы вернуть вложенное. 0 — не сейчас.
+
+    Ступень лестницы считает долю от размера позиции, и этого мало: продать 40%
+    при росте +50% значит вернуть 60% вложенного, а не всё. Здесь доля считается
+    от денег: сколько нужно вернуть, делённое на то, сколько стоит остаток.
+    После такой продажи сделка уже не может закончиться в минусе — что бы ни
+    случилось с остатком.
+    """
+    if need <= 0 or value <= 0:
+        return 0
+    share = need / value * 100
+    if share > 100 - MIN_REMAINDER_PCT:
+        return 0          # рост ещё не покрывает вложенное вместе с расходами
+    return max(1, int(math.ceil(share)))
+
+
+def retired_steps(position: Position, sold_percent: int) -> list[str]:
+    """Ступени, которые возврат вложенного уже продал за них.
+
+    Лестница и возврат черпают из одной позиции, а доля ступени считается от
+    исходного объёма. Если не погасить перекрытые ступени, следующая проверка
+    продаст ими тот самый хвост, ради которого всё и делалось: ступень «40% от
+    исходного» после возврата 72% требует больше, чем осталось.
+    """
+    bought = position.bought_wei or position.amount_wei
+    if bought <= 0:
+        return ["secure"]
+    sold = Decimal(sold_percent) * position.amount_wei / bought   # доля от исходного объёма
+
+    covered: list[str] = []
+    total = Decimal(0)
+    for growth, share in ladder_steps(position.tp_ladder):
+        total += share
+        if total > sold:
+            break
+        covered.append(str(growth))
+    return ["secure", *covered]
 
 
 def decide_exit(position: Position, ctx: ExitContext) -> tuple[Rule | None, int, str]:
@@ -114,8 +162,21 @@ def decide_exit(position: Position, ctx: ExitContext) -> tuple[Rule | None, int,
     if position.breakeven_armed and ctx.change <= 0:
         return RULE_BREAKEVEN, 100, ""
 
-    # 4. Лестница фиксаций — по одной ступени за проверку.
     done = {step.strip() for step in (position.tp_done or "").split(",") if step.strip()}
+
+    # 4. Возврат вложенного: продаём ровно столько, чтобы вернуть свои деньги.
+    # Идёт раньше лестницы — сначала сделка перестаёт быть убыточной, и только
+    # потом имеет смысл фиксировать прибыль.
+    secure = int(position.secure_pct or 0)
+    if secure and "secure" not in done and ctx.change >= secure:
+        need = (from_wei(position.native_spent_wei or 0)
+                - from_wei(position.native_returned_wei or 0) + ctx.exit_cost)
+        value = from_wei(position.amount_wei, position.token_decimals or 18) * ctx.price
+        share = secure_share(need, value)
+        if share:
+            return RULE_SECURE, share, "secure"
+
+    # 5. Лестница фиксаций — по одной ступени за проверку.
     for growth, share in ladder_steps(position.tp_ladder):
         marker = str(growth)
         if marker in done:
@@ -123,17 +184,17 @@ def decide_exit(position: Position, ctx: ExitContext) -> tuple[Rule | None, int,
         if ctx.change >= growth:
             return RULE_LADDER, ladder_percent(position, share), marker
 
-    # 5. Обычный тейк-профит (если лестница не задана).
+    # 6. Обычный тейк-профит (если лестница не задана).
     if not position.tp_ladder and position.take_profit_pct and ctx.change >= position.take_profit_pct:
         return RULE_TAKE, max(1, min(100, position.sell_percent or 100)), ""
 
-    # 6. Трейлинг-стоп от максимума.
+    # 7. Трейлинг-стоп от максимума.
     if position.trailing_stop_pct and ctx.peak_price > 0:
         drop = (ctx.peak_price - ctx.price) / ctx.peak_price * 100
         if drop >= Decimal(position.trailing_stop_pct) and ctx.change > 0:
             return RULE_TRAIL, 100, ""
 
-    # 7. Позиция висит и не растёт — освобождаем деньги.
+    # 8. Позиция висит и не растёт — освобождаем деньги.
     timeout = int(position.dead_timeout_min or 0)
     if timeout and ctx.age_minutes >= timeout and ctx.peak_change < Decimal(position.dead_min_pct or 0):
         return RULE_DEAD, 100, ""
@@ -153,6 +214,7 @@ class PositionMonitor:
         self._running = False
         self._failures: dict[int, int] = {}
         self._last_check: dict[int, float] = {}
+        self._gas: dict[str, tuple[float, Decimal]] = {}
 
     async def run(self) -> None:
         self._running = True
@@ -235,6 +297,28 @@ class PositionMonitor:
             return None
         return state.liquidity_native
 
+    async def exit_cost(self, chain_key: str) -> Decimal:
+        """Во что обойдётся продажа. Возврат вложенного обязан учесть и это.
+
+        Газ — постоянная величина на сделку, и при малом входе он заметная доля
+        вложенного: вернуть «ровно потраченное» без него значит остаться в минусе
+        на стоимость самой транзакции.
+        """
+        now = asyncio.get_running_loop().time()
+        cached = self._gas.get(chain_key)
+        if cached is not None and now - cached[0] < GAS_CACHE_SECONDS:
+            return cached[1]
+        try:
+            client = self.registry.get(chain_key)
+            fees = await client.gas_fees()
+            price = int(fees.get("gasPrice") or fees.get("maxFeePerGas") or 0)
+            cost = from_wei(price * SELL_GAS_UNITS, client.config.native_decimals)
+        except Exception as exc:  # noqa: BLE001 - без цены газа правило просто строже
+            log.debug("Цена газа для %s недоступна: %s", chain_key, exc)
+            cost = self._gas.get(chain_key, (0.0, Decimal(0)))[1]
+        self._gas[chain_key] = (now, cost)
+        return cost
+
     async def check_position(self, position: Position) -> None:
         if position.amount_wei <= 0 or not position.entry_price:
             return
@@ -287,13 +371,18 @@ class PositionMonitor:
                 "Дальше эта сделка уже не может стать убыточной.",
             )
 
+        cost = await self.exit_cost(position.chain) if position.secure_pct else Decimal(0)
         rule, percent, marker = decide_exit(
             position,
             ExitContext(change=change, peak_change=peak_change, price=price, peak_price=peak_price,
-                        liquidity=liquidity, peak_liquidity=peak_liquidity, age_minutes=age),
+                        liquidity=liquidity, peak_liquidity=peak_liquidity, age_minutes=age,
+                        exit_cost=cost),
         )
         if rule is None:
             return
+        # Метки считаем до продажи: объём позиции нужен тот, что был на входе в правило.
+        markers = retired_steps(position, percent) if rule is RULE_SECURE else (
+            [marker] if marker else [])
 
         async with session_scope() as session:
             user = await session.get(User, position.user_id)
@@ -305,7 +394,9 @@ class PositionMonitor:
         await self.notifier.send(
             position.user_id,
             f"{rule.icon} <b>{rule.title}</b> по {esc(position.token_symbol)} ({change:+.1f}%)\n"
-            f"Продаю {percent}% позиции…",
+            + (f"Продаю {percent}% — столько, чтобы вернуть вложенное. "
+               f"Остальные {100 - percent}% остаются в позиции."
+               if rule is RULE_SECURE else f"Продаю {percent}% позиции…"),
         )
         result = await self.trader.sell(user, fresh, cfg=cfg, percent=percent, reason=rule.key)
         symbol = self.registry.config(position.chain).native_symbol
@@ -321,21 +412,26 @@ class PositionMonitor:
             position.user_id,
             f"✅ Продано {percent}% {esc(position.token_symbol)}\n"
             f"Получено: {fmt_amount(from_wei(result.amount_out))} {symbol}"
+            + (f"\n\n🛟 Вложенное вернулось — что бы дальше ни случилось, "
+               f"эта сделка уже не убыточна. Остаток {100 - percent}% "
+               "едет дальше со стопом в безубытке."
+               if rule is RULE_SECURE else "")
             + (f"\n<a href='{result.explorer_url}'>Транзакция</a>" if result.explorer_url else ""),
         )
 
-        if marker:
-            await self._mark_ladder_step(position.id, marker)
+        if markers:
+            await self._mark_ladder_step(position.id, *markers)
 
-    async def _mark_ladder_step(self, position_id: int, marker: str) -> None:
-        """Помечает ступень как сработавшую, чтобы она не повторилась."""
+    async def _mark_ladder_step(self, position_id: int, *markers: str) -> None:
+        """Помечает ступени как сработавшие, чтобы они не повторились."""
         async with session_scope() as session:
             stored = await session.get(Position, position_id)
             if stored is None:
                 return
             done = [step for step in (stored.tp_done or "").split(",") if step]
-            if marker not in done:
-                done.append(marker)
+            for marker in markers:
+                if marker not in done:
+                    done.append(marker)
             stored.tp_done = ",".join(done)
             # После первой фиксации прибыль уже снята — защищаем остаток.
             if not stored.breakeven_armed:

@@ -25,6 +25,7 @@ SOURCE_TITLES = {
 EXIT_TITLES = {
     "take_profit": "тейк-профит",
     "ladder": "ступень фиксации",
+    "secure": "возврат вложенного",
     "stop_loss": "стоп-лосс",
     "breakeven": "выход в безубыток",
     "trailing": "трейлинг-стоп",
@@ -316,6 +317,87 @@ def render_anatomy(summary: Summary, symbol: str) -> str:
     return "\n".join(parts)
 
 
+# ---------------------------------------------------- возврат вложенного
+MIN_SECURE_SAMPLE = 10
+SECURE_TRIGGERS = (25, 40, 60, 100)
+
+
+@dataclass(slots=True)
+class SecureRow:
+    """Что дал бы возврат вложенного на одном пороге — по реальным сделкам."""
+
+    trigger: int
+    touched: int          # сделок, которые доходили до этого роста
+    rescued: int          # убыточных из них, которые перестали бы быть убыточными
+    delta: Decimal        # насколько изменился бы итог, с учётом срезанной прибыли
+
+
+def peak_change(row: TradeRow) -> Decimal | None:
+    """Лучший рост сделки в процентах: до какой высоты она доходила."""
+    position = row.position
+    entry, peak = position.entry_price, position.peak_price
+    if not entry or entry <= 0 or not peak or peak <= 0:
+        return None
+    return (peak / entry - 1) * 100
+
+
+def secure_grid(rows: list[TradeRow], triggers: tuple[int, ...] = SECURE_TRIGGERS) -> list[SecureRow]:
+    """Проигрывает закрытые сделки заново с возвратом вложенного.
+
+    Модель простая и умышленно строгая к самой идее: на пороге продаётся доля
+    1/(1+рост) — ровно столько, чтобы вернуть вложенное, — а остаток проходит
+    тот же путь, что сделка прошла на самом деле. Поэтому у сделок, которые
+    закрылись выше порога, часть прибыли срезается, и это попадает в итог
+    наравне со спасёнными убытками.
+    """
+    grid: list[SecureRow] = []
+    for trigger in triggers:
+        share = Decimal(100) / (100 + trigger)     # доля позиции, возвращающая вложенное
+        touched = rescued = 0
+        delta = Decimal(0)
+        for row in rows:
+            peak = peak_change(row)
+            if peak is None or peak < trigger or row.spent <= 0:
+                continue
+            touched += 1
+            delta += row.spent - row.returned * share
+            # Итог сделки после возврата — это (1 − доля) × то, что она принесла,
+            # то есть никогда не минус: вложенное уже лежит на кошельке.
+            if not row.profitable:
+                rescued += 1
+        grid.append(SecureRow(trigger, touched, rescued, delta))
+    return grid
+
+
+def render_secure(rows: list[TradeRow], symbol: str, current: int = 0) -> str:
+    """Таблица порогов возврата вложенного по собственным сделкам."""
+    usable = [row for row in rows if peak_change(row) is not None]
+    if len(usable) < MIN_SECURE_SAMPLE:
+        return ""
+    grid = [item for item in secure_grid(usable) if item.touched]
+    if not grid:
+        return ""
+
+    parts = ["🛟 <b>Возврат вложенного</b>",
+             f"Что было бы, если продавать часть позиции на росте — по вашим "
+             f"{len(usable)} сделкам:"]
+    best = max(grid, key=lambda item: item.delta)
+    for item in grid:
+        mark = "▸" if item.trigger == current else ("★" if item is best and best.delta > 0 else "·")
+        sign = "+" if item.delta > 0 else ""
+        parts.append(f"{mark} +{item.trigger}%: доходили {item.touched} сдел. · "
+                     f"убыток снят с {item.rescued} · итог {sign}{fmt_amount(item.delta)} {symbol}")
+
+    if best.delta > 0 and best.trigger != current:
+        parts.append(f"\nЛучший порог по этим сделкам: <code>/set secure {best.trigger}</code>")
+    elif best.delta <= 0:
+        parts.append("\nНа этих сделках возврат вложенного срезал бы больше прибыли, "
+                     "чем спасал убытков: прибыльные уходили заметно выше порога.")
+    parts.append("<i>Оценка без учёта газа на дополнительную продажу: остаток "
+                 "проходит тот же путь, что прошла сделка на самом деле.</i>")
+    return "\n".join(parts)
+
+
 def source_breakdown(rows: list[TradeRow], symbol: str) -> list[str]:
     """Что приносит деньги: снайп листингов, перехват разгона или ручные покупки.
 
@@ -338,7 +420,8 @@ def source_breakdown(rows: list[TradeRow], symbol: str) -> list[str]:
 
 
 def render_report(real: Summary, paper: Summary, days: int | None, symbol: str,
-                  open_positions: int = 0, now: dt.datetime | None = None) -> str:
+                  open_positions: int = 0, now: dt.datetime | None = None,
+                  secure_now: int = 0) -> str:
     """Полный отчёт: боевой режим и тестовый рядом."""
     label = period_label(days, [*real.rows, *paper.rows], now)
     parts = [f"🧾 <b>Отчёт по сделкам</b> {label}\n"]
@@ -361,9 +444,14 @@ def render_report(real: Summary, paper: Summary, days: int | None, symbol: str,
         parts.append("\n🎯 <b>По способу входа</b>\n" + "\n".join(by_source))
 
     # Разбор делаем по тому режиму, где сделок больше: там выводы надёжнее.
-    anatomy = render_anatomy(real if real.count >= paper.count else paper, symbol)
+    best = real if real.count >= paper.count else paper
+    anatomy = render_anatomy(best, symbol)
     if anatomy:
         parts.append("\n" + anatomy)
+
+    secure = render_secure(best.rows, symbol, secure_now)
+    if secure:
+        parts.append("\n" + secure)
 
     if open_positions:
         parts.append(f"\nОткрытых позиций сейчас: <b>{open_positions}</b> "

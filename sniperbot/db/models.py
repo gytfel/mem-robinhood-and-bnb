@@ -160,6 +160,7 @@ class ChainSettings(Base):
     trailing_stop_pct: Mapped[int] = mapped_column(Integer, default=0)   # 0 = выключен
     sell_percent: Mapped[int] = mapped_column(Integer, default=100)      # доля позиции при TP
     tp_ladder: Mapped[str] = mapped_column(String(64), default="")       # «100:50,300:30»
+    secure_pct: Mapped[int] = mapped_column(Integer, default=40)         # вернуть вложенное после +N%
     breakeven_pct: Mapped[int] = mapped_column(Integer, default=50)      # стоп в безубыток после +N%
     rug_guard_pct: Mapped[int] = mapped_column(Integer, default=50)      # выход при сливе ликвидности
     dead_timeout_min: Mapped[int] = mapped_column(Integer, default=0)    # выход из «мёртвой» позиции
@@ -235,6 +236,7 @@ class Position(Base):
     sell_percent: Mapped[int] = mapped_column(Integer, default=100)
     tp_ladder: Mapped[str] = mapped_column(String(64), default="")
     tp_done: Mapped[str] = mapped_column(String(64), default="")          # сработавшие ступени
+    secure_pct: Mapped[int] = mapped_column(Integer, default=0)           # возврат вложенного после +N%
     breakeven_pct: Mapped[int] = mapped_column(Integer, default=0)
     breakeven_armed: Mapped[bool] = mapped_column(Boolean, default=False)
     rug_guard_pct: Mapped[int] = mapped_column(Integer, default=0)

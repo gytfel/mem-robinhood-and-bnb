@@ -30,6 +30,7 @@ from sniperbot.reports import (
     period_label,
     render_anatomy,
     render_report,
+    render_secure,
     render_summary,
     summarize,
     to_rows,
@@ -60,7 +61,7 @@ def _since(days: int | None) -> dt.datetime | None:
 
 @router.message(Command("pnl"))
 async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, user: User,
-                  chain) -> None:
+                  cfg, chain) -> None:
     """Отчёт по одному режиму: боевому или тестовому."""
     days, paper = _days_arg(command.args)
 
@@ -79,6 +80,9 @@ async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, use
     anatomy = render_anatomy(summary, chain.native_symbol)
     if anatomy:
         text += "\n\n" + anatomy
+    secure = render_secure(summary.rows, chain.native_symbol, int(cfg.secure_pct or 0))
+    if secure:
+        text += "\n\n" + secure
     windows = period_breakdown(summary.rows, chain.native_symbol)
     if windows and days is None:
         text += "\n\n📅 <b>По периодам</b>\n" + "\n".join(windows)
@@ -91,7 +95,7 @@ async def cmd_pnl(message: Message, command: CommandObject, ctx: BotContext, use
 
 @router.message(Command("report"))
 async def cmd_report(message: Message, command: CommandObject, ctx: BotContext, user: User,
-                     chain) -> None:
+                     cfg, chain) -> None:
     """Сводный отчёт: боевые и тестовые сделки рядом, плюс файл со всеми."""
     days, _ = _days_arg(command.args)
     since = _since(days)
@@ -113,7 +117,8 @@ async def cmd_report(message: Message, command: CommandObject, ctx: BotContext, 
         )
         return
 
-    await reply(message, render_report(real, paper, days, chain.native_symbol, len(open_positions)))
+    await reply(message, render_report(real, paper, days, chain.native_symbol,
+                                       len(open_positions), secure_now=int(cfg.secure_pct or 0)))
     await _send_file(
         message,
         [*real.rows, *paper.rows],

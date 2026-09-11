@@ -7,7 +7,13 @@ from decimal import Decimal
 import pytest
 
 from sniperbot.db.models import Position
-from sniperbot.sniper.positions import ExitContext, decide_exit, ladder_percent
+from sniperbot.sniper.positions import (
+    ExitContext,
+    decide_exit,
+    ladder_percent,
+    retired_steps,
+    secure_share,
+)
 from sniperbot.utils.fmt import to_wei
 
 
@@ -25,7 +31,7 @@ def position(**kwargs) -> Position:
 
 
 def ctx(change, *, peak_change=None, price=None, peak_price=None,
-        liquidity=None, peak_liquidity=None, age_minutes=0.0) -> ExitContext:
+        liquidity=None, peak_liquidity=None, age_minutes=0.0, exit_cost=0) -> ExitContext:
     change = Decimal(str(change))
     price = Decimal(str(price)) if price is not None else Decimal(1) + change / 100
     peak_change = Decimal(str(peak_change)) if peak_change is not None else max(change, Decimal(0))
@@ -35,6 +41,7 @@ def ctx(change, *, peak_change=None, price=None, peak_price=None,
         liquidity=Decimal(str(liquidity)) if liquidity is not None else None,
         peak_liquidity=Decimal(str(peak_liquidity)) if peak_liquidity is not None else None,
         age_minutes=age_minutes,
+        exit_cost=Decimal(str(exit_cost)),
     )
 
 
@@ -274,3 +281,150 @@ def test_unknown_liquidity_never_triggers_a_rug_exit():
         ctx(15, liquidity=None, peak_liquidity=10),
     )
     assert rule is None
+
+
+# ------------------------------------------------------- возврат вложенного
+def secured(**kwargs):
+    """Позиция на 100 токенов, купленных за 100 монет: цена входа — единица."""
+    defaults = {"native_spent_wei": to_wei(100), "native_returned_wei": 0,
+                "token_decimals": 18, "secure_pct": 40, "take_profit_pct": 0,
+                "stop_loss_pct": 0}
+    defaults.update(kwargs)
+    return position(**defaults)
+
+
+def test_secure_sells_exactly_what_returns_the_stake():
+    """Ступень «40% на +50%» вернула бы 60% вложенного; здесь возвращается всё."""
+    rule, percent, marker = decide_exit(secured(), ctx(50))
+
+    assert rule.key == "secure" and marker == "secure"
+    assert percent == 67                      # 100 из 150 = 2/3 остатка
+    # Проверка смысла: проданная доля по текущей цене покрывает вложенное.
+    assert Decimal(percent) / 100 * Decimal("1.5") * 100 >= 100
+
+
+def test_secure_includes_the_cost_of_its_own_sale():
+    """Газ — не мелочь при малом входе: вернуть «ровно вложенное» его не покроет."""
+    without = decide_exit(secured(), ctx(50))[1]
+    with_gas = decide_exit(secured(), ctx(50, exit_cost=15))[1]
+    assert with_gas > without == 67
+    assert with_gas == 77                     # (100 + 15) из 150
+
+
+def test_secure_waits_until_growth_covers_the_stake():
+    """На +5% пришлось бы продать почти всё — это уже не частичная фиксация."""
+    rule, _, _ = decide_exit(secured(secure_pct=5), ctx(5))
+    assert rule is None
+
+
+def test_secure_counts_money_already_returned():
+    """После ступени лестницы вернуть нужно только остаток долга."""
+    rule, percent, _ = decide_exit(secured(native_returned_wei=to_wei(60)), ctx(50))
+    assert rule.key == "secure"
+    assert percent == 27                      # 40 из 150
+
+
+def test_secure_happens_once():
+    assert decide_exit(secured(tp_done="secure"), ctx(80))[0] is None
+
+
+def test_secure_goes_before_the_ladder():
+    """Сначала сделка перестаёт быть убыточной, фиксация прибыли — потом."""
+    rule, _, _ = decide_exit(secured(tp_ladder="50:40"), ctx(50))
+    assert rule.key == "secure"
+
+
+def test_secure_retires_the_steps_it_already_sold_for():
+    """Иначе следующая проверка продаст ступенью тот самый оставленный хвост."""
+    pos = secured(tp_ladder="50:40,150:30")
+
+    # Продали 72% — это больше, чем обе ступени вместе (40 + 30).
+    assert retired_steps(pos, 72) == ["secure", "50", "150"]
+    # Продали 50% — первой ступени хватило, вторая ещё своё возьмёт.
+    assert retired_steps(pos, 50) == ["secure", "50"]
+    assert retired_steps(pos, 30) == ["secure"]
+
+
+def test_retired_steps_count_from_the_original_size():
+    """Доля ступени считается от исходного объёма — значит и проданное тоже."""
+    # Половина позиции уже продана раньше; 80% остатка — это 40% исходного.
+    pos = secured(tp_ladder="50:40,150:30", amount_wei=to_wei(50), bought_wei=to_wei(100))
+    assert retired_steps(pos, 80) == ["secure", "50"]
+    assert retired_steps(pos, 50) == ["secure"]
+
+
+def test_saving_money_never_outranks_saving_the_position():
+    """Стоп и слив ликвидности важнее: возврат вложенного — про прибыль."""
+    assert decide_exit(secured(stop_loss_pct=30), ctx(-40))[0].key == "stop_loss"
+    assert decide_exit(secured(rug_guard_pct=25),
+                       ctx(50, liquidity=1, peak_liquidity=10))[0].key == "rug"
+
+
+def test_secure_is_off_by_default_for_old_positions():
+    """У позиций, открытых до обновления, поля нет — правило молчит."""
+    assert decide_exit(position(secure_pct=None, take_profit_pct=0), ctx(80))[0] is None
+
+
+@pytest.mark.parametrize("need,value,expected", [
+    (Decimal(100), Decimal(200), 50),      # рост вдвое — половина остатка
+    (Decimal(100), Decimal(150), 67),      # +50% — две трети
+    (Decimal(100), Decimal(101), 0),       # почти вся позиция: не наш случай
+    (Decimal(0), Decimal(150), 0),         # возвращать нечего
+    (Decimal(100), Decimal(0), 0),         # остаток ничего не стоит
+])
+def test_secure_share_arithmetic(need, value, expected):
+    assert secure_share(need, value) == expected
+
+
+def walk(pos, prices) -> list[tuple[str, int]]:
+    """Прогоняет позицию по ценам так, как это делает монитор."""
+    trades = []
+    for change in prices:
+        for _ in range(4):        # за одну проверку срабатывает одно правило
+            rule, percent, marker = decide_exit(pos, ctx(change))
+            if rule is None:
+                break
+            # Порядок как в мониторе: метки считаются от объёма до продажи.
+            markers = retired_steps(pos, percent) if rule.key == "secure" else (
+                [marker] if marker else [])
+            sold = pos.amount_wei * percent // 100
+            price = Decimal(1) + Decimal(change) / 100
+            pos.native_returned_wei += int(sold * price)
+            pos.amount_wei -= sold
+            done = [step for step in (pos.tp_done or "").split(",") if step]
+            pos.tp_done = ",".join(done + [m for m in markers if m not in done])
+            if rule.key in {"secure", "ladder"}:
+                pos.breakeven_armed = True
+            trades.append((rule.key, percent))
+            if pos.amount_wei <= 0:
+                return trades
+    return trades
+
+
+def test_the_runner_survives_the_steps_the_secure_sale_covered():
+    """Главная ловушка: ступень «40% от исходного» снесла бы хвост целиком."""
+    pos = secured(tp_ladder="50:40", trailing_stop_pct=0, native_spent_wei=to_wei(100))
+    trades = walk(pos, [45, 60, 200, 400])
+
+    assert trades == [("secure", 69)]               # ступень погашена возвратом
+    assert pos.amount_wei > 0                       # хвост едет дальше
+    assert pos.native_returned_wei >= to_wei(100)   # вложенное уже на кошельке
+
+
+def test_a_step_the_secure_sale_did_not_cover_still_takes_its_profit():
+    """Возврат продал 69% исходного объёма, обе ступени просят 70% — вторая жива."""
+    pos = secured(tp_ladder="50:40,150:30", trailing_stop_pct=0, native_spent_wei=to_wei(100))
+    trades = walk(pos, [45, 60, 200])
+
+    assert [rule for rule, _ in trades] == ["secure", "ladder"]
+    assert pos.native_returned_wei > to_wei(150)    # вложенное плюс прибыль ступени
+
+
+def test_secure_on_a_big_jump_covers_the_whole_ladder():
+    """Чем выше рост, тем меньше доля возврата — но ступени она всё равно закрывает."""
+    pos = secured(secure_pct=100, tp_ladder="150:30", trailing_stop_pct=0,
+                  native_spent_wei=to_wei(100))
+    trades = walk(pos, [120, 200])
+
+    assert [rule for rule, _ in trades] == ["secure"]
+    assert pos.amount_wei > 0

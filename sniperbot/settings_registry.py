@@ -156,6 +156,10 @@ SETTINGS: tuple[Setting, ...] = (
             "Ступени тейк-профита «рост:доля», например 100:50,300:30 — "
             "продать половину на +100% и ещё треть на +300%. Пусто — обычный TP",
             "exits"),
+    Setting("secure", "secure_pct", "chain", "int", "Возврат вложенного",
+            "После роста на N% продать ровно столько, чтобы вернуть потраченное — "
+            "дальше сделка не может стать убыточной. Остаток едет дальше. 0 — выключено",
+            "exits", unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
     Setting("breakeven", "breakeven_pct", "chain", "int", "Стоп в безубыток",
             "После роста на N% стоп-лосс переносится в точку входа. 0 — выключено",
             "exits", unit="%", minimum=Decimal(0), maximum=Decimal(1000)),
@@ -303,7 +307,7 @@ PRESETS: tuple[Preset, ...] = (
         "не терять, чем поймать иксы.",
         {
             "slippage": "20", "gasmode": "fast",
-            "tp": "120", "sl": "35", "trail": "40", "ladder": "60:40,200:30",
+            "tp": "120", "sl": "35", "trail": "40", "ladder": "60:40,200:30", "secure": "35",
             "breakeven": "40", "rugguard": "40", "deadtime": "45", "deadpct": "15",
             "exitgas": "2", "exitslip": "35",
             "minliq": "3", "buytax": "8", "selltax": "8", "ownershare": "10",
@@ -319,7 +323,7 @@ PRESETS: tuple[Preset, ...] = (
         "мягче, зато покупка идёт по факту движения.",
         {
             "slippage": "25", "gasmode": "fast",
-            "tp": "100", "sl": "30", "trail": "35", "ladder": "50:40,150:30",
+            "tp": "100", "sl": "30", "trail": "35", "ladder": "50:40,150:30", "secure": "40",
             "breakeven": "30", "rugguard": "40", "deadtime": "30", "deadpct": "10",
             "exitgas": "2", "exitslip": "35",
             "minliq": "2", "buytax": "10", "selltax": "10", "ownershare": "15",
@@ -335,7 +339,7 @@ PRESETS: tuple[Preset, ...] = (
         "сделок будет больше — расчёт на редкие крупные иксы.",
         {
             "slippage": "30", "gasmode": "turbo",
-            "tp": "200", "sl": "45", "trail": "45", "ladder": "100:50,300:25",
+            "tp": "200", "sl": "45", "trail": "45", "ladder": "100:50,300:25", "secure": "60",
             "breakeven": "50", "rugguard": "50", "deadtime": "60", "deadpct": "20",
             "exitgas": "2.5", "exitslip": "40",
             "minliq": "1", "buytax": "12", "selltax": "12", "ownershare": "20",

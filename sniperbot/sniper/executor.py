@@ -839,6 +839,7 @@ class Trader:
             position.auto_sell = cfg.auto_sell
             position.sell_percent = cfg.sell_percent
             position.tp_ladder = cfg.tp_ladder or ""
+            position.secure_pct = cfg.secure_pct
             position.breakeven_pct = cfg.breakeven_pct
             position.rug_guard_pct = cfg.rug_guard_pct
             position.dead_timeout_min = cfg.dead_timeout_min
