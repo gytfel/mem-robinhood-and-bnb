@@ -148,3 +148,44 @@ def test_ab_value_with_spaces_reaches_the_setting():
     from sniperbot.settings_registry import find
 
     assert find("tp").parse(parts[2]) == "50:40,200:30"
+
+
+# ----------------------------------------- карточка открывается сразу, без сети
+def test_card_renders_from_the_stored_price():
+    """Экран не должен ждать ноду: нет цены из сети — показываем последнюю известную."""
+    from decimal import Decimal
+
+    from sniperbot.bot.views import render_position
+    from sniperbot.config import ChainConfig
+    from sniperbot.utils.fmt import to_wei
+
+    chain = ChainConfig(key="rh", name="Robinhood Chain", chain_id=1, native_symbol="ETH",
+                        rpc_urls=["http://localhost"], wrapped_native="0x" + "b" * 40)
+    position = exit_position(
+        token_address="0x" + "a" * 40, token_decimals=18, amount_wei=to_wei(1000),
+        native_spent_wei=to_wei("0.001"), native_returned_wei=0,
+        entry_price=Decimal("0.000001"), last_price=Decimal("0.0000015"), status="open",
+        ab_group="",
+    )
+
+    stale = render_position(position, chain, position.last_price, stale=True)
+    assert "из последней проверки" in stale
+    assert "P&L" in stale                      # оценка есть сразу, а не после ноды
+
+    fresh = render_position(position, chain, Decimal("0.0000016"))
+    assert "из последней проверки" not in fresh
+
+
+def test_card_without_any_price_still_opens():
+    from sniperbot.bot.views import render_position
+    from sniperbot.config import ChainConfig
+    from sniperbot.utils.fmt import to_wei
+
+    chain = ChainConfig(key="rh", name="Robinhood Chain", chain_id=1, native_symbol="ETH",
+                        rpc_urls=["http://localhost"], wrapped_native="0x" + "b" * 40)
+    position = exit_position(token_address="0x" + "a" * 40, token_decimals=18,
+                             amount_wei=to_wei(1000), native_spent_wei=to_wei("0.001"),
+                             native_returned_wei=0, last_price=None, status="open", ab_group="")
+
+    text = render_position(position, chain, None, stale=True)
+    assert "Позиция #1" in text and "Остаток" in text

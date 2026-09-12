@@ -209,3 +209,29 @@ async def test_a_quiet_pool_is_polled_less_often(db):
     first = trader.quotes
     await watcher.tick()                            # сразу же — интервал ещё не вышел
     assert trader.quotes == first
+
+
+# --------------------------------------------- экран не ждёт молчащую ноду
+async def test_price_lookup_gives_up_instead_of_hanging(db):
+    """Нода может думать десятками секунд — карточка столько ждать не должна."""
+    import asyncio
+
+    from sniperbot.bot.handlers.positions import _price
+
+    class Slow(FakeTrader):
+        async def sell_route(self, client, position, token, amount):  # noqa: ANN001
+            await asyncio.sleep(30)
+
+    class Ctx:
+        registry = FakeRegistry()
+        trader = Slow()
+        notifier = Silent()
+        settings = Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32)
+
+    position = await open_position()
+    started = asyncio.get_running_loop().time()
+    price = await _price(Ctx(), position, timeout=0.2)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert price is None
+    assert elapsed < 1, "ожидание должно обрываться по таймауту"

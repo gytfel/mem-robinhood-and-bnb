@@ -133,7 +133,9 @@ def render_report(report: SafetyReport, chain: ChainConfig) -> str:
     return "\n".join(lines)
 
 
-def render_position(position: Position, chain: ChainConfig, price: Decimal | None) -> str:
+def render_position(position: Position, chain: ChainConfig, price: Decimal | None,
+                    *, stale: bool = False) -> str:
+    """Карточка позиции. ``stale`` — цена из последней проверки, а не из сети."""
     tokens = from_wei(position.amount_wei, position.token_decimals)
     spent = from_wei(position.native_spent_wei, chain.native_decimals)
     returned = from_wei(position.native_returned_wei, chain.native_decimals)
@@ -159,7 +161,8 @@ def render_position(position: Position, chain: ChainConfig, price: Decimal | Non
     if position.entry_price:
         lines.append(f"🎯 Вход: {fmt_amount(position.entry_price, 12)} {chain.native_symbol}")
     if price is not None:
-        lines.append(f"💱 Сейчас: {fmt_amount(price, 12)} {chain.native_symbol}")
+        lines.append(f"💱 Сейчас: {fmt_amount(price, 12)} {chain.native_symbol}"
+                     + (" <i>(из последней проверки)</i>" if stale else ""))
     lines.append("🤖 Автовыход: " + exit_rules(position))
     if position.ab_group:
         # Иначе непонятно, почему у этой позиции правила не те, что в /config.

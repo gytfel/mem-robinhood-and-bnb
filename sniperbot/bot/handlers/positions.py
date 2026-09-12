@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -46,10 +47,19 @@ async def cb_position(callback: CallbackQuery, callback_data: PosCB, ctx: BotCon
     if position is None:
         await callback.answer("Позиция не найдена", show_alert=True)
         return
+
     chain = ctx.chain(position.chain)
+    markup = position_actions(position.id)
     await callback.answer()
+
+    # Карточку показываем сразу по последней известной цене: нода может думать
+    # секундами, а экран, который не открылся, выглядит сломанной кнопкой.
+    await safe_edit(callback, render_position(position, chain, position.last_price, stale=True),
+                    markup)
+
     price = await _price(ctx, position)
-    await safe_edit(callback, render_position(position, chain, price), position_actions(position.id))
+    if price is not None and price != position.last_price:
+        await safe_edit(callback, render_position(position, chain, price), markup)
 
 
 @router.callback_query(PosCB.filter(F.action == "sell"))
@@ -213,10 +223,18 @@ async def _positions_view(ctx: BotContext, user: User):
     return render_positions_list(positions, names), positions_list(positions)
 
 
-async def _price(ctx: BotContext, position):
+# Дольше этого экран ждать не должен: у клиента сети свои повторы по нескольким
+# нодам, и без ограничения одна молчащая нода держит карточку десятками секунд.
+PRICE_TIMEOUT = 6.0
+
+
+async def _price(ctx: BotContext, position, timeout: float = PRICE_TIMEOUT):
     monitor = PositionMonitor(ctx.registry, ctx.trader, ctx.notifier, ctx.settings)
     try:
-        return await monitor.current_price(position)
+        return await asyncio.wait_for(monitor.current_price(position), timeout)
+    except TimeoutError:
+        log.info("Позиция #%s: цена не пришла за %.0f с", position.id, timeout)
+        return None
     except Exception as exc:  # noqa: BLE001 - пул мог опустеть
         log.debug("Не смог оценить позицию #%s: %s", position.id, exc)
         return None
