@@ -234,3 +234,35 @@ async def test_invited_friends_are_counted_on_the_screens(db, ctx):
 
     main = await render_main(ctx, data["user"], data["cfg"], data["chain"], open_positions=0)
     assert "2 из 3" in main and "осталось 1" in main
+
+
+# ------------------------------------------------- вывод: сеть должна быть названа
+def test_withdraw_confirmation_names_the_network():
+    """Деньги «пропадают» именно здесь: адрес один во всех EVM-сетях."""
+    import inspect
+
+    from sniperbot.bot.handlers import wallet
+
+    source = inspect.getsource(wallet._do_withdraw)
+    assert "Сеть" in source and "chain.name" in source
+    assert "видны только в сети" in source
+    assert "Биржи" in source, "биржевой адрес в чужой сети — потеря денег"
+
+
+def test_withdraw_asks_for_the_amount_with_the_network_in_sight():
+    import inspect
+
+    from sniperbot.bot.handlers import wallet
+
+    source = inspect.getsource(wallet.withdraw_address)
+    assert "Сеть:" in source, "сеть должна быть видна до необратимого шага"
+
+
+def test_an_address_typed_instead_of_the_amount_is_recognised():
+    import inspect
+
+    from sniperbot.bot.handlers import wallet
+
+    source = inspect.getsource(wallet.withdraw_amount)
+    assert "extract_address" in source
+    assert "Адрес уже принят" in source

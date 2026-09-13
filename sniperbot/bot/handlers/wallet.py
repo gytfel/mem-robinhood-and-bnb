@@ -131,7 +131,8 @@ async def withdraw_address(message: Message, state: FSMContext, chain: ChainConf
     await state.set_state(WithdrawStates.amount)
     await reply(
         message,
-        f"Сколько {chain.native_symbol} вывести на\n<code>{address}</code>?\n\n"
+        f"Сколько {chain.native_symbol} вывести на\n<code>{address}</code>?\n"
+        f"Сеть: <b>{esc(chain.name)}</b> — монеты придут только в ней.\n\n"
         "Пришлите число или слово <b>всё</b>.",
         cancel_kb("wallet"),
     )
@@ -150,7 +151,12 @@ async def withdraw_amount(
     else:
         amount = parse_decimal(raw)
         if amount is None or amount <= 0:
-            await reply(message, "❌ Не понял сумму. Пришлите число или «всё».", cancel_kb("wallet"))
+            # Чаще всего сюда прилетает адрес: человек прислал всё одной строкой.
+            hint = ("Адрес уже принят — сейчас нужна только сумма.\n"
+                    if extract_address(message.text or "") else "")
+            await reply(message, f"❌ Не понял сумму.\n{hint}"
+                                 f"Пришлите число (например <code>0.05</code>) или слово «всё».",
+                        cancel_kb("wallet"))
             return
     await state.clear()
     await _do_withdraw(message, ctx, user, cfg, chain, address, amount)
@@ -204,7 +210,14 @@ async def _do_withdraw(
         )
     await status.edit_text(
         f"✅ Отправлено <b>{fmt_amount(from_wei(actual, chain.native_decimals))} {chain.native_symbol}</b>\n"
-        f"на <code>{address}</code>\n\n"
+        f"на <code>{address}</code>\n"
+        f"🌐 Сеть: <b>{esc(chain.name)}</b>"
+        + (f" (chain id {chain.chain_id})" if chain.chain_id else "") + "\n\n"
+        # Деньги «пропадают» почти всегда здесь: адрес один и тот же во всех
+        # EVM-сетях, а монеты лежат только в той, где прошла транзакция.
+        f"<i>Монеты видны только в сети {esc(chain.name)}. В кошельке должна быть "
+        f"добавлена именно она — в другой сети по тому же адресу будет пусто. "
+        f"Биржи эту сеть обычно не принимают: вывод на биржевой адрес пропадёт.</i>\n\n"
         f"<a href='{chain.tx_url(sent.tx_hash)}'>Транзакция</a>",
         parse_mode="HTML",
         disable_web_page_preview=True,
