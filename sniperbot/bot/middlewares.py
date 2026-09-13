@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from aiogram.types import User as TgUser
 
@@ -46,6 +47,25 @@ async def refuse(event: TelegramObject, text: str) -> None:
         await event.answer(text)
     elif isinstance(event, CallbackQuery):
         await event.answer(text, show_alert=True)
+
+
+class CommandEscapeMiddleware(BaseMiddleware):
+    """Команда прерывает пошаговый ввод.
+
+    Бот, ждущий сумму вывода, перехватывал любое сообщение — включая /positions
+    и /help — и отвечал «не понял сумму». Выглядит как поломка, а на деле режим
+    ввода просто не отпускал. Сбрасываем его до того, как сработают фильтры:
+    состояние, вычисленное для этого обновления, иначе останется прежним, и
+    команда снова уйдёт в обработчик ввода.
+    """
+
+    async def __call__(self, handler, event: TelegramObject, data: dict[str, Any]) -> Any:  # noqa: ANN001
+        state: FSMContext | None = data.get("state")
+        text = getattr(event, "text", "") or ""
+        if state is not None and text.startswith("/") and data.get("raw_state") is not None:
+            await state.clear()
+            data["raw_state"] = None
+        return await handler(event, data)
 
 
 class UserMiddleware(BaseMiddleware):

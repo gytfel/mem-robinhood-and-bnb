@@ -14,7 +14,11 @@ from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 from sniperbot.access import STATE_EXTRA, STATE_MODE, AccessPolicy, parse_ids
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.handlers import build_router
-from sniperbot.bot.middlewares import AccessMiddleware, UserMiddleware
+from sniperbot.bot.middlewares import (
+    AccessMiddleware,
+    CommandEscapeMiddleware,
+    UserMiddleware,
+)
 from sniperbot.bot.startup import collect_stats, record_start, record_stop, render_restart
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.wallet import WalletService
@@ -236,6 +240,9 @@ async def run_bot() -> None:
     dp["ctx"] = ctx
     access = AccessMiddleware(policy)
     users = UserMiddleware(ctx)
+    # Внешняя мидлварь — до фильтров: она решает судьбу режима ввода раньше,
+    # чем состояние повлияет на выбор обработчика.
+    dp.message.outer_middleware(CommandEscapeMiddleware())
     for observer in (dp.message, dp.callback_query):
         observer.middleware(access)
         observer.middleware(users)
