@@ -396,6 +396,8 @@ class PositionMonitor:
                 "Дальше эта сделка уже не может стать убыточной.",
             )
 
+        await self._heal_take_profit(position)
+
         cost = await self.exit_cost(position.chain) if position.secure_pct else Decimal(0)
         rule, percent, marker = decide_exit(
             position,
@@ -446,6 +448,39 @@ class PositionMonitor:
 
         if markers:
             await self._mark_ladder_step(position.id, *markers)
+
+    async def _heal_take_profit(self, position: Position) -> None:
+        """Позиция без фиксации прибыли берёт её из текущих настроек.
+
+        Снимок правил на момент покупки — вещь полезная, но отсутствие тейка это
+        не настройка, а дыра: позиция остаётся без единого правила выхода вверх и
+        едет до трейлинга. Чинится молча один раз, о чём человеку сообщается.
+        """
+        if position.tp_ladder or position.take_profit_pct:
+            return
+        async with session_scope() as session:
+            cfg = await repo.get_settings(session, position.user_id, position.chain)
+            if not cfg.tp_ladder and not cfg.take_profit_pct:
+                return              # тейка нет и в настройках — уважаем выбор
+            stored = await session.get(Position, position.id)
+            if stored is None or stored.status != "open":
+                return
+            stored.tp_ladder = cfg.tp_ladder or ""
+            stored.take_profit_pct = cfg.take_profit_pct
+            stored.sell_percent = cfg.sell_percent
+            ladder, plain, share = stored.tp_ladder, stored.take_profit_pct, stored.sell_percent
+
+        position.tp_ladder, position.take_profit_pct, position.sell_percent = ladder, plain, share
+        log.info("Позиция #%s: тейк подтянут из настроек (%s)", position.id, ladder or plain)
+        from sniperbot.settings_registry import format_ladder, step_multiplier
+
+        shown = (format_ladder(ladder) if ladder
+                 else f"×{step_multiplier(plain)} (продать {share}%)")
+        await self.notifier.send(
+            position.user_id,
+            f"🎯 Позиция #{position.id} ({esc(position.token_symbol)}) была без тейк-профита — "
+            f"взял его из текущих настроек: {esc(shown)}",
+        )
 
     async def _write_off(self, position: Position) -> None:
         """Списывает непродаваемую позицию из активных — с объяснением человеку."""

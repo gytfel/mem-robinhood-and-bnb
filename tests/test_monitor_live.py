@@ -288,3 +288,60 @@ async def test_a_bought_position_inherits_the_ladder_from_settings(db):
     from sniperbot.bot.views import exit_rules
 
     assert "×1.5→40%" in exit_rules(position)
+
+
+# --------------------------------- позиция не остаётся без фиксации прибыли
+async def test_a_position_without_a_take_profit_gets_one_from_settings(db):
+    """Отсутствие тейка — не настройка, а дыра: позиция едет только до трейлинга."""
+    from sniperbot.settings_registry import find
+
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position(take_profit_pct=0, tp_ladder="", trailing_stop_pct=0)
+
+    async with session_scope() as session:
+        cfg = await repo.get_settings(session, 1, "rh")
+        find("tp").write(find("tp").parse("[[1.5, 40], [3, 30]]"), cfg)
+        cfg.sell_percent = 100
+
+    watcher = monitor(trader, notifier)
+    trader.price = ENTRY * Decimal("1.6")
+    await watcher.check_position(await fresh(position.id))
+
+    healed = await fresh(position.id)
+    assert healed.tp_ladder == "50:40,200:30"
+    assert any("без тейк-профита" in text for text in notifier.messages)
+    # И правило сразу же сработало: ступень ×1.5 при росте +60%.
+    assert [reason for _, _, reason in trader.sales] == ["ladder"]
+
+
+async def test_an_empty_take_profit_in_settings_is_respected(db):
+    """Если тейка нет и в настройках — это выбор человека, а не дыра."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position(take_profit_pct=0, tp_ladder="", stop_loss_pct=30)
+    async with session_scope() as session:
+        cfg = await repo.get_settings(session, 1, "rh")
+        cfg.take_profit_pct = 0
+        cfg.tp_ladder = ""
+
+    trader.price = ENTRY * Decimal("1.6")
+    await monitor(trader, notifier).check_position(await fresh(position.id))
+
+    assert (await fresh(position.id)).tp_ladder == ""
+    assert notifier.messages == []
+
+
+async def test_an_existing_take_profit_is_left_alone(db):
+    """Снимок правил на момент покупки — вещь полезная, трогаем только дыру."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position(take_profit_pct=1000, tp_ladder="", trailing_stop_pct=0)
+    async with session_scope() as session:
+        cfg = await repo.get_settings(session, 1, "rh")
+        cfg.tp_ladder = "50:40"
+        cfg.take_profit_pct = 0
+
+    trader.price = ENTRY * Decimal("1.2")
+    await monitor(trader, notifier).check_position(await fresh(position.id))
+
+    kept = await fresh(position.id)
+    assert kept.take_profit_pct == 1000 and kept.tp_ladder == ""
+    assert notifier.messages == []

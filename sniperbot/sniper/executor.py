@@ -1008,6 +1008,14 @@ class Trader:
             position.peak_price = max(position.peak_price or Decimal(0), position.entry_price or Decimal(0))
             copy_exit_rules(cfg, position)
             position.token_owner = token.owner
+            if not position.tp_ladder and not position.take_profit_pct:
+                # Позиция без фиксации прибыли — почти всегда чья-то ошибка.
+                # Пишем, что именно лежало в настройках: по этой строке в /logs
+                # видно, настройки пустые или до позиции доехало не то.
+                log.warning(
+                    "Позиция %s (%s) создана без тейка. В настройках: tp_ladder=%r, tp=%r",
+                    token.symbol, chain_key, cfg.tp_ladder, cfg.take_profit_pct,
+                )
 
             # Защита от слива сравнивает текущую ликвидность с максимальной. Без
             # замера в момент покупки максимум остаётся нулевым, проверка молчит,
