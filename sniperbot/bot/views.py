@@ -134,7 +134,7 @@ def render_report(report: SafetyReport, chain: ChainConfig) -> str:
 
 
 def render_position(position: Position, chain: ChainConfig, price: Decimal | None,
-                    *, stale: bool = False) -> str:
+                    *, stale: bool = False, cfg: ChainSettings | None = None) -> str:
     """Карточка позиции. ``stale`` — цена из последней проверки, а не из сети."""
     tokens = from_wei(position.amount_wei, position.token_decimals)
     spent = from_wei(position.native_spent_wei, chain.native_decimals)
@@ -164,6 +164,14 @@ def render_position(position: Position, chain: ChainConfig, price: Decimal | Non
         lines.append(f"💱 Сейчас: {fmt_amount(price, 12)} {chain.native_symbol}"
                      + (" <i>(из последней проверки)</i>" if stale else ""))
     lines.append("🤖 Автовыход: " + exit_rules(position))
+    if cfg is not None and position.is_open:
+        from sniperbot.sniper.executor import exit_rules_differ
+
+        differ = exit_rules_differ(cfg, position)
+        if differ:
+            lines.append(f"⚠️ Отличается от текущих настроек ({esc(', '.join(differ))}): "
+                         "позиция работает по правилам на момент покупки.\n"
+                         "Применить нынешние: <code>/apply</code>")
     if position.ab_group:
         # Иначе непонятно, почему у этой позиции правила не те, что в /config.
         lines.append(f"🧬 A/B-тест: вариант <b>{esc(position.ab_group)}</b>"

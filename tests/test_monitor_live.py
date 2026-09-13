@@ -235,3 +235,56 @@ async def test_price_lookup_gives_up_instead_of_hanging(db):
 
     assert price is None
     assert elapsed < 1, "ожидание должно обрываться по таймауту"
+
+
+# ------------------------------------ снимок правил в момент покупки
+async def test_a_bought_position_inherits_the_ladder_from_settings(db):
+    """Последнее непроверенное звено: доходит ли лестница из настроек до позиции."""
+    from decimal import Decimal
+
+    from sniperbot.chain.dex_adapter import PoolRef, PoolState
+    from sniperbot.chain.erc20 import TokenInfo
+    from sniperbot.db.models import Position
+    from sniperbot.settings_registry import find
+    from sniperbot.sniper.executor import Trader
+
+    async with session_scope() as session:
+        await repo.get_or_create_user(session, 1)
+        cfg = await repo.get_settings(session, 1, "rh")
+        find("tp").write(find("tp").parse("[[1.5, 40], [3, 30], [10, 30]]"), cfg)
+        cfg.stop_loss_pct = 30
+        cfg.trailing_stop_pct = 35
+        cfg.secure_pct = 40
+
+    class Adapter:
+        name, kind, router = "DEX V3", "v3", "0x" + "r" * 40
+
+        async def pool_state(self, token, pool, decimals=18):  # noqa: ANN001
+            return PoolState(pool=pool, liquidity_native=Decimal(5), reserve_native=5 * 10**18)
+
+    trader = Trader(FakeRegistry(), None, None)  # type: ignore[arg-type]
+    async with session_scope() as session:
+        stored_cfg = await repo.get_settings(session, 1, "rh")
+
+    class User:
+        id = 1
+
+    position_id = await trader._store_buy(
+        User(), "rh",
+        TokenInfo(address=TOKEN, name="Meme", symbol="MEME", decimals=18),
+        Adapter(), PoolRef(address="0x" + "p" * 40, kind="v3", fee=3000),
+        spend_wei=to_wei("0.001"), received=to_wei(1000), tx_hash="0xabc",
+        source="auto", cfg=stored_cfg, receipt={"gasUsed": 21000}, pair_address=None,
+    )
+
+    async with session_scope() as session:
+        position = await session.get(Position, position_id)
+
+    assert position.tp_ladder == "50:40,200:30,900:30", "лестница не доехала до позиции"
+    assert position.take_profit_pct == 0
+    assert position.secure_pct == 40
+    assert position.stop_loss_pct == 30 and position.trailing_stop_pct == 35
+
+    from sniperbot.bot.views import exit_rules
+
+    assert "×1.5→40%" in exit_rules(position)

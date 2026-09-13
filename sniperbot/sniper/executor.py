@@ -89,6 +89,34 @@ EXIT_RULE_FIELDS = (
 )
 
 
+# Человеческие названия — для сообщения о расхождении.
+EXIT_RULE_TITLES = {
+    "take_profit_pct": "тейк", "tp_ladder": "тейк", "sell_percent": "доля продажи",
+    "stop_loss_pct": "стоп-лосс", "trailing_stop_pct": "трейлинг", "auto_sell": "автопродажа",
+    "secure_pct": "возврат вложенного", "breakeven_pct": "безубыток",
+    "rug_guard_pct": "защита от слива", "dead_timeout_min": "таймер",
+    "dead_min_pct": "порог «не мёртвая»",
+}
+
+
+def exit_rules_differ(cfg: ChainSettings, position: Position) -> list[str]:
+    """Чем правила позиции отличаются от текущих настроек сети.
+
+    Позиция живёт по снимку на момент покупки. Пока это не сказано вслух, любое
+    расхождение выглядит поломкой: в /config одно, в карточке другое.
+    """
+    names = []
+    for field_name in EXIT_RULE_FIELDS:
+        wanted = getattr(cfg, field_name, None)
+        if field_name == "tp_ladder":
+            wanted = wanted or ""
+        if getattr(position, field_name, None) != wanted:
+            title = EXIT_RULE_TITLES.get(field_name, field_name)
+            if title not in names:
+                names.append(title)
+    return names
+
+
 def copy_exit_rules(cfg: ChainSettings, position: Position) -> list[str]:
     """Переносит правила выхода из настроек в позицию. Возвращает изменённые поля."""
     changed = []

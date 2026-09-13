@@ -151,3 +151,24 @@ async def test_migration_adds_missing_indexes_not_only_columns(db):
 
     assert "ix_users_referred_by" in names       # добавлен вместе со столбцом
     assert "ix_users_wallet_address" in names
+
+
+async def test_one_settings_row_per_user_and_chain(db):
+    """Два ряда настроек означали бы, что /set пишет в один, а покупка читает другой."""
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from sniperbot.db.models import ChainSettings
+
+    async with session_scope() as session:
+        await repo.get_or_create_user(session, 1)
+        await repo.get_settings(session, 1, "rh")
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            session.add(ChainSettings(user_id=1, chain="rh"))
+            await session.flush()
+
+    async with session_scope() as session:
+        rows = await repo.get_settings(session, 1, "rh")
+    assert rows.chain == "rh"

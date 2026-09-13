@@ -44,6 +44,7 @@ async def cb_positions(callback: CallbackQuery, ctx: BotContext, user: User) -> 
 async def cb_position(callback: CallbackQuery, callback_data: PosCB, ctx: BotContext, user: User) -> None:
     async with session_scope() as session:
         position = await repo.find_position(session, callback_data.pid, user.id)
+        cfg = await repo.get_settings(session, user.id, position.chain) if position else None
     if position is None:
         await callback.answer("Позиция не найдена", show_alert=True)
         return
@@ -54,12 +55,12 @@ async def cb_position(callback: CallbackQuery, callback_data: PosCB, ctx: BotCon
 
     # Карточку показываем сразу по последней известной цене: нода может думать
     # секундами, а экран, который не открылся, выглядит сломанной кнопкой.
-    await safe_edit(callback, render_position(position, chain, position.last_price, stale=True),
-                    markup)
+    await safe_edit(callback, render_position(position, chain, position.last_price,
+                                              stale=True, cfg=cfg), markup)
 
     price = await _price(ctx, position)
     if price is not None and price != position.last_price:
-        await safe_edit(callback, render_position(position, chain, price), markup)
+        await safe_edit(callback, render_position(position, chain, price, cfg=cfg), markup)
 
 
 @router.callback_query(PosCB.filter(F.action == "sell"))

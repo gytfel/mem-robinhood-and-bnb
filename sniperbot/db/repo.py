@@ -54,9 +54,13 @@ async def all_users(session: AsyncSession, *, with_wallet: bool = True) -> list[
 
 # ----------------------------------------------------------------------- settings
 async def get_settings(session: AsyncSession, user_id: int, chain: str) -> ChainSettings:
+    # Порядок задан явно: уникальность (user_id, chain) есть в схеме, но в базе,
+    # созданной до её появления, ALTER TABLE её не добавит. Если дубль всё же
+    # есть, все читатели должны брать одну и ту же строку — иначе /set пишет в
+    # одну, а покупка читает другую, и настройки «не доезжают».
     stmt = select(ChainSettings).where(
         ChainSettings.user_id == user_id, ChainSettings.chain == chain
-    )
+    ).order_by(ChainSettings.id)
     settings = await session.scalar(stmt)
     if settings is None:
         settings = ChainSettings(user_id=user_id, chain=chain)
