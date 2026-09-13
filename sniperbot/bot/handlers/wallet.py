@@ -12,7 +12,15 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from sniperbot.bot.context import BotContext
-from sniperbot.bot.keyboards import MenuCB, WalletCB, back_button, cancel_kb, confirm_export, wallet_menu
+from sniperbot.bot.keyboards import (
+    MenuCB,
+    WalletCB,
+    back_button,
+    cancel_kb,
+    confirm_export,
+    confirm_withdraw_kb,
+    wallet_menu,
+)
 from sniperbot.bot.texts import EXPORT_WARNING, WALLET_HINT
 from sniperbot.bot.ui import reply, safe_edit
 from sniperbot.bot.views import render_wallet
@@ -21,8 +29,9 @@ from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, User
-from sniperbot.utils.evm import extract_address, is_address
+from sniperbot.utils.evm import extract_address, has_code, to_checksum
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, parse_decimal, to_wei
+from sniperbot.withdrawals import Destination, address_problem, destination_warning
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +41,7 @@ router = Router(name="wallet")
 class WithdrawStates(StatesGroup):
     address = State()
     amount = State()
+    confirm = State()
 
 
 @router.message(Command("wallet"))
@@ -123,10 +133,12 @@ async def cb_withdraw(callback: CallbackQuery, state: FSMContext, chain: ChainCo
 
 @router.message(WithdrawStates.address)
 async def withdraw_address(message: Message, state: FSMContext, chain: ChainConfig) -> None:
-    address = extract_address(message.text or "")
-    if not address:
-        await reply(message, "❌ Это не похоже на адрес. Пришлите адрес формата 0x…", cancel_kb("wallet"))
+    raw = (message.text or "").strip()
+    problem = address_problem(extract_address(raw) or raw)
+    if problem:
+        await reply(message, f"❌ {problem}", cancel_kb("wallet"))
         return
+    address = extract_address(raw) or raw
     await state.update_data(address=address)
     await state.set_state(WithdrawStates.amount)
     await reply(
@@ -158,8 +170,60 @@ async def withdraw_amount(
                                  f"Пришлите число (например <code>0.05</code>) или слово «всё».",
                         cancel_kb("wallet"))
             return
+    await _guarded_withdraw(message, state, ctx, user, cfg, chain, address, amount)
+
+
+async def _guarded_withdraw(message: Message, state: FSMContext, ctx: BotContext, user: User,
+                            cfg: ChainSettings, chain: ChainConfig, address: str,
+                            amount: Decimal | None) -> None:
+    """Спрашивает подтверждение, если адрес выглядит чужим для этой сети."""
+    async with session_scope() as session:
+        known = await repo.withdrawn_before(session, user.id, chain.key, address)
+
+    warning = "" if known else destination_warning(await _inspect(ctx, chain, address), chain.name)
+    if not warning:
+        await state.clear()
+        await _do_withdraw(message, ctx, user, cfg, chain, address, amount)
+        return
+
+    await state.update_data(address=address, amount=str(amount) if amount is not None else "")
+    await state.set_state(WithdrawStates.confirm)
+    await reply(
+        message,
+        f"⚠️ <b>Проверьте получателя</b>\n\n{warning}\n\n"
+        f"Отправить {'всё' if amount is None else fmt_amount(amount)} "
+        f"{chain.native_symbol} на\n<code>{address}</code>?",
+        confirm_withdraw_kb(),
+    )
+
+
+@router.callback_query(WalletCB.filter(F.action == "withdraw_confirm"))
+async def cb_withdraw_confirm(callback: CallbackQuery, state: FSMContext, ctx: BotContext,
+                              user: User, cfg: ChainSettings, chain: ChainConfig) -> None:
+    data = await state.get_data()
+    address = data.get("address")
+    if not address:
+        await callback.answer("Нечего подтверждать", show_alert=True)
+        return
+    raw = data.get("amount") or ""
     await state.clear()
-    await _do_withdraw(message, ctx, user, cfg, chain, address, amount)
+    await callback.answer("Отправляю…")
+    await _do_withdraw(callback.message, ctx, user, cfg, chain, address,
+                       parse_decimal(raw) if raw else None)
+
+
+async def _inspect(ctx: BotContext, chain: ChainConfig, address: str) -> Destination:
+    """Что говорит сеть про адрес получателя."""
+    client = ctx.registry.get(chain.key)
+    checksummed = to_checksum(address)
+    try:
+        code = await client.run(lambda w3: w3.eth.get_code(checksummed))
+        nonce = await client.transaction_count(checksummed, "latest")
+        balance = await client.native_balance(checksummed)
+    except Exception as exc:  # noqa: BLE001 - нода молчит: не пугаем зря и не мешаем
+        log.info("Не смог проверить адрес получателя %s: %s", address, exc)
+        return Destination(nonce=1)
+    return Destination(has_code=has_code(code), nonce=int(nonce), balance=int(balance))
 
 
 @router.message(Command("withdraw"))
@@ -172,15 +236,16 @@ async def cmd_withdraw(
         await state.set_state(WithdrawStates.address)
         await reply(message, f"📤 Вывод {chain.native_symbol}. Пришлите адрес получателя:", cancel_kb("wallet"))
         return
-    address = extract_address(args[0])
-    if not address or not is_address(address):
-        await reply(message, "❌ Некорректный адрес получателя.")
+    problem = address_problem(extract_address(args[0]) or args[0])
+    if problem:
+        await reply(message, f"❌ {problem}")
         return
+    address = extract_address(args[0]) or args[0]
     amount = parse_decimal(args[1]) if len(args) > 1 else None
     if len(args) > 1 and amount is None:
         await reply(message, "❌ Некорректная сумма.")
         return
-    await _do_withdraw(message, ctx, user, cfg, chain, address, amount)
+    await _guarded_withdraw(message, state, ctx, user, cfg, chain, address, amount)
 
 
 async def _do_withdraw(
@@ -206,7 +271,7 @@ async def _do_withdraw(
     async with session_scope() as session:
         await repo.log_wallet_event(
             session, user_id=user.id, chain=chain.key, kind="withdraw",
-            amount_wei=actual, tx_hash=sent.tx_hash,
+            amount_wei=actual, tx_hash=sent.tx_hash, address=address,
         )
     await status.edit_text(
         f"✅ Отправлено <b>{fmt_amount(from_wei(actual, chain.native_decimals))} {chain.native_symbol}</b>\n"

@@ -162,6 +162,15 @@ def filters_menu(cfg, native: str, user=None) -> InlineKeyboardMarkup:
     return group_menu("filters", cfg, native, user)
 
 
+def confirm_withdraw_kb() -> InlineKeyboardMarkup:
+    """Согласие на вывод по подозрительному адресу — только явной кнопкой."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Это мой кошелёк",
+                             callback_data=WalletCB(action="withdraw_confirm").pack()),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=MenuCB(section="wallet").pack()),
+    ]])
+
+
 def cancel_kb(section: str = "main") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=MenuCB(section=section).pack())]]

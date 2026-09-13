@@ -768,3 +768,18 @@ async def write_off_position(session: AsyncSession, position_id: int, user_id: i
     position.exit_reason = reason
     position.closed_at = utcnow()
     return position
+
+
+async def withdrawn_before(session: AsyncSession, user_id: int, chain: str, address: str) -> bool:
+    """Был ли уже успешный вывод на этот адрес в этой сети.
+
+    Знакомый адрес не нужно подтверждать заново: вопрос, который задают каждый
+    раз, перестают читать.
+    """
+    stmt = select(WalletEvent.id).where(
+        WalletEvent.user_id == user_id,
+        WalletEvent.chain == chain,
+        WalletEvent.kind == "withdraw",
+        func.lower(WalletEvent.address) == address.lower(),
+    ).limit(1)
+    return await session.scalar(stmt) is not None

@@ -343,6 +343,7 @@ class WalletEvent(Base):
     amount_wei: Mapped[int] = mapped_column(Wei, default=0)
     balance_after_wei: Mapped[int] = mapped_column(Wei, default=0)
     tx_hash: Mapped[str | None] = mapped_column(String(80))
+    address: Mapped[str | None] = mapped_column(String(42))   # получатель вывода
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
