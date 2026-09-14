@@ -208,3 +208,58 @@ async def test_the_same_pool_is_not_asked_twice(monkeypatch):
 
     assert await trader.sell_route(FakeClient(), position(), TOKEN, to_wei(100)) is None
     assert asked == [OWN_POOL]
+
+
+# --------------------------------------------- отказ контракта: что видит человек
+def test_empty_revert_is_explained_not_pasted():
+    """web3 отдаёт ('execution reverted', '0x') — человеку это ничего не говорит."""
+    reason = executor_module._revert_reason(
+        RuntimeError("('execution reverted', '0x')")
+    )
+    assert reason == executor_module.NO_REVERT_REASON
+    assert "0x" not in reason
+
+
+def test_a_named_revert_is_kept_as_is():
+    """Если контракт назвал причину — показываем именно её."""
+    reason = executor_module._revert_reason(
+        RuntimeError("execution reverted: TransferHelper: TRANSFER_FROM_FAILED")
+    )
+    assert reason == "TransferHelper: TRANSFER_FROM_FAILED"
+
+
+def test_sell_rejection_names_the_likely_causes():
+    """Молчаливый отказ — повод объяснить, что это обычно значит."""
+    trader = Trader(FakeRegistry(), None, None)  # type: ignore[arg-type]
+    text = trader._sell_rejected(executor_module.NO_REVERT_REASON, position(), FakeChain())
+
+    assert "налог на продажу" in text
+    assert "ханипот" in text
+    assert "/sell 157 25" in text          # часть объёма иногда проходит
+    assert f"https://explorer/{TOKEN}" in text
+    assert "<" not in text, "угловые скобки сломают разметку сообщения"
+
+
+def test_a_named_rejection_stays_short():
+    """Причина названа — лишние догадки только мешают."""
+    trader = Trader(FakeRegistry(), None, None)  # type: ignore[arg-type]
+    text = trader._sell_rejected("INSUFFICIENT_OUTPUT_AMOUNT", position(), FakeChain())
+
+    assert "INSUFFICIENT_OUTPUT_AMOUNT" in text
+    assert "ханипот" not in text
+    assert f"https://explorer/{TOKEN}" in text
+
+
+async def test_prepared_nonce_never_reaches_the_send():
+    """Номер, которым собирали транзакцию, выбрасывается: его выдаст кошелёк."""
+    seen = {}
+
+    class RecordingWallets:
+        async def send_tx(self, client, account, tx):  # noqa: ANN001
+            seen.update(tx=dict(tx))
+            return object()
+
+    trader = Trader(FakeRegistry(), RecordingWallets(), None)  # type: ignore[arg-type]
+    await trader._send(FakeClient(), None, {"to": TOKEN, "nonce": 33, "gas": 21_000})
+
+    assert "nonce" not in seen["tx"], "занятый заранее номер оставляет дыру в нумерации"

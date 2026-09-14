@@ -30,7 +30,7 @@ from sniperbot.chain.erc20 import (
     confirmed_balance,
     fetch_token,
 )
-from sniperbot.chain.wallet import WalletError, WalletService
+from sniperbot.chain.wallet import SentTx, WalletError, WalletService
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -48,6 +48,9 @@ TRANSFER_GAS = 21_000         # обычный перевод монеты
 
 MAX_UINT256 = 2**256 - 1
 GAS_BUFFER_BPS = 13_000  # +30% к оценке газа: токены с комиссией жрут больше
+
+# Контракт ответил отказом с пустыми данными: причины он не назвал.
+NO_REVERT_REASON = "контракт отклонил сделку без объяснения причины"
 
 
 class TradeError(RuntimeError):
@@ -385,7 +388,7 @@ class Trader:
             return await self._paper_buy(user, chain_key, token, adapter, pool,
                                          spend_wei, expected, source, cfg)
 
-        nonce = await self.wallets.next_nonce(client, account.address)
+        nonce = await self.wallets.probe_nonce(client, account.address)
 
         async def build(nonce_value: int) -> dict:
             tx = await adapter.build_buy_tx(
@@ -412,7 +415,7 @@ class Trader:
 
         balance_before = await balance_of(client, token_address, account.address)
         try:
-            sent = await self.wallets.send_tx(client, account, tx)
+            sent = await self._send(client, account, tx)
         except WalletError as exc:
             return TradeResult(False, "buy", error=str(exc), token_symbol=token.symbol)
 
@@ -758,7 +761,7 @@ class Trader:
         adapter, pool, expected_native = route
         await self._ensure_allowance(client, adapter, account, token_address, amount, cfg, gas_fees)
 
-        nonce = await self.wallets.next_nonce(client, account.address)
+        nonce = await self.wallets.probe_nonce(client, account.address)
         slippage = int(getattr(cfg, "exit_slippage_bps", 0) or cfg.slippage_bps)
 
         tx, error = None, ""
@@ -780,12 +783,12 @@ class Trader:
                      position.token_symbol, attempt_slippage / 100)
         if tx is None:
             return TradeResult(False, "sell", token_symbol=position.token_symbol,
-                               error=f"Продажа не пройдёт: {error}")
+                               error=self._sell_rejected(error, position, chain))
 
         native_before = await client.native_balance(account.address)
         wrapped_before = await self._wrapped_balance(client, adapter, account.address)
         try:
-            sent = await self.wallets.send_tx(client, account, tx)
+            sent = await self._send(client, account, tx)
         except WalletError as exc:
             return TradeResult(False, "sell", error=str(exc), token_symbol=position.token_symbol)
 
@@ -904,6 +907,31 @@ class Trader:
         )
 
     # ------------------------------------------------------------ служебное
+    def _sell_rejected(self, reason: str, position: Position, chain) -> str:
+        """Сеть отказала в продаже — объясняем словами, а не кодом ответа."""
+        lines = [f"Продажа не пройдёт: {reason}."]
+        if reason == NO_REVERT_REASON:
+            lines.append(
+                "Так ведут себя три вещи: налог на продажу, включённый после покупки "
+                "(на Uniswap V3 такие токены не продаются технически), ханипот — "
+                "покупать можно, продавать нельзя, — и пул, из которого вынули "
+                "ликвидность."
+            )
+            lines.append(f"Иногда проходит часть объёма: /sell {position.id} 25")
+        lines.append(f"Контракт токена: {chain.token_url(to_checksum(position.token_address))}")
+        return "\n".join(lines)
+
+    async def _send(self, client, account, tx: dict) -> SentTx:
+        """Отправляет транзакцию, отдав выдачу nonce кошельку.
+
+        Номер, которым собирали и симулировали транзакцию, дальше не нужен:
+        если занять его заранее и не отправить (симуляция отказала, оценка газа
+        упала), в нумерации остаётся дыра — сеть ждёт 32, бот выдаёт 33, и узел
+        отвечает «nonce too high» уже на следующую попытку выхода.
+        """
+        tx.pop("nonce", None)
+        return await self.wallets.send_tx(client, account, tx)
+
     async def _prepare(self, client, adapter: DexAdapter, build, nonce: int) -> tuple[dict | None, str]:
         """Собирает транзакцию и проверяет её через eth_call до отправки.
 
@@ -960,9 +988,9 @@ class Trader:
     async def _unwrap(self, client, adapter: DexAdapter, account, amount: int, gas_fees: dict) -> None:
         """WETH -> нативная монета. Неудача не критична: средства остаются в WETH."""
         try:
-            nonce = await self.wallets.next_nonce(client, account.address)
+            nonce = await self.wallets.probe_nonce(client, account.address)
             tx = await adapter.build_unwrap_tx(account.address, amount, nonce=nonce, gas_fees=gas_fees)
-            sent = await self.wallets.send_tx(client, account, tx)
+            sent = await self._send(client, account, tx)
             await client.wait_receipt(sent.tx_hash, timeout=120)
             log.info("UNWRAP %s: %s", from_wei(amount), sent.tx_hash)
         except Exception as exc:  # noqa: BLE001
@@ -1049,11 +1077,11 @@ class Trader:
         if current >= amount:
             return
         approve_amount = MAX_UINT256 if cfg.approve_max else amount
-        nonce = await self.wallets.next_nonce(client, account.address)
+        nonce = await self.wallets.probe_nonce(client, account.address)
         tx = await adapter.build_approve_tx(token, account.address, approve_amount,
                                             nonce=nonce, gas_fees=gas_fees)
         tx["gas"] = await self._gas_limit(client, tx, 120_000)
-        sent = await self.wallets.send_tx(client, account, tx)
+        sent = await self._send(client, account, tx)
         await client.wait_receipt(sent.tx_hash, timeout=120)
         log.info("APPROVE %s -> %s: %s", token, spender, sent.tx_hash)
 
@@ -1135,6 +1163,11 @@ def _revert_reason(exc: Exception) -> str:
     text = str(exc)
     for marker in ("execution reverted:", "execution reverted"):
         if marker in text:
-            tail = text.split(marker, 1)[1].strip(" '\";:")
-            return tail[:120] or "контракт отклонил сделку"
+            # web3 отдаёт причину как ("execution reverted", "0x"): пустые данные
+            # значат, что контракт отказал молча. Показывать пользователю «, '0x'»
+            # бессмысленно — это ничего не объясняет.
+            tail = text.split(marker, 1)[1].strip(" '\"`;:,()[]{}")
+            if tail.lower() in {"", "0x", "0x0", "none"}:
+                return NO_REVERT_REASON
+            return tail[:120]
     return text[:160]

@@ -110,32 +110,66 @@ class WalletService:
 
     # ------------------------------------------------------------- отправка
     async def send_tx(self, client: ChainClient, account: LocalAccount, tx: dict) -> SentTx:
-        """Подписывает и отправляет транзакцию, управляя nonce."""
+        """Подписывает и отправляет транзакцию, управляя nonce.
+
+        Номер лучше не готовить заранее: занятый и неотправленный nonce
+        оставляет в нумерации дыру, и на следующую транзакцию узел отвечает
+        «nonce too high». Поэтому вызывающий код передаёт транзакцию без
+        nonce, а номер выдаётся здесь — под замком, прямо перед подписью.
+        """
         address = to_checksum(account.address)
         async with self.nonces.lock(client.config.key, address):
-            if "nonce" not in tx:
-                tx["nonce"] = await self.nonces.reserve(client, address)
-            tx.setdefault("chainId", client.config.chain_id)
-            signed = account.sign_transaction(tx)
-            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
-            try:
-                tx_hash = await client.send_raw(raw)
-            except Exception as exc:  # noqa: BLE001
-                # Сбрасываем локальный счётчик, иначе рассинхрон с сетью.
-                self.nonces.reset(client.config.key, address)
-                message = str(exc)
-                if "nonce too low" in message.lower():
-                    raise WalletError("Nonce устарел, повторите операцию") from exc
-                if "insufficient funds" in message.lower():
-                    raise WalletError("Недостаточно средств на газ/сумму сделки") from exc
-                raise WalletError(f"RPC отклонил транзакцию: {message[:200]}") from exc
+            tx_hash = ""
+            for attempt in (1, 2):
+                if "nonce" not in tx:
+                    tx["nonce"] = await self.nonces.reserve(client, address)
+                tx.setdefault("chainId", client.config.chain_id)
+                signed = account.sign_transaction(tx)
+                raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+                try:
+                    tx_hash = await client.send_raw(raw)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    # Сбрасываем локальный счётчик, иначе рассинхрон с сетью.
+                    self.nonces.reset(client.config.key, address)
+                    message = str(exc)
+                    lowered = message.lower()
+                    if "nonce too high" in lowered and attempt == 1:
+                        # Счётчик ушёл вперёд сети. Эта транзакция точно не
+                        # отправлена — в отличие от «nonce too low», где она
+                        # может быть уже в блоке и повтор означал бы вторую
+                        # такую же сделку. Перечитываем номер у сети и
+                        # пробуем ещё раз: терять выход из позиции из-за
+                        # дыры в нумерации нельзя.
+                        log.warning("Nonce ушёл вперёд сети (%s) — пересинхронизирую и повторяю",
+                                    message[:120])
+                        del tx["nonce"]
+                        continue
+                    if "nonce too low" in lowered:
+                        raise WalletError("Nonce устарел, повторите операцию") from exc
+                    if "nonce too high" in lowered:
+                        raise WalletError(
+                            "Сеть ещё не приняла предыдущую транзакцию, счётчик ушёл вперёд. "
+                            "Повторите через минуту."
+                        ) from exc
+                    if "insufficient funds" in lowered:
+                        raise WalletError("Недостаточно средств на газ/сумму сделки") from exc
+                    raise WalletError(f"RPC отклонил транзакцию: {message[:200]}") from exc
         if not tx_hash.startswith("0x"):
             tx_hash = "0x" + tx_hash
         return SentTx(tx_hash=tx_hash, nonce=int(tx["nonce"]))
 
-    async def next_nonce(self, client: ChainClient, address: str) -> int:
-        async with self.nonces.lock(client.config.key, address):
-            return await self.nonces.reserve(client, address)
+    async def probe_nonce(self, client: ChainClient, address: str) -> int:
+        """Номер для сборки и симуляции — без резерва.
+
+        eth_call на него не смотрит, а оценка газа у некоторых узлов требует
+        правдоподобного значения. Настоящий номер выдаст send_tx.
+        """
+        try:
+            return await client.transaction_count(to_checksum(address), "pending")
+        except Exception as exc:  # noqa: BLE001 - для симуляции сгодится и ноль
+            log.debug("Не смог прочитать nonce для %s: %s", address, exc)
+            return 0
 
     # -------------------------------------------------------------- балансы
     async def native_balance(self, client: ChainClient, address: str) -> int:
