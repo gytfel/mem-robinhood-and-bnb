@@ -16,8 +16,10 @@ from sniperbot.bot.keyboards import BuyCB, buy_menu, cancel_kb, main_menu
 from sniperbot.bot.ui import reply, safe_edit
 from sniperbot.bot.views import render_report
 from sniperbot.config import ChainConfig
+from sniperbot.db import repo
+from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, User
-from sniperbot.sniper.safety import analyze_best
+from sniperbot.sniper.safety import analyze_best, trap_before_buy
 from sniperbot.utils.evm import extract_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, parse_decimal, to_wei
 
@@ -154,13 +156,61 @@ async def show_token(
         await reply(message, text, markup)
 
 
+async def _entry_blocked(
+    ctx: BotContext, user: User, cfg: ChainSettings, chain: ChainConfig,
+    token: str, amount: Decimal,
+) -> str:
+    """Причина не покупать этот токен вручную, либо пустая строка.
+
+    Ручная покупка — решение человека, и оценочные фильтры (ликвидность, доля
+    владельца, запас прибыли) ей не указ. Но «войти можно, выйти нельзя» — это
+    не вопрос вкуса: такие деньги просто не возвращаются, поэтому здесь стоит
+    та же проверка, что и у автоснайпа.
+    """
+    async with session_scope() as session:
+        if await repo.is_blacklisted(session, chain.key, token, user.id):
+            return ("⛔️ Токен в чёрном списке — бот уже не смог из него выйти.\n"
+                    f"Если уверены: <code>/blacklist del {token}</code>")
+
+    try:
+        trap = await trap_before_buy(
+            ctx.registry.get(chain.key), token,
+            amount_native_wei=to_wei(amount, chain.native_decimals), cfg=cfg,
+        )
+    except Exception as exc:  # noqa: BLE001 - отказ проверки не должен пускать покупку
+        log.warning("Проверка выхода по %s не удалась: %s", token, exc)
+        return (f"❌ Не смог проверить токен: {esc(exc)}\n"
+                "Покупка отменена — вслепую в мемкоин заходить нельзя.")
+    if trap is None:
+        return ""
+
+    if trap.code == "honeypot":
+        async with session_scope() as session:
+            await repo.remember_honeypot(session, chain.key, token, trap.text)
+        return ("⛔️ <b>Покупка отменена: это honeypot</b>\n"
+                f"{esc(trap.text)}\n"
+                "Купить такой токен можно, продать — нет. Он внесён в чёрный список.")
+    if trap.code == "no_simulation":
+        return ("⚠️ <b>Покупка отменена: продажу не удалось проверить</b>\n"
+                f"{esc(trap.text)}\n"
+                "Разрешить покупки без проверки: <code>/set sim off</code> — "
+                "но тогда honeypot ловить будет нечем.")
+    return ("⚠️ <b>Покупка отменена: из токена дорого выходить</b>\n"
+            f"{esc(trap.text)}\n"
+            "Поднять предел: <code>/set selltax …</code>")
+
+
 async def execute_buy(
     message: Message, ctx: BotContext, user: User, cfg: ChainSettings,
     chain: ChainConfig, token: str, amount: Decimal,
 ) -> None:
-    status = await reply(
-        message, f"⏳ Покупаю на {fmt_amount(amount)} {chain.native_symbol}…"
-    )
+    status = await reply(message, "⏳ Проверяю, можно ли из токена выйти…")
+    blocked = await _entry_blocked(ctx, user, cfg, chain, token, amount)
+    if blocked:
+        await safe_edit(status, blocked)
+        return
+
+    await safe_edit(status, f"⏳ Покупаю на {fmt_amount(amount)} {chain.native_symbol}…")
     try:
         result = await ctx.trader.buy(user, chain.key, token, amount, cfg=cfg, source="manual")
     except Exception as exc:  # noqa: BLE001

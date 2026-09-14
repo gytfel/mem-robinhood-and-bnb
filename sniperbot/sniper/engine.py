@@ -24,7 +24,7 @@ from sniperbot.settings_registry import (
 )
 from sniperbot.sniper.executor import Trader
 from sniperbot.sniper.hunter import MomentumHunter
-from sniperbot.sniper.safety import analyze_token, evaluate_verdict
+from sniperbot.sniper.safety import analyze_token, evaluate_verdict, proven_trap
 from sniperbot.sniper.scanner import PairEvent, PairScanner
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr, to_wei
 
@@ -232,6 +232,10 @@ class SniperEngine:
         analysis_ms = int((time.perf_counter() - started) * 1000)
 
         await self._record_pair_details(client, event, report, pair_id, analysis_ms)
+        trap = proven_trap(report)
+        if trap:
+            async with session_scope() as session:
+                await repo.remember_honeypot(session, event.chain, event.token, trap)
 
         sniped = 0
         reject_reason = ""

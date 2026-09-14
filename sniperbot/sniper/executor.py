@@ -37,6 +37,7 @@ from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, Position, User, utcnow
 from sniperbot.fees import FeePolicy, FeeSettings, profit_fee
 from sniperbot.settings_registry import effective_gas_multiplier
+from sniperbot.sniper.safety import HoneypotSimulator
 from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import from_wei, to_wei
 
@@ -204,6 +205,30 @@ class Trader:
         if hint is not None and route_allows(route, hint[1].kind):
             return hint
         return await self.best_venue(chain_key, token, route)
+
+    async def exit_is_open(self, position: Position, holder: str) -> tuple[bool | None, str]:
+        """Пройдёт ли продажа этой позиции прямо сейчас — без отправки транзакции.
+
+        Проверка перед покупкой обманывается: часть ханипотов запрещает продажу
+        именно тем, кто покупал, а налог на продажу вообще включают уже после
+        того, как соберут деньги. Поэтому выход проверяется ещё раз — за живой
+        кошелёк с живым балансом, и повторно, пока позиция открыта.
+
+        Возвращает (проходит ли, пояснение). None — проверить не удалось.
+        """
+        if position.is_paper or position.amount_wei <= 0:
+            return None, ""
+        try:
+            client = self.registry.get(position.chain)
+            adapter = self.adapter_for_position(position)
+        except (TradeError, KeyError) as exc:
+            return None, str(exc)
+        pool = PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
+                       fee=position.pool_fee or 0)
+        simulator = HoneypotSimulator(client, adapter, pool)
+        return await simulator.sell_works_for(
+            to_checksum(position.token_address), holder, position.amount_wei
+        )
 
     async def sell_route(self, client, position: Position, token: str,
                          amount: int) -> tuple[DexAdapter, PoolRef, int] | None:

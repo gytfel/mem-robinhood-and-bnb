@@ -27,7 +27,7 @@ from eth_utils import to_checksum_address
 
 from sniperbot.chain.clients import ChainClient
 from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, PoolState, find_best_venue, get_adapter
-from sniperbot.chain.erc20 import TokenInfo, fetch_token, trading_limits
+from sniperbot.chain.erc20 import TokenInfo, allowance, fetch_token, trading_limits
 from sniperbot.config import RouterConfig
 from sniperbot.sniper.analysis import RISK_TITLES, ContractProfile, profile_token
 from sniperbot.utils.evm import has_code, hex32, mapping_slot, nested_mapping_slot
@@ -44,7 +44,7 @@ SEARCH_PROBES = 7        # сколько точек проверяем за о�
 SEARCH_ROUNDS = 5        # 8^5 ≈ 32 000 делений — та же точность, что 15 шагов пополам
 
 # Кэш найденных слотов хранилища: {(chain, token): (balance_slot, vyper, allowance_slot)}
-_slot_cache: dict[tuple[str, str], tuple[int, bool, int | None]] = {}
+_slot_cache: dict[tuple[str, str], tuple[int | None, bool, int | None]] = {}
 
 
 @dataclass(slots=True)
@@ -202,7 +202,7 @@ class HoneypotSimulator:
     # --------------------------------------------------- поиск слотов ERC20
     async def find_balance_slot(self, token: str, holder: str) -> tuple[int, bool] | None:
         cached = _slot_cache.get((self.client.config.key, token.lower()))
-        if cached:
+        if cached and cached[0] is not None:
             return cached[0], cached[1]
 
         erc20 = self.client.erc20(token)
@@ -260,8 +260,10 @@ class HoneypotSimulator:
             )
             for found in results:
                 if isinstance(found, int):
-                    if cached:
-                        _slot_cache[cache_key] = (cached[0], cached[1], found)
+                    # Кешируем и тогда, когда слот баланса ещё не искали: иначе
+                    # повторная проверка выхода каждый раз перебирает слоты заново.
+                    base = cached or (None, False, None)
+                    _slot_cache[cache_key] = (base[0], base[1], found)
                     return found
         return None
 
@@ -404,6 +406,51 @@ class HoneypotSimulator:
             log.warning("Симуляция %s не удалась: %s", token, exc)
             result.error = f"Симуляция не удалась: {exc}"
         return result
+
+
+    async def sell_works_for(self, token: str, holder: str, amount: int) -> tuple[bool | None, str]:
+        """Пройдёт ли продажа у настоящего держателя токена.
+
+        Проба со случайного адреса ловит не всё: у неё баланс нарисован в слоте,
+        а флага «этот адрес покупал» в контракте нет. Ханипоты, которые
+        запрещают продажу именно покупателям, такую проверку проходят. После
+        входа выдумывать адрес уже не нужно — спрашиваем за свой кошелёк,
+        подставляя только разрешение роутеру и монеты на газ.
+
+        Возвращает (проходит ли продажа, пояснение). None — проверить не вышло,
+        и это не повод обвинять токен.
+        """
+        token = to_checksum_address(token)
+        holder = to_checksum_address(holder)
+        if amount <= 0:
+            return None, "нечего продавать"
+        try:
+            overrides: dict = {holder: {"balance": hex(PROBE_NATIVE_BALANCE)}}
+            spender = to_checksum_address(self.adapter.spender)
+            granted = await allowance(self.client, token, holder, spender)
+            if granted < amount:
+                # Разрешения ещё нет: реальная продажа выдаст его отдельной
+                # транзакцией, а симуляция — подменой слота allowance.
+                slot = await self.find_allowance_slot(token, holder, spender)
+                if slot is None:
+                    return None, "не удалось выдать разрешение роутеру в симуляции"
+                overrides[token] = {
+                    "stateDiff": {nested_mapping_slot(holder, spender, slot): hex32(MAX_UINT256)}
+                }
+            tx = {
+                "from": holder,
+                "to": self.router,
+                "gas": hex(SIM_GAS),
+                "data": self.adapter.encode_sell(token, amount, 0, holder, self.pool),
+            }
+            if await self._call(tx, overrides) is None:
+                return False, "продажа из кошелька не проходит"
+            return True, ""
+        except NodeOverrideUnsupported as exc:
+            return None, f"нода не поддерживает симуляцию: {exc}"
+        except Exception as exc:  # noqa: BLE001 - проверка не должна ронять монитор
+            log.debug("Проверка выхода по %s не удалась: %s", token, exc)
+            return None, str(exc)
 
 
 def _tax_bps(expected: int, actual: int) -> int:
@@ -664,6 +711,50 @@ FILTER_TITLES = {
     "min_edge": "издержки съедают цель по прибыли",
     "route": "площадка не по маршруту (/route)",
 }
+
+
+# Фильтры из семьи «войти можно, выйти нельзя». Остальные говорят о качестве
+# токена — эти о том, вернутся ли деньги вообще. Ручная покупка пропускает
+# оценочные фильтры (человек решил сам), но не эти.
+TRAP_CODES = {"honeypot", "no_simulation", "sell_tax"}
+
+
+def proven_trap(report: SafetyReport) -> str:
+    """Пояснение, если продажа токена доказанно не проходит; иначе пустая строка.
+
+    Это факт, а не вердикт: покупка в симуляции прошла, продажа зареверчена.
+    От настроек пользователя он не зависит, поэтому такой токен имеет смысл
+    запомнить один раз и для всех режимов сразу.
+    """
+    if report.simulation.can_sell is False:
+        return report.simulation.error or "продажа не проходит в симуляции"
+    return ""
+
+
+def first_trap(denied: list[Rejection]) -> Rejection | None:
+    """Первый отказ, из-за которого из токена не выйти."""
+    for item in denied:
+        if item.code in TRAP_CODES:
+            return item
+    return None
+
+
+async def trap_before_buy(client: ChainClient, token: str, *, amount_native_wei: int,
+                          cfg) -> Rejection | None:  # noqa: ANN001 - ChainSettings
+    """Проверка «из токена можно выйти» перед покупкой вручную.
+
+    Автоснайп и перехват разгона считают вердикт по общему отчёту на пул, а
+    ручная покупка шла мимо любых проверок: карточка токена показывала отчёт,
+    но кнопка «Купить» ничего не перепроверяла. Между просмотром и нажатием
+    проходит время, а команда /buy карточку не открывает вовсе.
+    """
+    if not getattr(cfg, "honeypot_check", True):
+        return None
+    report = await analyze_best(
+        client, token, amount_native_wei=amount_native_wei, settings=cfg,
+        run_simulation=True, route=getattr(cfg, "dex_route", "auto"),
+    )
+    return first_trap(evaluate_verdict(report, cfg))
 
 
 # Чем смягчается каждый фильтр: имя настройки и в какую сторону её двигать.

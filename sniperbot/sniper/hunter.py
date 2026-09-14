@@ -24,7 +24,7 @@ from sniperbot.chain.dex_adapter import PoolRef, get_adapter, route_allows
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.sniper.momentum import MomentumSignal, aggregate_swaps, evaluate_momentum, sample_age
-from sniperbot.sniper.safety import analyze_token, evaluate_verdict
+from sniperbot.sniper.safety import analyze_token, evaluate_verdict, proven_trap
 from sniperbot.sniper.scanner import MAX_BLOCK_RANGE, PairEvent, PairScanner
 from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import to_wei
@@ -322,6 +322,11 @@ class MomentumHunter:
             amount_native_wei=to_wei(sim_amount, client.config.native_decimals),
             settings=None, run_simulation=True, pool=pool,
         )
+
+        trap = proven_trap(report)
+        if trap:
+            async with session_scope() as session:
+                await repo.remember_honeypot(session, chain_key, row.token_address, trap)
 
         event = PairEvent(
             chain=chain_key, pair=row.pair_address, token=row.token_address,

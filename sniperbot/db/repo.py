@@ -241,13 +241,36 @@ async def get_scanner_state(session: AsyncSession, chain: str, factory: str) -> 
 
 # ------------------------------------------------------------------------- flags
 async def is_blacklisted(session: AsyncSession, chain: str, token: str, user_id: int | None) -> bool:
-    stmt = select(TokenFlag.id).where(
+    """Запрещён ли токен: общий запрет бота плюс личный список пользователя.
+
+    Свой whitelist сильнее общего запрета: бот вносит в чёрный список токены,
+    из которых не вышел сам, и у человека должен остаться способ это решение
+    отменить — иначе /blacklist del молча ничего не делает.
+    """
+    # NULL не сравнивается через IN: `user_id IN (1, NULL)` не находит общие
+    # записи, и весь общий чёрный список молча не работал.
+    whose = TokenFlag.user_id.is_(None)
+    if user_id is not None:
+        whose = or_(whose, TokenFlag.user_id == user_id)
+    stmt = select(TokenFlag).where(
         TokenFlag.chain == chain,
         func.lower(TokenFlag.token_address) == token.lower(),
-        TokenFlag.kind == "blacklist",
-        TokenFlag.user_id.in_([user_id, None]) if user_id is not None else TokenFlag.user_id.is_(None),
+        whose,
     )
-    return await session.scalar(stmt) is not None
+    flags = list((await session.scalars(stmt)).all())
+    if any(flag.kind == "whitelist" and flag.user_id == user_id for flag in flags):
+        return False
+    return any(flag.kind == "blacklist" for flag in flags)
+
+
+async def remember_honeypot(session: AsyncSession, chain: str, token: str, note: str) -> None:
+    """Запоминает токен, из которого нельзя выйти, — для всех и навсегда.
+
+    Запись общая (user_id=None): honeypot не бывает «личным», и второй раз
+    заходить в него не должен ни один режим бота. Снимается вручную через
+    /blacklist del.
+    """
+    await add_flag(session, chain, token, "blacklist", None, note[:200])
 
 
 async def add_flag(

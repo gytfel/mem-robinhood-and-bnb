@@ -34,6 +34,14 @@ MAX_BACKOFF = 8              # во столько раз реже опраши�
 SELL_GAS_UNITS = 250_000     # типичный расход газа на продажу с запасом
 GAS_CACHE_SECONDS = 60.0     # цена газа меняется медленнее, чем опрашиваются позиции
 
+# Проверка «выход ещё открыт». Первая — не раньше, чем позиция переживёт блок
+# покупки: многие честные токены запрещают продажу в том же блоке (защита от
+# сэндвича), и ранний отказ ничего не значит.
+EXIT_CHECK_DELAY = 45.0      # сколько ждать после входа, сек
+EXIT_CHECK_INTERVAL = 300.0  # дальше — раз в пять минут, пока позиция открыта
+EXIT_CHECK_RETRY = 30.0      # после отказа перепроверяем быстрее, чем поднимаем тревогу
+EXIT_ALARM_FAILURES = 2      # один отказ может быть случайностью, два подряд — нет
+
 
 def check_interval(age_minutes: float, fast_interval: float, normal_interval: float,
                    fast_window_minutes: float) -> float:
@@ -224,6 +232,12 @@ class PositionMonitor:
         self._failures: dict[int, int] = {}
         self._last_check: dict[int, float] = {}
         self._gas: dict[str, tuple[float, Decimal]] = {}
+        # Проверка выхода: когда спрашивали, сколько раз подряд отказали и по
+        # каким позициям уже предупредили. В памяти, а не в базе: перезапуск
+        # бота — повод проверить заново, а не поверить старой записи.
+        self._exit_checked: dict[int, float] = {}
+        self._exit_failures: dict[int, int] = {}
+        self._exit_alarmed: set[int] = set()
 
     async def run(self) -> None:
         self._running = True
@@ -252,6 +266,9 @@ class PositionMonitor:
         now = asyncio.get_running_loop().time()
         alive = {position.id for position in positions}
         self._last_check = {key: value for key, value in self._last_check.items() if key in alive}
+        self._exit_checked = {key: value for key, value in self._exit_checked.items() if key in alive}
+        self._exit_failures = {key: value for key, value in self._exit_failures.items() if key in alive}
+        self._exit_alarmed &= alive
 
         due = []
         for position in positions:
@@ -276,6 +293,68 @@ class PositionMonitor:
                 raise result
             if isinstance(result, Exception):
                 log.debug("Позиция #%s: %s", position.id, result)
+
+    # ----------------------------------------------------- выход ещё открыт?
+    async def verify_exit(self, position: Position) -> None:
+        """Проверяет, что из позиции всё ещё можно выйти, пока она открыта.
+
+        Проверка перед покупкой ловит не всё: ханипот может запрещать продажу
+        именно тем, кто покупал (у пробника из симуляции такого флага нет), а
+        налог на продажу нередко включают уже после того, как соберут деньги.
+        Единственный способ это увидеть — спрашивать за свой кошелёк и не один
+        раз. Стоит одна-две eth_call раз в пять минут на позицию.
+        """
+        now = asyncio.get_running_loop().time()
+        last = self._exit_checked.get(position.id)
+        if last is None:
+            age = (dt.datetime.now(dt.UTC) - _aware(position.opened_at)).total_seconds()
+            if age < EXIT_CHECK_DELAY:
+                return
+        else:
+            due = EXIT_CHECK_RETRY if self._exit_failures.get(position.id) else EXIT_CHECK_INTERVAL
+            if now - last < due:
+                return
+        self._exit_checked[position.id] = now
+
+        async with session_scope() as session:
+            user = await session.get(User, position.user_id)
+        holder = (user.wallet_address or "") if user is not None else ""
+        if not holder:
+            return
+
+        ok, detail = await self.trader.exit_is_open(position, holder)
+        if ok is None:
+            return          # проверить не удалось — обвинять токен не за что
+        if ok:
+            self._exit_failures.pop(position.id, None)
+            self._exit_alarmed.discard(position.id)
+            return
+
+        failures = self._exit_failures.get(position.id, 0) + 1
+        self._exit_failures[position.id] = failures
+        if failures < EXIT_ALARM_FAILURES or position.id in self._exit_alarmed:
+            return
+        self._exit_alarmed.add(position.id)
+        await self._report_trap(position, detail)
+
+    async def _report_trap(self, position: Position, detail: str) -> None:
+        """Сообщает, что выход закрыт, и закрывает дорогу этому токену."""
+        log.warning("Позиция #%s (%s): продажа не проходит — %s",
+                    position.id, position.token_symbol, detail)
+        async with session_scope() as session:
+            await repo.remember_honeypot(
+                session, position.chain, position.token_address,
+                f"продажа не проходит (позиция #{position.id})",
+            )
+        await self.notifier.send(
+            position.user_id,
+            f"⛔️ <b>{esc(position.token_symbol)}: продажа не проходит</b>\n"
+            "Симуляция продажи из вашего кошелька отклонена сетью дважды подряд. "
+            "Так ведут себя honeypot и налог на продажу, включённый после покупки.\n"
+            "Токен внесён в чёрный список — бот больше не будет его покупать "
+            f"(вернуть: <code>/blacklist del {position.token_address}</code>).\n"
+            f"Попробовать вручную частью объёма: <code>/sell {position.id} 25</code>",
+        )
 
     # --------------------------------------------------------------- оценка
     def _pool_of(self, position: Position) -> PoolRef:
@@ -406,6 +485,9 @@ class PositionMonitor:
                         exit_cost=cost),
         )
         if rule is None:
+            # Продавать нечего — самое время убедиться, что продать вообще дадут.
+            # Раньше по ходу проверки нельзя: правило выхода ждать не должно.
+            await self.verify_exit(position)
             return
         # Метки считаем до продажи: объём позиции нужен тот, что был на входе в правило.
         markers = retired_steps(position, percent) if rule is RULE_SECURE else (

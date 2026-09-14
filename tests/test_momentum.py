@@ -275,7 +275,13 @@ def _hunter(monkeypatch, logs_by_call: list[list[dict]], bought: list):
 
 
 async def _fake_report(*args, **kwargs):
-    return object()
+    """Отчёт-пустышка: симуляция ничего не решила, значит и запретов нет."""
+    from sniperbot.chain.erc20 import TokenInfo
+    from sniperbot.sniper.safety import SafetyReport
+
+    return SafetyReport(token=TokenInfo(address=TOKEN, symbol="MEME", decimals=18,
+                                        name="Meme", total_supply=0),
+                        chain_key="bsc", router="")
 
 
 async def test_hunter_buys_only_after_price_confirms_the_move(db, monkeypatch):

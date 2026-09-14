@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from decimal import Decimal
 
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
-from sniperbot.db.models import Position
+from sniperbot.db.models import Position, User
 from sniperbot.sniper.positions import PositionMonitor
 from sniperbot.utils.fmt import from_wei, to_wei
 
@@ -56,6 +57,8 @@ class FakeTrader:
         self.quotes = 0
         self.dead = False
         self.slippage = Decimal(1)
+        self.exit_open: bool | None = True     # проходит ли продажа в симуляции
+        self.exit_checks: list[tuple[int, str]] = []
 
     async def sell_route(self, client, position, token, amount):  # noqa: ANN001
         self.quotes += 1
@@ -65,6 +68,10 @@ class FakeTrader:
 
     def adapter_for_position(self, position):  # noqa: ANN001
         return object()
+
+    async def exit_is_open(self, position, holder):  # noqa: ANN001
+        self.exit_checks.append((position.id, holder))
+        return self.exit_open, "продажа из кошелька не проходит"
 
     async def sell(self, user, position, *, cfg, percent, reason):  # noqa: ANN001
         self.sales.append((position.id, percent, reason))
@@ -399,3 +406,138 @@ async def test_a_losing_trailing_exit_is_not_called_a_win(db):
     assert closed.status == "closed"
     assert closed.native_returned_wei < closed.native_spent_wei
     assert "📉" in "\n".join(notifier.messages)
+
+
+# ------------------------------------------------- выход перестал работать
+async def aged_position(seconds: float, **kwargs) -> Position:
+    """Позиция, открытая какое-то время назад, с кошельком у владельца."""
+    position = await open_position(**kwargs)
+    async with session_scope() as session:
+        stored = await session.get(Position, position.id)
+        stored.opened_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=seconds)
+        owner = await session.get(User, 1)
+        owner.wallet_address = "0x" + "a" * 40
+    return await fresh(position.id)
+
+
+async def test_a_fresh_position_is_not_accused_too_early(db):
+    """Многие честные токены не дают продать в блоке покупки — это не honeypot."""
+    trader, notifier = FakeTrader(), Silent()
+    trader.exit_open = False
+    position = await aged_position(1)
+
+    await monitor(trader, notifier).verify_exit(position)
+
+    assert trader.exit_checks == [], "проверять выход сразу после входа бессмысленно"
+
+
+async def test_one_refusal_is_not_enough_to_cry_honeypot(db):
+    trader, notifier = FakeTrader(), Silent()
+    trader.exit_open = False
+    position = await aged_position(120)
+
+    await monitor(trader, notifier).verify_exit(position)
+
+    assert trader.exit_checks, "проверка должна была состояться"
+    assert notifier.messages == []
+    async with session_scope() as session:
+        assert await repo.is_blacklisted(session, "rh", TOKEN, 1) is False
+
+
+async def test_two_refusals_in_a_row_warn_and_blacklist(db):
+    """Главный случай: выход закрылся — предупредить и больше не покупать."""
+    trader, notifier = FakeTrader(), Silent()
+    trader.exit_open = False
+    position = await aged_position(120)
+    watcher = monitor(trader, notifier)
+
+    await watcher.verify_exit(position)
+    watcher._exit_checked.clear()          # прошло время до повторной проверки
+    await watcher.verify_exit(position)
+
+    assert len(notifier.messages) == 1
+    assert "продажа не проходит" in notifier.messages[0]
+    assert "/blacklist del" in notifier.messages[0], "решение должно остаться за человеком"
+    async with session_scope() as session:
+        assert await repo.is_blacklisted(session, "rh", TOKEN, 1) is True
+
+
+async def test_the_warning_is_not_repeated(db):
+    trader, notifier = FakeTrader(), Silent()
+    trader.exit_open = False
+    position = await aged_position(120)
+    watcher = monitor(trader, notifier)
+
+    for _ in range(4):
+        watcher._exit_checked.clear()
+        await watcher.verify_exit(position)
+
+    assert len(notifier.messages) == 1
+
+
+async def test_a_working_exit_forgives_a_single_refusal(db):
+    """Сеть моргнула — счётчик отказов должен обнулиться, а не копиться."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await aged_position(120)
+    watcher = monitor(trader, notifier)
+
+    trader.exit_open = False
+    await watcher.verify_exit(position)
+    trader.exit_open = True
+    watcher._exit_checked.clear()
+    await watcher.verify_exit(position)
+    trader.exit_open = False
+    watcher._exit_checked.clear()
+    await watcher.verify_exit(position)
+
+    assert notifier.messages == [], "после успеха отказ считается первым, а не вторым"
+
+
+async def test_an_unknown_answer_accuses_nobody(db):
+    """Нода не поддержала симуляцию — это не приговор токену."""
+    trader, notifier = FakeTrader(), Silent()
+    trader.exit_open = None
+    position = await aged_position(120)
+    watcher = monitor(trader, notifier)
+
+    for _ in range(3):
+        watcher._exit_checked.clear()
+        await watcher.verify_exit(position)
+
+    assert notifier.messages == []
+    async with session_scope() as session:
+        assert await repo.is_blacklisted(session, "rh", TOKEN, 1) is False
+
+
+async def test_the_check_runs_inside_the_usual_position_pass(db):
+    """Проверка должна быть вшита в обычный обход, а не жить отдельной командой."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await aged_position(120)
+
+    await monitor(trader, notifier).check_position(await fresh(position.id))
+
+    assert trader.exit_checks and trader.exit_checks[0][0] == position.id
+
+
+async def test_the_same_position_is_not_re_checked_every_tick(db):
+    """Одна-две eth_call раз в пять минут — не каждые полторы секунды."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await aged_position(120)
+    watcher = monitor(trader, notifier)
+
+    for _ in range(5):
+        await watcher.verify_exit(await fresh(position.id))
+
+    assert len(trader.exit_checks) == 1
+
+
+async def test_the_exit_check_never_delays_a_sale(db):
+    """Правило выхода сработало — проверять симуляцией уже поздно и незачем."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await aged_position(120, stop_loss_pct=30)
+
+    trader.price = ENTRY * Decimal("0.5")            # −50%: стоп-лосс
+    await monitor(trader, notifier).check_position(await fresh(position.id))
+
+    assert trader.sales and trader.sales[0][2] == "stop_loss"
+    assert trader.exit_checks == [], "продажа важнее проверки"
