@@ -89,7 +89,7 @@ async def cb_buy(
     if amount is None or amount <= 0:
         await callback.answer("Некорректная сумма", show_alert=True)
         return
-    await callback.answer("Покупаю…")
+    await callback.answer("Проверяю токен…")
     await execute_buy(callback.message, ctx, user, cfg, chain, token, amount)
 
 

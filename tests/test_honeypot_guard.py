@@ -274,3 +274,70 @@ async def test_the_allowance_slot_is_remembered(monkeypatch):
 
     assert first == second == 4
     assert client.probes == probes, "второй раз слот должен браться из памяти"
+
+
+# ------------------------------------------- связка «монитор → трейдер → симулятор»
+def position_for(**kwargs):
+    from sniperbot.db.models import Position
+
+    defaults = {
+        "id": 501, "user_id": 1, "chain": "bsc", "token_address": TOKEN,
+        "token_symbol": "MEME", "token_decimals": 18, "router_address": ROUTER,
+        "pair_address": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE",
+        "dex_kind": "v2", "pool_fee": 0, "status": "open", "amount_wei": 10**21,
+    }
+    defaults.update(kwargs)
+    return Position(**defaults)
+
+
+def trader_with(client, monkeypatch):  # noqa: ANN001
+    from sniperbot.config import Settings
+    from sniperbot.sniper.executor import Trader
+
+    class Registry:
+        def get(self, key):  # noqa: ANN001
+            return client
+
+        def config(self, key):  # noqa: ANN001
+            return client.config
+
+    trader = Trader(Registry(), None, Settings(BOT_TOKEN="t", MASTER_KEY="k" * 32))
+    monkeypatch.setattr(trader, "adapter_for_position", lambda position: StubAdapter())
+    return trader
+
+
+async def test_the_trader_reports_a_closed_exit(monkeypatch):
+    """Настоящий Trader + настоящий симулятор: продажа не проходит — так и сказано."""
+    client = FakeClient(sell_passes=False, granted=10**30)
+    ok, detail = await trader_with(client, monkeypatch).exit_is_open(position_for(), HOLDER)
+    assert ok is False and detail
+
+
+async def test_the_trader_confirms_a_working_exit(monkeypatch):
+    client = FakeClient(sell_passes=True, granted=10**30)
+    ok, _ = await trader_with(client, monkeypatch).exit_is_open(position_for(), HOLDER)
+    assert ok is True
+
+
+async def test_paper_positions_cost_no_requests(monkeypatch):
+    """Тестовый режим не должен дёргать ноду: там и продавать нечего."""
+    client = FakeClient(sell_passes=False, granted=0)
+    ok, _ = await trader_with(client, monkeypatch).exit_is_open(
+        position_for(is_paper=True), HOLDER)
+    assert ok is None
+    assert client.overrides == []
+
+
+async def test_a_venue_we_cannot_reach_is_not_a_verdict(monkeypatch):
+    """Площадка не определилась — это наша беда, а не вина токена."""
+    from sniperbot.sniper.executor import TradeError
+
+    client = FakeClient(sell_passes=False, granted=0)
+    trader = trader_with(client, monkeypatch)
+
+    def no_adapter(position):  # noqa: ANN001
+        raise TradeError("для сети нет DEX")
+
+    monkeypatch.setattr(trader, "adapter_for_position", no_adapter)
+    ok, detail = await trader.exit_is_open(position_for(), HOLDER)
+    assert ok is None and "DEX" in detail
