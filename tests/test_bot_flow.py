@@ -266,3 +266,15 @@ def test_an_address_typed_instead_of_the_amount_is_recognised():
     source = inspect.getsource(wallet.withdraw_amount)
     assert "extract_address" in source
     assert "Адрес уже принят" in source
+
+
+def test_every_withdraw_entry_names_the_network():
+    """Сеть должна стоять на первом же экране — до того, как введён адрес."""
+    import inspect
+
+    from sniperbot.bot.handlers import wallet
+
+    for handler in (wallet.cb_withdraw, wallet.cmd_withdraw):
+        source = inspect.getsource(handler)
+        assert "chain.name" in source, handler.__name__
+        assert "только в этой сети" in source, handler.__name__

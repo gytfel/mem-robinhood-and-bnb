@@ -125,7 +125,10 @@ async def cb_withdraw(callback: CallbackQuery, state: FSMContext, chain: ChainCo
     await state.set_state(WithdrawStates.address)
     await safe_edit(
         callback,
-        f"📤 <b>Вывод {chain.native_symbol}</b>\n\nПришлите адрес получателя (0x…):",
+        f"📤 <b>Вывод {chain.native_symbol}</b> — сеть <b>{esc(chain.name)}</b>\n"
+        f"Монеты придут только в этой сети: кошелёк получателя должен её "
+        f"поддерживать, биржи её обычно не принимают.\n\n"
+        "Пришлите адрес получателя (0x…):",
         cancel_kb("wallet"),
     )
     await callback.answer()
@@ -234,7 +237,14 @@ async def cmd_withdraw(
     args = (command.args or "").split()
     if not args:
         await state.set_state(WithdrawStates.address)
-        await reply(message, f"📤 Вывод {chain.native_symbol}. Пришлите адрес получателя:", cancel_kb("wallet"))
+        await reply(
+            message,
+            f"📤 <b>Вывод {chain.native_symbol}</b> — сеть <b>{esc(chain.name)}</b>\n"
+            f"Монеты придут только в этой сети: кошелёк получателя должен её "
+            f"поддерживать, биржи её обычно не принимают.\n\n"
+            "Пришлите адрес получателя (0x…):",
+            cancel_kb("wallet"),
+        )
         return
     problem = address_problem(extract_address(args[0]) or args[0])
     if problem:
