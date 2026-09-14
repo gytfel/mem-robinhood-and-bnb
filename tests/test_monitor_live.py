@@ -55,6 +55,7 @@ class FakeTrader:
         self.sales: list[tuple[int, int, str]] = []      # (позиция, процент, причина)
         self.quotes = 0
         self.dead = False
+        self.slippage = Decimal(1)
 
     async def sell_route(self, client, position, token, amount):  # noqa: ANN001
         self.quotes += 1
@@ -71,13 +72,15 @@ class FakeTrader:
             stored = await session.get(Position, position.id)
             sold = stored.amount_wei * percent // 100
             stored.amount_wei -= sold
-            stored.native_returned_wei += to_wei(from_wei(sold) * self.price)
+            # slippage = во сколько раз исполнение хуже котировки
+            stored.native_returned_wei += to_wei(from_wei(sold) * self.price * self.slippage)
             if stored.amount_wei <= 0:
                 stored.status = "closed"
                 stored.exit_reason = reason
         from sniperbot.sniper.executor import TradeResult
 
-        return TradeResult(True, "sell", amount_out=to_wei(from_wei(sold) * self.price))
+        return TradeResult(True, "sell",
+                           amount_out=to_wei(from_wei(sold) * self.price * self.slippage))
 
 
 class Silent:
@@ -96,7 +99,11 @@ def monitor(trader: FakeTrader, notifier: Silent) -> PositionMonitor:
 async def open_position(**kwargs) -> Position:
     async with session_scope() as session:
         await repo.get_or_create_user(session, 1)
-        await repo.get_settings(session, 1, "rh")
+        # По умолчанию настройки без тейка: иначе монитор дотянет его в позицию
+        # и сценарий про трейлинг закончится тейк-профитом.
+        cfg = await repo.get_settings(session, 1, "rh")
+        cfg.take_profit_pct = 0
+        cfg.tp_ladder = ""
         defaults = {
             "user_id": 1, "chain": "rh", "token_address": TOKEN, "token_symbol": "MEME",
             "token_decimals": 18, "router_address": "0x" + "r" * 40, "pair_address": "0x" + "p" * 40,
@@ -345,3 +352,50 @@ async def test_an_existing_take_profit_is_left_alone(db):
     kept = await fresh(position.id)
     assert kept.take_profit_pct == 1000 and kept.tp_ladder == ""
     assert notifier.messages == []
+
+
+# ------------------------------------------- итог сделки в деньгах, а не в цене
+async def test_a_closing_sale_reports_the_money_result(db):
+    """«Трейлинг +37%» и «заработал» — разные вещи; в /pnl попадает второе."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position(trailing_stop_pct=35, stop_loss_pct=0)
+    watcher = monitor(trader, notifier)
+
+    trader.price = ENTRY * 2                      # сходили вверх — растёт пик
+    await watcher.check_position(await fresh(position.id))
+    trader.price = ENTRY * Decimal("1.2")         # откат больше 35% от пика
+    await watcher.check_position(await fresh(position.id))
+
+    assert [reason for _, _, reason in trader.sales] == ["trailing"]
+    text = "\n".join(notifier.messages)
+    assert "Итог сделки" in text
+    assert "учтена в /pnl" in text
+    assert "Вложено" in text
+
+
+async def test_the_header_says_the_percent_is_about_price(db):
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position(stop_loss_pct=30)
+    trader.price = ENTRY * Decimal("0.5")
+
+    await monitor(trader, notifier).check_position(position)
+    assert any("цена" in text and "от входа" in text for text in notifier.messages)
+
+
+async def test_a_losing_trailing_exit_is_not_called_a_win(db):
+    """Ровно случай из жизни: цена выше входа, а денег вернулось меньше."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position(trailing_stop_pct=35, stop_loss_pct=0)
+    watcher = monitor(trader, notifier)
+
+    trader.price = ENTRY * 2
+    await watcher.check_position(await fresh(position.id))
+    # Продажа пройдёт хуже котировки: так и бывает на падающей цене.
+    trader.price = ENTRY * Decimal("1.2")
+    trader.slippage = Decimal("0.6")
+    await watcher.check_position(await fresh(position.id))
+
+    closed = await fresh(position.id)
+    assert closed.status == "closed"
+    assert closed.native_returned_wei < closed.native_spent_wei
+    assert "📉" in "\n".join(notifier.messages)

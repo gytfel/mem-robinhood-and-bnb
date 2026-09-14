@@ -420,7 +420,8 @@ class PositionMonitor:
 
         await self.notifier.send(
             position.user_id,
-            f"{rule.icon} <b>{rule.title}</b> по {esc(position.token_symbol)} ({change:+.1f}%)\n"
+            f"{rule.icon} <b>{rule.title}</b> по {esc(position.token_symbol)} "
+            f"(цена {change:+.1f}% от входа)\n"
             + (f"Продаю {percent}% — столько, чтобы вернуть вложенное. "
                f"Остальные {100 - percent}% остаются в позиции."
                if rule is RULE_SECURE else f"Продаю {percent}% позиции…"),
@@ -439,6 +440,7 @@ class PositionMonitor:
             position.user_id,
             f"✅ Продано {percent}% {esc(position.token_symbol)}\n"
             f"Получено: {fmt_amount(from_wei(result.amount_out))} {symbol}"
+            + await self._outcome_line(position.id, symbol)
             + (f"\n\n🛟 Вложенное вернулось — что бы дальше ни случилось, "
                f"эта сделка уже не убыточна. Остаток {100 - percent}% "
                "едет дальше со стопом в безубытке."
@@ -448,6 +450,28 @@ class PositionMonitor:
 
         if markers:
             await self._mark_ladder_step(position.id, *markers)
+
+    async def _outcome_line(self, position_id: int, symbol: str) -> str:
+        """Итог закрытой сделки в деньгах — то, что попадёт в /pnl.
+
+        Рост цены и заработок это разные числа: налоги, проскальзывание и
+        движение цены между решением и исполнением легко превращают «+37%» в
+        минус. Пока в сообщении стоит только процент, отчёт выглядит враньём.
+        """
+        async with session_scope() as session:
+            done = await session.get(Position, position_id)
+        if done is None or done.status == "open" or not done.native_spent_wei:
+            return ""
+
+        spent = from_wei(done.native_spent_wei)
+        returned = from_wei(done.native_returned_wei or 0)
+        pnl = returned - spent
+        share = (pnl / spent * 100) if spent > 0 else Decimal(0)
+        icon = "📈" if pnl >= 0 else "📉"
+        return (f"\n\n{icon} <b>Итог сделки: {'+' if pnl >= 0 else ''}{fmt_amount(pnl)} "
+                f"{symbol}</b> ({share:+.1f}%)\n"
+                f"Вложено {fmt_amount(spent)} · вернулось {fmt_amount(returned)} — "
+                "сделка учтена в /pnl")
 
     async def _heal_take_profit(self, position: Position) -> None:
         """Позиция без фиксации прибыли берёт её из текущих настроек.
