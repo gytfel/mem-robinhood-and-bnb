@@ -342,3 +342,57 @@ async def test_a_honeypot_is_refused_on_the_way_to_the_trader(bot_and_dispatcher
         assert "чёрном списке" in "\n".join(session.sent)
     finally:
         trade_handlers.trap_before_buy, ctx.trader.buy = original_trap, original_buy
+
+
+async def test_the_owner_turns_the_user_counter_on_and_off(bot_and_dispatcher):
+    """Сквозь настоящий роутинг: команда меняет и экран, и запись в базе."""
+    from sniperbot.audience import STATE_KEY
+    from sniperbot.db import repo
+    from sniperbot.db.base import session_scope
+
+    bot, dp, session = bot_and_dispatcher
+    ctx = dp["ctx"]
+    try:
+        await dp.feed_update(bot, update("/counter on"))
+        assert "Счётчик включён" in "\n".join(session.sent)
+        assert ctx.audience.enabled is True
+        async with session_scope() as db_session:
+            assert await repo.get_state(db_session, STATE_KEY) == "1"
+
+        session.sent.clear()
+        await dp.feed_update(bot, update("/start"))
+        assert "пользовател" in "\n".join(session.sent), "число должно появиться на старте"
+
+        session.sent.clear()
+        await dp.feed_update(bot, update("/counter off"))
+        assert ctx.audience.enabled is False
+        async with session_scope() as db_session:
+            assert await repo.get_state(db_session, STATE_KEY) == "0"
+
+        session.sent.clear()
+        await dp.feed_update(bot, update("/start"))
+        assert "пользовател" not in "\n".join(session.sent)
+    finally:
+        ctx.audience.enabled = False
+
+
+async def test_a_stranger_cannot_touch_the_counter(bot_and_dispatcher):
+    """Команда админская: чужой её не переключит."""
+    import datetime as dt
+
+    from aiogram.types import Chat, Update
+    from aiogram.types import Message as TgMessage
+    from aiogram.types import User as TgUser
+
+    bot, dp, session = bot_and_dispatcher
+    ctx = dp["ctx"]
+    stranger = Update(update_id=2, message=TgMessage(
+        message_id=3, date=dt.datetime.now(dt.UTC),
+        chat=Chat(id=999, type="private"),
+        from_user=TgUser(id=999, is_bot=False, first_name="Чужой"),
+        text="/counter on"))
+
+    await dp.feed_update(bot, stranger)
+
+    assert ctx.audience.enabled is False
+    assert "только для администратора" in "\n".join(session.sent)

@@ -12,6 +12,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
 from sniperbot.access import STATE_EXTRA, STATE_MODE, AccessPolicy, parse_ids
+from sniperbot.audience import STATE_KEY as AUDIENCE_STATE_KEY
+from sniperbot.audience import AudienceCounter
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.handlers import build_router
 from sniperbot.bot.middlewares import (
@@ -96,6 +98,7 @@ ADMIN_COMMANDS = [
     BotCommand(command="treasury", description="🔒 Кошелёк комиссий: баланс и вывод"),
     BotCommand(command="exempt", description="🔒 Освободить пользователя от комиссий"),
     BotCommand(command="access", description="🔒 Кому открыт бот"),
+    BotCommand(command="counter", description="🔒 Счётчик пользователей на старте"),
     BotCommand(command="users", description="🔒 Список пользователей"),
     BotCommand(command="userinfo", description="🔒 Карточка пользователя"),
     BotCommand(command="ban", description="🔒 Заблокировать пользователя"),
@@ -138,6 +141,16 @@ async def load_fees(settings: Settings) -> FeeSettings:
         stored = await repo.get_state(session, FEES_STATE_KEY)
     fees.apply_state(stored)
     return fees
+
+
+async def load_audience() -> AudienceCounter:
+    """Счётчик пользователей: решение команды /counter переживает перезапуск."""
+    from sniperbot.db import repo
+
+    counter = AudienceCounter()
+    async with session_scope() as session:
+        counter.apply_state(await repo.get_state(session, AUDIENCE_STATE_KEY))
+    return counter
 
 
 async def publish_commands(bot: Bot, admins: set[int]) -> None:
@@ -233,7 +246,7 @@ async def run_bot() -> None:
     ctx = BotContext(
         settings=settings, registry=registry, wallets=wallets,
         trader=trader, engine=engine, notifier=notifier, build=running_build,
-        access=policy, fees=fees,
+        access=policy, fees=fees, audience=await load_audience(),
     )
 
     dp = Dispatcher(storage=MemoryStorage())

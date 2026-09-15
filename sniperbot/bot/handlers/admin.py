@@ -15,6 +15,8 @@ from aiogram.types import Message
 from sqlalchemy import func, select
 
 from sniperbot.access import OPEN, PRIVATE, STATE_EXTRA, STATE_MODE
+from sniperbot.audience import STATE_KEY as AUDIENCE_STATE_KEY
+from sniperbot.audience import AudienceCounter
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.ui import reply
 from sniperbot.chain.clients import ChainClient
@@ -31,6 +33,10 @@ router = Router(name="admin")
 
 ADMIN_ONLY = ("🔒 Команда только для администратора бота.\n"
               "Список доступных вам команд: /help")
+
+# До этого числа счётчик работает против бота, и предупредить об этом честнее,
+# чем промолчать и дать включить.
+SMALL_AUDIENCE = 50
 
 
 def _deny(is_admin: bool) -> bool:
@@ -320,6 +326,54 @@ async def _save_access(policy) -> None:  # noqa: ANN001 - AccessPolicy
     async with session_scope() as session:
         await repo.set_state(session, STATE_MODE, policy.override)
         await repo.set_state(session, STATE_EXTRA, policy.extra_value())
+
+
+@router.message(Command("counter"))
+async def cmd_counter(message: Message, command: CommandObject, ctx: BotContext,
+                      is_admin: bool = False) -> None:
+    """Показывать ли число пользователей на стартовом экране."""
+    if _deny(is_admin):
+        await _refuse(message)
+        return
+
+    counter = ctx.audience
+    action = (command.args or "").strip().lower()
+    async with session_scope() as session:
+        total = await repo.user_count(session, include_blocked=False)
+
+    if action in {"on", "вкл", "включить", "1"}:
+        counter.enabled = True
+        await _save_counter(counter)
+        await reply(message, "✅ <b>Счётчик включён.</b>\nНа стартовом экране теперь стоит:\n\n"
+                             f"{counter.line(total)}\n\nУбрать: <code>/counter off</code>")
+        return
+
+    if action in {"off", "выкл", "выключить", "0"}:
+        counter.enabled = False
+        await _save_counter(counter)
+        await reply(message, "🚫 <b>Счётчик выключен.</b> Со стартового экрана строка убрана.\n"
+                             "Вернуть: <code>/counter on</code>")
+        return
+
+    preview = AudienceCounter(enabled=True).line(total) or "ничего: пользователей ещё нет"
+    lines = [
+        f"👥 <b>Счётчик пользователей</b>: {'включён' if counter.enabled else 'выключен'}\n",
+        (f"Строка на стартовом экране: {preview}" if counter.enabled
+         else f"Сейчас строки нет. Была бы такой: {preview}"),
+        "Считаются все, кто завёл кошелёк, кроме заблокированных.\n",
+        "<code>/counter on</code> — показывать всем",
+        "<code>/counter off</code> — убрать",
+    ]
+    if not counter.enabled and total < SMALL_AUDIENCE:
+        lines.append("\n<i>Пока пользователей мало, число отговаривает сильнее, чем "
+                     "убеждает: новый человек видит маленькую цифру и уходит.</i>")
+    await reply(message, "\n".join(lines))
+
+
+async def _save_counter(counter) -> None:  # noqa: ANN001 - AudienceCounter
+    """Выбор переживает перезапуск."""
+    async with session_scope() as session:
+        await repo.set_state(session, AUDIENCE_STATE_KEY, counter.to_state())
 
 
 @router.message(Command("treasury"))

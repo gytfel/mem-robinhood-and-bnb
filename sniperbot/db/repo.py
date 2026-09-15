@@ -388,8 +388,16 @@ async def pairs_since(
     return list((await session.scalars(stmt.limit(limit))).all())
 
 
-async def user_count(session: AsyncSession) -> int:
-    return int(await session.scalar(select(func.count()).select_from(User)) or 0)
+async def user_count(session: AsyncSession, *, include_blocked: bool = True) -> int:
+    """Сколько людей завели у бота кошелёк.
+
+    Для служебной статистики считаются все строки, для показа людям —
+    без заблокированных: числом на витрине их лучше не приписывать.
+    """
+    stmt = select(func.count()).select_from(User)
+    if not include_blocked:
+        stmt = stmt.where(User.is_blocked.is_(False))
+    return int(await session.scalar(stmt) or 0)
 
 
 async def list_users(session: AsyncSession, limit: int = 50) -> list[User]:

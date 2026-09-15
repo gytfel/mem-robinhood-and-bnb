@@ -41,11 +41,27 @@ async def referral_line(ctx: BotContext, user: User) -> str:
     return f"\n{line}\nВаша ссылка: /ref" if line else ""
 
 
+async def audience_line(ctx: BotContext) -> str:
+    """Число пользователей бота — если владелец включил его командой /counter.
+
+    Пока счётчик выключен, запроса к базе нет вовсе: это стартовый экран, он
+    открывается чаще всех остальных.
+    """
+    if not ctx.audience.enabled:
+        return ""
+    async with session_scope() as session:
+        total = await repo.user_count(session, include_blocked=False)
+    line = ctx.audience.line(total)
+    return f"{line}\n" if line else ""
+
+
 async def render_main(ctx: BotContext, user: User, cfg: ChainSettings, chain: ChainConfig, open_positions: int) -> str:
     balance = await _safe_balance(ctx, chain.key, user.wallet_address)
     return (
-        f"🤖 <b>Memecoin Sniper</b>\n\n"
-        f"🌐 Сеть: <b>{esc(chain.name)}</b>\n"
+        "🤖 <b>Memecoin Sniper</b>\n"
+        + await audience_line(ctx)
+        + "\n"
+        + f"🌐 Сеть: <b>{esc(chain.name)}</b>\n"
         f"💼 Кошелёк: <code>{user.wallet_address}</code>\n"
         f"💰 Баланс: <b>{balance}</b>\n"
         f"📊 Открытых позиций: <b>{open_positions}</b>\n"

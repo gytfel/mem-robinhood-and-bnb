@@ -278,3 +278,35 @@ def test_every_withdraw_entry_names_the_network():
         source = inspect.getsource(handler)
         assert "chain.name" in source, handler.__name__
         assert "только в этой сети" in source, handler.__name__
+
+
+# ------------------------------------------------- счётчик пользователей на старте
+async def test_the_start_screen_says_nothing_about_users_by_default(db, ctx):
+    """Пока владелец не включил счётчик, числа на экране нет."""
+    data = await run_middleware(ctx)
+    text = await render_main(ctx, data["user"], data["cfg"], data["chain"], open_positions=0)
+    assert "пользовател" not in text
+
+
+async def test_the_start_screen_shows_the_count_once_enabled(db, ctx):
+    data = await run_middleware(ctx)
+    await run_middleware(ctx, uid=556)
+    await run_middleware(ctx, uid=557)
+    ctx.audience.enabled = True
+
+    text = await render_main(ctx, data["user"], data["cfg"], data["chain"], open_positions=0)
+
+    assert "👥 3 пользователя" in text
+    assert text.index("👥") < text.index("🌐"), "строка идёт под названием бота"
+
+
+async def test_the_screen_does_not_count_banned_users(db, ctx):
+    data = await run_middleware(ctx)
+    await run_middleware(ctx, uid=556)
+    async with session_scope() as session:
+        await repo.set_blocked(session, 556, True)
+    ctx.audience.enabled = True
+
+    text = await render_main(ctx, data["user"], data["cfg"], data["chain"], open_positions=0)
+
+    assert "👥 1 пользователь\n" in text

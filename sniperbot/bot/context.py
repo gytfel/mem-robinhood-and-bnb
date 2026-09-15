@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from sniperbot.access import AccessPolicy
+from sniperbot.audience import AudienceCounter
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import ChainConfig, Settings
@@ -32,6 +33,9 @@ class BotContext:
     access: AccessPolicy = field(default_factory=AccessPolicy)
     # Комиссии: тот же объект, что держит Trader, — /fees меняет его на ходу.
     fees: FeeSettings = field(default_factory=FeeSettings)
+    # Показывать ли число пользователей на стартовом экране. /counter меняет
+    # этот же объект, поэтому строка появляется и исчезает без перезапуска.
+    audience: AudienceCounter = field(default_factory=AudienceCounter)
 
     @property
     def active_chain_keys(self) -> list[str]:
