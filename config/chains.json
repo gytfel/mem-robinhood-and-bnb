@@ -52,7 +52,8 @@
       "0x0000000000000000000000000000000000000000",
       "0x000000000000000000000000000000000000dEaD"
     ],
-    "feed_url": ""
+    "feed_url": "",
+    "ws_url": ""
   },
   "robinhood": {
     "name": "Robinhood Chain",
@@ -98,6 +99,7 @@
       "0x000000000000000000000000000000000000dEaD"
     ],
     "_comment": "Robinhood Chain (Arbitrum Orbit L2, mainnet с 01.07.2026, chain_id 4663). RPC и обозреватель заполнены. Для V2 нужны ROUTER, FACTORY и WRAPPED_NATIVE, для V3 — V3_ROUTER, V3_FACTORY и V3_QUOTER (QuoterV2). Адреса берите в docs.robinhood.com/chain/contracts или developers.uniswap.org, затем проверьте командой `sniper discover <адрес роутера>` — она сама определит версию и достанет фабрику с WETH, а `sniper doctor` сверит их с конфигом.",
-    "feed_url": ""
+    "feed_url": "",
+    "ws_url": ""
   }
 }

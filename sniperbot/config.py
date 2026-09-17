@@ -84,6 +84,8 @@ class ChainConfig:
     rpc_urls: list[str] = field(default_factory=list)
     # Поток секвенсора Nitro. Пусто — подписки нет, бот работает опросом.
     feed_url: str = ""
+    # Вебсокет RPC для eth_subscribe: узел сам присылает события. Пусто — опрос.
+    ws_url: str = ""
     explorer_url: str = ""
     wrapped_native: str = ""
     stable_token: str = ""
@@ -295,6 +297,8 @@ def _apply_env_overrides(key: str, raw: dict, source: dict[str, str] | None = No
         raw["rpc_urls"] = _split(rpc)
     if (feed := env("FEED_URL")) is not None:
         raw["feed_url"] = feed
+    if (websocket := env("WS_URL")) is not None:
+        raw["ws_url"] = websocket
     if (chain_id := env("CHAIN_ID")) is not None and chain_id.isdigit():
         raw["chain_id"] = int(chain_id)
     if (wrapped := env("WRAPPED_NATIVE")) is not None:

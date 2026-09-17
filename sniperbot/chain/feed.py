@@ -209,9 +209,17 @@ async def probe(url: str, *, timeout: float = 10.0) -> list[tuple[str, str]]:
                     timeout=aiohttp.ClientWSTimeout(ws_close=timeout),
                     max_msg_size=32 * 1024 * 1024,
                 ) as socket:
-                    frame = await asyncio.wait_for(socket.receive(), timeout=timeout)
-                    got = len(parse_frame(frame.data)) if frame.type is aiohttp.WSMsgType.TEXT else 0
-                    results.append((title, f"✅ подключился, сообщений в первом кадре: {got}"))
+                    # Рукопожатие прошло — это уже ответ на главный вопрос. Данные
+                    # лента шлёт сама, а вот RPC молчит, пока его не попросят:
+                    # молчание здесь не отказ, и путать одно с другим нельзя.
+                    try:
+                        frame = await asyncio.wait_for(socket.receive(), timeout=min(timeout, 5.0))
+                        got = (len(parse_frame(frame.data))
+                               if frame.type is aiohttp.WSMsgType.TEXT else 0)
+                        note = f"сообщений в первом кадре: {got}"
+                    except TimeoutError:
+                        note = "данных без подписки не шлёт — для RPC это норма"
+                    results.append((title, f"✅ подключился, {note}"))
                     return results       # рабочий способ найден, дальше не нужно
             except Exception as exc:  # noqa: BLE001 - перебор, отказ это ожидаемый исход
                 results.append((title, f"⛔️ {str(exc)[:90]}"))

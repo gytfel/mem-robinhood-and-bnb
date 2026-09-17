@@ -8,9 +8,11 @@ import logging
 import time
 from decimal import Decimal
 
+from sniperbot.chain.abi import PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.dex_adapter import PoolRef, get_adapter, route_allows
 from sniperbot.chain.feed import SequencerFeed
+from sniperbot.chain.logstream import LogStream
 from sniperbot.chain.wallet import WalletService
 from sniperbot.config import Settings
 from sniperbot.db import repo
@@ -57,6 +59,8 @@ class SniperEngine:
         # Подписки на потоки секвенсоров: сеть -> поток. Пусто, пока в конфиге
         # сети не указан адрес потока.
         self.feeds: dict[str, SequencerFeed] = {}
+        # Подписки на логи через вебсокет RPC — то же ускорение там, где ленты нет.
+        self.streams: dict[str, LogStream] = {}
         self._watching = False
         self._semaphore = asyncio.Semaphore(MAX_PARALLEL_PAIRS)
         self._inflight: set[asyncio.Task] = set()
@@ -79,6 +83,7 @@ class SniperEngine:
                 chain_scanners.append(scanner)
                 self._tasks.append(asyncio.create_task(scanner.run(), name=f"scanner-{key}-{router_cfg.name}"))
             self._start_feed(key, config, chain_scanners)
+            self._start_logs(key, config, chain_scanners)
         self._tasks.append(asyncio.create_task(self.watch_pending(), name="liquidity-watcher"))
         self._tasks.append(asyncio.create_task(self.hunter.run(), name="momentum-hunter"))
         log.info("Запущено сканеров: %s (+ ожидание ликвидности и перехват разгона)",
@@ -105,6 +110,27 @@ class SniperEngine:
         feed = SequencerFeed(url, watched, poke, name=config.name)
         self.feeds[chain_key] = feed
         self._tasks.append(asyncio.create_task(feed.run(), name=f"feed-{chain_key}"))
+
+    def _start_logs(self, chain_key: str, config, scanners: list[PairScanner]) -> None:  # noqa: ANN001
+        """Подписка на логи фабрик: новая пара приходит сама, без опроса.
+
+        Подписываемся только на события создания пар — их единицы в минуту.
+        Подписка на все свопы сети завалила бы бот трафиком ради того же
+        пробуждения.
+        """
+        url = (getattr(config, "ws_url", "") or "").strip()
+        if not url:
+            return
+        factories = {router.factory for router in config.routers if router.configured}
+
+        def poke(_block: int) -> None:
+            for scanner in scanners:
+                scanner.wake()
+
+        stream = LogStream(url, factories, [PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC],
+                           poke, name=config.name)
+        self.streams[chain_key] = stream
+        self._tasks.append(asyncio.create_task(stream.run(), name=f"logs-{chain_key}"))
 
     def status(self) -> list[dict]:
         """Состояние сканеров — для команды /health."""
@@ -186,6 +212,8 @@ class SniperEngine:
         self.hunter.stop()
         for feed in self.feeds.values():
             feed.stop()
+        for stream in self.streams.values():
+            stream.stop()
         for scanner in self._scanners:
             scanner.stop()
         for task in [*self._tasks, *self._inflight]:

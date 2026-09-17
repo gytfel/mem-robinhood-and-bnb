@@ -462,6 +462,60 @@ async def _feed(args: argparse.Namespace) -> int:
     return 1
 
 
+# -------------------------------------------------------------------------------- ws
+def cmd_ws(args: argparse.Namespace) -> int:
+    """Проверка подписки на события через вебсокет RPC."""
+    import asyncio
+
+    return asyncio.run(_ws(args))
+
+
+async def _ws(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from sniperbot.chain.abi import PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC
+    from sniperbot.chain.logstream import LogStream
+    from sniperbot.config import env_prefix, get_chains
+
+    chains = get_chains()
+    chain = chains.get(args.chain)
+    if chain is None:
+        print(f"Сети «{args.chain}» нет. Доступны: {', '.join(chains)}")
+        return 1
+    url = args.url or chain.ws_url
+    if not url:
+        print(f"Для сети {chain.name} вебсокет не задан.\n"
+              f"Укажите его в .env: {env_prefix(args.chain)}_WS_URL=wss://…\n"
+              "или передайте здесь: sniper ws --url wss://…")
+        return 1
+
+    factories = {router.factory for router in chain.routers if router.configured}
+    if not factories:
+        print(f"У сети {chain.name} не настроена ни одна фабрика — подписываться не на что.")
+        return 1
+
+    print(f"Сеть {chain.name}: подписываюсь через {url}")
+    print(f"Фабрик под наблюдением: {len(factories)}")
+    stream = LogStream(url, factories, [PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC],
+                       lambda block: print(f"  🔔 новая пара, блок {block}"), name=chain.name)
+    task = asyncio.create_task(stream.run())
+    try:
+        await asyncio.sleep(args.seconds)
+    finally:
+        stream.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    if stream.connected or stream.events:
+        print(f"\nПодписка работает: событий за {args.seconds} с — {stream.events}.")
+        print("Новых пар могло и не быть — главное, что узел принял подписку.")
+        print(f"Включить: {env_prefix(args.chain)}_WS_URL={url} в .env и перезапустить бота.")
+        return 0
+    print(f"\nПодписка не оформлена: {stream.last_error or 'узел не ответил'}")
+    print("Этот адрес не годится. Публичные вебсокеты сети есть у сторонних провайдеров.")
+    return 1
+
+
 # ----------------------------------------------------------------------------- check
 def cmd_check(args: argparse.Namespace) -> int:
     import asyncio
@@ -848,6 +902,13 @@ def build_parser() -> argparse.ArgumentParser:
     feed_parser.add_argument("--url", default="", help="адрес потока, если не задан в .env")
     feed_parser.add_argument("--seconds", type=float, default=20.0, help="сколько слушать")
     feed_parser.set_defaults(func=cmd_feed)
+
+    ws_parser = subparsers.add_parser(
+        "ws", help="проверить подписку на события через вебсокет RPC")
+    ws_parser.add_argument("--chain", default="robinhood", help="ключ сети из chains.json")
+    ws_parser.add_argument("--url", default="", help="адрес вебсокета, если не задан в .env")
+    ws_parser.add_argument("--seconds", type=float, default=20.0, help="сколько слушать")
+    ws_parser.set_defaults(func=cmd_ws)
 
     keygen_parser = subparsers.add_parser("keygen", help="сгенерировать MASTER_KEY")
     keygen_parser.set_defaults(func=cmd_keygen)
