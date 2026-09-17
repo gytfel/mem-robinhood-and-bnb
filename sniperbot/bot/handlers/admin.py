@@ -24,7 +24,7 @@ from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import Position, SeenPair, TradeLog
-from sniperbot.utils.fmt import esc, fmt_amount, from_wei
+from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_url
 
 log = logging.getLogger(__name__)
 
@@ -41,13 +41,6 @@ SMALL_AUDIENCE = 50
 
 def _deny(is_admin: bool) -> bool:
     return not is_admin
-
-
-def _short_url(url: str) -> str:
-    """Ссылку на узел показываем без ключа: он не должен утечь со скриншотом."""
-    body = url.split("://", 1)[-1]
-    host, _, path = body.partition("/")
-    return host if not path else f"{host}/…"
 
 
 async def _refuse(message: Message) -> None:
@@ -144,7 +137,7 @@ async def cmd_usage(message: Message, ctx: BotContext, is_admin: bool = False) -
             lines.append("  ✅ все запросы выполнены: отказы узлов пережиты переключением")
         for endpoint in getattr(client, "endpoints", []):
             mark = "▸" if endpoint.url == client.rpc_url else "·"
-            lines.append(f"  {mark} {esc(_short_url(endpoint.url))} — {esc(endpoint.health())}")
+            lines.append(f"  {mark} {esc(short_url(endpoint.url))} — {esc(endpoint.health())}")
             if endpoint.pace:
                 lines.append(f"      темп снижен до {1 / endpoint.pace:.0f} запросов/сек")
             for reason in endpoint.reasons:

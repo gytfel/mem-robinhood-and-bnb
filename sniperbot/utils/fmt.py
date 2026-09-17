@@ -66,6 +66,17 @@ def plural(count: int, one: str, few: str, many: str) -> str:
     return many
 
 
+def short_url(url: str) -> str:
+    """Адрес узла без пути: в ссылке провайдера обычно лежит ключ доступа.
+
+    Такие адреса попадают в отчёты и на скриншоты, а ключ из ссылки — это
+    полный доступ к оплаченному тарифу.
+    """
+    body = (url or "").split("://", 1)[-1]
+    host, _, path = body.partition("/")
+    return host if not path else f"{host}/…"
+
+
 def short_addr(address: str, head: int = 6, tail: int = 4) -> str:
     if not address or len(address) <= head + tail + 2:
         return address or "—"

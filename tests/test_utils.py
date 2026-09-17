@@ -61,3 +61,20 @@ def test_has_code_distinguishes_contracts_from_wallets():
     assert has_code(b"") is False
     assert has_code("0x") is False
     assert has_code(None) is False
+
+
+# --------------------------------------------------- адрес узла без ключа
+def test_the_provider_key_never_reaches_the_screen():
+    """В ссылке платного узла лежит ключ — а такие строки идут в отчёты и скриншоты."""
+    from sniperbot.utils.fmt import short_url
+
+    hidden = short_url("wss://api-robinhood-mainnet.n.dwellir.com/9f3c-secret-key")
+    assert hidden == "api-robinhood-mainnet.n.dwellir.com/…"
+    assert "secret" not in hidden
+
+
+def test_an_address_without_a_key_stays_readable():
+    from sniperbot.utils.fmt import short_url
+
+    assert short_url("wss://rpc.ordofi.network") == "rpc.ordofi.network"
+    assert short_url("") == ""

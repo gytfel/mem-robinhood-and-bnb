@@ -411,6 +411,7 @@ async def _feed(args: argparse.Namespace) -> int:
 
     from sniperbot.chain.feed import SequencerFeed
     from sniperbot.config import env_prefix, get_chains
+    from sniperbot.utils.fmt import short_url
 
     chains = get_chains()
     chain = chains.get(args.chain)
@@ -432,7 +433,7 @@ async def _feed(args: argparse.Namespace) -> int:
               f"{env_prefix(args.chain)}_FACTORY в .env")
         return 1
 
-    print(f"Сеть {chain.name}: подключаюсь к {url}")
+    print(f"Сеть {chain.name}: подключаюсь к {short_url(url)}")
     print(f"Под наблюдением адресов: {len(watched)} (роутеры и фабрики)")
 
     feed = SequencerFeed(url, watched, lambda number: print(f"  🔔 пробуждение на блоке {number}"),
@@ -476,6 +477,7 @@ async def _ws(args: argparse.Namespace) -> int:
     from sniperbot.chain.abi import PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC
     from sniperbot.chain.logstream import LogStream
     from sniperbot.config import env_prefix, get_chains
+    from sniperbot.utils.fmt import short_url
 
     chains = get_chains()
     chain = chains.get(args.chain)
@@ -494,7 +496,7 @@ async def _ws(args: argparse.Namespace) -> int:
         print(f"У сети {chain.name} не настроена ни одна фабрика — подписываться не на что.")
         return 1
 
-    print(f"Сеть {chain.name}: подписываюсь через {url}")
+    print(f"Сеть {chain.name}: подписываюсь через {short_url(url)}")
     print(f"Фабрик под наблюдением: {len(factories)}")
     stream = LogStream(url, factories, [PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC],
                        lambda block: print(f"  🔔 новая пара, блок {block}"), name=chain.name)
@@ -509,7 +511,8 @@ async def _ws(args: argparse.Namespace) -> int:
     if stream.connected or stream.events:
         print(f"\nПодписка работает: событий за {args.seconds} с — {stream.events}.")
         print("Новых пар могло и не быть — главное, что узел принял подписку.")
-        print(f"Включить: {env_prefix(args.chain)}_WS_URL={url} в .env и перезапустить бота.")
+        print(f"Включить: впишите этот адрес в {env_prefix(args.chain)}_WS_URL "
+              "в .env и перезапустите бота.")
         return 0
     print(f"\nПодписка не оформлена: {stream.last_error or 'узел не ответил'}")
     print("Этот адрес не годится. Публичные вебсокеты сети есть у сторонних провайдеров.")
