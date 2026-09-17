@@ -171,6 +171,18 @@ def confirm_withdraw_kb() -> InlineKeyboardMarkup:
     ]])
 
 
+class TuneCB(CallbackData, prefix="tn"):
+    action: str
+
+
+def tune_kb() -> InlineKeyboardMarkup:
+    """Применить предложенные настройки — или оставить как есть."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Применить", callback_data=TuneCB(action="apply").pack()),
+        InlineKeyboardButton(text="Оставить как есть", callback_data=TuneCB(action="skip").pack()),
+    ]])
+
+
 def cancel_kb(section: str = "main") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=MenuCB(section=section).pack())]]

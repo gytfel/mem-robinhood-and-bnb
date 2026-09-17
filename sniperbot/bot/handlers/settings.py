@@ -12,7 +12,16 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from sniperbot.bot.context import BotContext
-from sniperbot.bot.keyboards import GroupCB, MenuCB, SetCB, cancel_kb, group_menu, main_menu, settings_menu
+from sniperbot.bot.keyboards import (
+    GroupCB,
+    MenuCB,
+    SetCB,
+    TuneCB,
+    cancel_kb,
+    group_menu,
+    main_menu,
+    settings_menu,
+)
 from sniperbot.bot.texts import route_warning
 from sniperbot.bot.ui import reply, safe_edit
 from sniperbot.config import ChainConfig
@@ -32,6 +41,7 @@ from sniperbot.settings_registry import (
     render_full,
     render_one,
 )
+from sniperbot.sniper.weekly import pending_key, unpack
 from sniperbot.utils.fmt import esc, fmt_amount
 
 log = logging.getLogger(__name__)
@@ -286,6 +296,48 @@ async def cb_toggle(callback: CallbackQuery, callback_data: SetCB, ctx: BotConte
     await _persist(user.id, chain.key, setting, value, cfg, user)
     await callback.answer(f"{setting.title}: {'вкл' if value else 'выкл'}")
     await _rerender(callback, ctx, user, cfg, chain, setting.group)
+
+
+@router.callback_query(TuneCB.filter())
+async def cb_tune(callback: CallbackQuery, callback_data: TuneCB, user: User,
+                  cfg: ChainSettings, chain: ChainConfig) -> None:
+    """Применяет настройки, предложенные недельной подстройкой."""
+    async with session_scope() as session:
+        pending = unpack(await repo.get_state(session, pending_key(user.id)))
+
+    if callback_data.action != "apply" or not pending:
+        async with session_scope() as session:
+            await repo.set_state(session, pending_key(user.id), "")
+        await callback.answer("Оставил как есть")
+        await safe_edit(callback, callback.message.html_text + "\n\n<i>Ничего не изменено.</i>")
+        return
+
+    applied: list[str] = []
+    for name, raw in pending:
+        setting = find(name)
+        if setting is None:
+            continue
+        try:
+            value = setting.parse(raw)
+        except ValueError:
+            continue
+        await _persist(user.id, chain.key, setting, value, cfg, user)
+        applied.append(f"· {esc(setting.title)}: "
+                       f"<b>{esc(setting.display(cfg, user, chain.native_symbol))}</b>")
+
+    async with session_scope() as session:
+        await repo.set_state(session, pending_key(user.id), "")
+
+    if not applied:
+        await callback.answer("Нечего применять", show_alert=True)
+        return
+    await callback.answer("Применил")
+    await safe_edit(
+        callback,
+        callback.message.html_text + "\n\n✅ <b>Применено</b>\n" + "\n".join(applied)
+        + "\n\nНа открытые позиции это не влияет — им правила достались при покупке: "
+          "<code>/apply</code>",
+    )
 
 
 @router.callback_query(SetCB.filter(F.action == "edit"))

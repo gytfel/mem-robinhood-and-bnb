@@ -396,3 +396,68 @@ async def test_a_stranger_cannot_touch_the_counter(bot_and_dispatcher):
 
     assert ctx.audience.enabled is False
     assert "только для администратора" in "\n".join(session.sent)
+
+
+async def test_the_weekly_proposal_is_applied_only_by_the_button(bot_and_dispatcher):
+    """Сквозь настоящий роутинг: пока кнопку не нажали, настройки прежние."""
+    import datetime as dt
+
+    from aiogram.types import CallbackQuery
+
+    from sniperbot.bot.keyboards import TuneCB
+    from sniperbot.db import repo
+    from sniperbot.db.base import session_scope
+    from sniperbot.sniper.weekly import pending_key
+
+    bot, dp, session = bot_and_dispatcher
+    await dp.feed_update(bot, update("/start"))          # пользователь заведён
+
+    async with session_scope() as db_session:
+        await repo.set_state(db_session, pending_key(USER_ID), '[["sl", "45"]]')
+        before = await repo.get_settings(db_session, USER_ID, "rh")
+        assert before.stop_loss_pct != 45
+
+    letter = TgMessage(message_id=7, date=dt.datetime.now(dt.UTC),
+                       chat=Chat(id=CHAT_ID, type="private"), text="письмо с предложениями")
+    session.sent.clear()
+    await dp.feed_update(bot, Update(update_id=9, callback_query=CallbackQuery(
+        id="1", chat_instance="c", data=TuneCB(action="apply").pack(),
+        from_user=TgUser(id=USER_ID, is_bot=False, first_name="Vlad"),
+        message=letter,
+    )))
+
+    async with session_scope() as db_session:
+        after = await repo.get_settings(db_session, USER_ID, "rh")
+        left = await repo.get_state(db_session, pending_key(USER_ID))
+
+    assert after.stop_loss_pct == 45
+    assert not left, "применённое предложение не должно остаться висеть"
+
+
+async def test_declining_the_proposal_changes_nothing(bot_and_dispatcher):
+    import datetime as dt
+
+    from aiogram.types import CallbackQuery
+
+    from sniperbot.bot.keyboards import TuneCB
+    from sniperbot.db import repo
+    from sniperbot.db.base import session_scope
+    from sniperbot.sniper.weekly import pending_key
+
+    bot, dp, session = bot_and_dispatcher
+    await dp.feed_update(bot, update("/start"))
+    async with session_scope() as db_session:
+        await repo.set_state(db_session, pending_key(USER_ID), '[["sl", "45"]]')
+        before = (await repo.get_settings(db_session, USER_ID, "rh")).stop_loss_pct
+
+    letter = TgMessage(message_id=8, date=dt.datetime.now(dt.UTC),
+                       chat=Chat(id=CHAT_ID, type="private"), text="письмо")
+    await dp.feed_update(bot, Update(update_id=10, callback_query=CallbackQuery(
+        id="2", chat_instance="c", data=TuneCB(action="skip").pack(),
+        from_user=TgUser(id=USER_ID, is_bot=False, first_name="Vlad"),
+        message=letter,
+    )))
+
+    async with session_scope() as db_session:
+        assert (await repo.get_settings(db_session, USER_ID, "rh")).stop_loss_pct == before
+        assert not await repo.get_state(db_session, pending_key(USER_ID))

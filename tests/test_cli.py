@@ -205,7 +205,7 @@ def test_optimizer_picks_the_better_exit_pair():
     """Проверяем сам расчёт: цель, стоп или фактический исход."""
     from decimal import Decimal
 
-    from sniperbot.bot.handlers.reports import _simulate
+    from sniperbot.tune import simulate as _simulate
 
     # дошла до +250% — при цели +100% зафиксировали бы прибыль
     assert _simulate(Decimal(250), Decimal(-90), 100, 50) == Decimal(100)

@@ -34,6 +34,7 @@ from sniperbot.sniper.deposits import DepositWatcher
 from sniperbot.sniper.engine import SniperEngine
 from sniperbot.sniper.executor import Trader
 from sniperbot.sniper.positions import PositionMonitor
+from sniperbot.sniper.weekly import WeeklyTuner
 from sniperbot.utils.fmt import esc
 from sniperbot.version import build_info
 
@@ -267,9 +268,11 @@ async def run_bot() -> None:
         log.exception("Ошибка в хендлере: %s", event.exception)
         return True
 
+    tuner = WeeklyTuner(registry, notifier, settings)
     background = [
         asyncio.create_task(monitor.run(), name="position-monitor"),
         asyncio.create_task(deposits.run(), name="deposit-watcher"),
+        asyncio.create_task(tuner.run(), name="weekly-tuner"),
     ]
     engine.start()
 
@@ -290,6 +293,7 @@ async def run_bot() -> None:
         await record_stop(report.run_id)
         monitor.stop()
         deposits.stop()
+        tuner.stop()
         await engine.stop()
         await trader.close()
         for task in background:

@@ -36,6 +36,7 @@ from sniperbot.reports import (
     to_rows,
     trades_csv,
 )
+from sniperbot.tune import best_exits, current_average
 from sniperbot.utils.evm import extract_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 
@@ -382,17 +383,13 @@ async def cmd_optimize(message: Message, command: CommandObject, user: User, cha
         final = ((from_wei(position.native_returned_wei) / spent - 1) * 100) if spent else Decimal(0)
         trades.append((peak, final))
 
-    best = None
-    for take_profit in (50, 75, 100, 150, 200, 300, 500):
-        for stop_loss in (20, 30, 40, 50, 60, 70):
-            total = sum(_simulate(peak, final, take_profit, stop_loss) for peak, final in trades)
-            wins = sum(1 for peak, final in trades if _simulate(peak, final, take_profit, stop_loss) > 0)
-            average = total / len(trades)
-            if best is None or average > best[0]:
-                best = (average, take_profit, stop_loss, wins)
+    best = best_exits(trades)
+    if best is None:
+        await reply(message, "Не из чего выбирать: у сделок нет истории цены.")
+        return
 
     average, take_profit, stop_loss, wins = best
-    current = sum(final for _peak, final in trades) / len(trades)
+    current = current_average(trades)
     await reply(
         message,
         f"🔧 <b>Подбор выходов</b> по {len(trades)} сделкам {period_label(days, to_rows(usable))}"
@@ -406,10 +403,3 @@ async def cmd_optimize(message: Message, command: CommandObject, user: User, cha
     )
 
 
-def _simulate(peak: Decimal, final: Decimal, take_profit: int, stop_loss: int) -> Decimal:
-    """Что дала бы сделка при заданных TP/SL: цель, стоп или фактический исход."""
-    if peak >= take_profit:
-        return Decimal(take_profit)
-    if final <= -stop_loss:
-        return Decimal(-stop_loss)
-    return final
