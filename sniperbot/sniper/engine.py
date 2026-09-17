@@ -128,7 +128,7 @@ class SniperEngine:
                 scanner.wake()
 
         stream = LogStream(url, factories, [PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC],
-                           poke, name=config.name)
+                           poke, name=config.name, chain_id=config.chain_id)
         self.streams[chain_key] = stream
         self._tasks.append(asyncio.create_task(stream.run(), name=f"logs-{chain_key}"))
 

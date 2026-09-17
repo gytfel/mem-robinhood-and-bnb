@@ -153,8 +153,8 @@ def test_the_subscription_starts_only_when_the_chain_gives_a_websocket(monkeypat
     created: list = []
 
     class FakeStream:
-        def __init__(self, url, addresses, topics, poke, name=""):  # noqa: ANN001
-            created.append((url, addresses, topics))
+        def __init__(self, url, addresses, topics, poke, name="", chain_id=0):  # noqa: ANN001
+            created.append((url, addresses, topics, chain_id))
 
         async def run(self):
             return None
@@ -164,7 +164,68 @@ def test_the_subscription_starts_only_when_the_chain_gives_a_websocket(monkeypat
 
     instance._start_logs("rh", chain, [])
 
-    url, addresses, topics = created[0]
+    url, addresses, topics, chain_id = created[0]
     assert url == "wss://rpc.example"
     assert addresses == {FACTORY}, "подписываемся на фабрики, а не на все адреса подряд"
     assert len(topics) == 2, "создание пары у V2 и у V3 — разные события"
+    assert chain_id == 4663, "номер сети нужен, чтобы поймать адрес от другой сети"
+
+
+# --------------------------------------------- адрес от другой сети
+def test_the_chain_is_asked_before_subscribing():
+    from sniperbot.chain.logstream import answered_chain_id, chain_id_request
+
+    request = json.loads(chain_id_request())
+    assert request["method"] == "eth_chainId"
+    assert answered_chain_id('{"jsonrpc":"2.0","id":0,"result":"0x1237"}') == 4663
+    assert answered_chain_id('{"jsonrpc":"2.0","id":0,"result":4663}') == 4663
+
+
+@pytest.mark.parametrize("payload", [
+    '{"jsonrpc":"2.0","id":1,"result":"0x1237"}',     # ответ на другой запрос
+    '{"jsonrpc":"2.0","id":0,"result":null}',
+    "мусор",
+])
+def test_an_unclear_answer_does_not_block_the_subscription(payload):
+    """Узел мог не ответить — это не повод отказываться от подписки."""
+    from sniperbot.chain.logstream import answered_chain_id
+
+    assert answered_chain_id(payload) == 0
+
+
+async def test_an_endpoint_of_another_chain_is_refused():
+    """Ошибка в одном слове адреса — и подписка живёт, но событий не будет никогда."""
+    import aiohttp
+
+    sent: list[str] = []
+
+    class FakeSocket:
+        async def send_str(self, payload):  # noqa: ANN001
+            sent.append(payload)
+
+        async def receive(self):
+            return type("Frame", (), {"type": aiohttp.WSMsgType.TEXT,
+                                      "data": '{"jsonrpc":"2.0","id":0,"result":"0x38"}'})()
+
+    stream = LogStream("wss://rpc.example", {FACTORY}, [TOPIC], lambda _: None, chain_id=4663)
+
+    with pytest.raises(RuntimeError) as info:
+        await stream._same_chain(FakeSocket())
+
+    assert "56" in str(info.value) and "4663" in str(info.value)
+    assert "другой сети" in str(info.value)
+
+
+async def test_the_right_chain_passes():
+    import aiohttp
+
+    class FakeSocket:
+        async def send_str(self, payload):  # noqa: ANN001
+            return None
+
+        async def receive(self):
+            return type("Frame", (), {"type": aiohttp.WSMsgType.TEXT,
+                                      "data": '{"jsonrpc":"2.0","id":0,"result":"0x1237"}'})()
+
+    stream = LogStream("wss://rpc.example", {FACTORY}, [TOPIC], lambda _: None, chain_id=4663)
+    await stream._same_chain(FakeSocket())      # не должно бросить

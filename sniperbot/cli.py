@@ -512,7 +512,8 @@ async def _ws(args: argparse.Namespace) -> int:
     print(f"Сеть {chain.name}: подписываюсь через {short_url(url)}")
     print(f"Фабрик под наблюдением: {len(factories)}")
     stream = LogStream(url, factories, [PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC],
-                       lambda block: print(f"  🔔 новая пара, блок {block}"), name=chain.name)
+                       lambda block: print(f"  🔔 новая пара, блок {block}"),
+                       name=chain.name, chain_id=chain.chain_id)
     task = asyncio.create_task(stream.run())
     try:
         await asyncio.sleep(args.seconds)

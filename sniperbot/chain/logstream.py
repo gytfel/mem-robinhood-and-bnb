@@ -66,6 +66,29 @@ def subscription_error(payload: str | bytes) -> str:
     return ""
 
 
+def chain_id_request(request_id: int = 0) -> str:
+    """Вопрос «какая ты сеть» — задаётся до подписки."""
+    return json.dumps({"jsonrpc": "2.0", "id": request_id,
+                       "method": "eth_chainId", "params": []})
+
+
+def answered_chain_id(payload: str | bytes, request_id: int = 0) -> int:
+    """Номер сети из ответа узла. 0 — узел не ответил или ответил не на это."""
+    try:
+        answer = json.loads(payload)
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(answer, dict) or answer.get("id") != request_id:
+        return 0
+    raw = answer.get("result")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        with contextlib.suppress(ValueError):
+            return int(raw, 16) if raw.startswith("0x") else int(raw)
+    return 0
+
+
 def notified_block(payload: str | bytes) -> int | None:
     """Номер блока из уведомления о логе. None — это не уведомление."""
     try:
@@ -88,8 +111,10 @@ class LogStream:
     """Держит подписку на логи и будит бота на каждом событии."""
 
     def __init__(self, url: str, addresses: set[str], topics: list[str],
-                 on_hit: Callable[[int], Awaitable[None] | None], *, name: str = "") -> None:
+                 on_hit: Callable[[int], Awaitable[None] | None], *, name: str = "",
+                 chain_id: int = 0) -> None:
         self.url = url
+        self.chain_id = chain_id
         self.addresses = sorted(address for address in addresses if address)
         self.topics = topics
         self.on_hit = on_hit
@@ -129,6 +154,7 @@ class LogStream:
     async def _listen(self, session: aiohttp.ClientSession) -> None:
         async with session.ws_connect(self.url, heartbeat=30,
                                       max_msg_size=32 * 1024 * 1024) as socket:
+            await self._same_chain(socket)
             await socket.send_str(subscribe_request(self.addresses, self.topics))
             first = await asyncio.wait_for(socket.receive(), timeout=SUBSCRIBE_TIMEOUT)
             if first.type is not aiohttp.WSMsgType.TEXT:
@@ -147,6 +173,26 @@ class LogStream:
                 if not self._running:
                     break
         self.connected = False
+
+    async def _same_chain(self, socket) -> None:  # noqa: ANN001 - aiohttp websocket
+        """Проверяет, что адрес ведёт в ту сеть, которую мы собрались слушать.
+
+        Адреса провайдеров различаются одним словом в имени, и подписка на
+        фабрики одной сети через узел другой молча не сработает никогда:
+        соединение живое, событий нет. Лучше сказать об этом сразу.
+        """
+        if not self.chain_id:
+            return
+        await socket.send_str(chain_id_request())
+        frame = await asyncio.wait_for(socket.receive(), timeout=SUBSCRIBE_TIMEOUT)
+        if frame.type is not aiohttp.WSMsgType.TEXT:
+            return
+        found = answered_chain_id(frame.data)
+        if found and found != self.chain_id:
+            raise RuntimeError(
+                f"адрес ведёт в сеть {found}, а подписка нужна на {self.chain_id} — "
+                "похоже, взят эндпоинт другой сети"
+            )
 
     async def handle(self, payload: str | bytes) -> bool:
         """Разбирает уведомление и будит бота."""
