@@ -85,6 +85,13 @@ async def cmd_health(message: Message, ctx: BotContext, is_admin: bool = False) 
         error = f" — {esc(status['error'])}" if status["error"] else ""
         lines.append(f"  {icon} {esc(status['name'])}{error}")
 
+    feeds = getattr(ctx.engine, "feeds", {})
+    if feeds:
+        lines.append("\n<b>Поток секвенсора</b>")
+        for key, feed in feeds.items():
+            icon = "✅" if feed.connected else "⛔️"
+            lines.append(f"  {icon} {esc(ctx.chain(key).name)}: {esc(feed.status())}")
+
     lines.append("\n<b>Сети</b>")
     for key in ctx.active_chain_keys:
         chain = ctx.chain(key)

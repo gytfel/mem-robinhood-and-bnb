@@ -82,6 +82,8 @@ class ChainConfig:
     eip1559: bool = False
     block_time: float = 3.0
     rpc_urls: list[str] = field(default_factory=list)
+    # Поток секвенсора Nitro. Пусто — подписки нет, бот работает опросом.
+    feed_url: str = ""
     explorer_url: str = ""
     wrapped_native: str = ""
     stable_token: str = ""
@@ -291,6 +293,8 @@ def _apply_env_overrides(key: str, raw: dict, source: dict[str, str] | None = No
 
     if (rpc := env("RPC_URLS")) is not None:
         raw["rpc_urls"] = _split(rpc)
+    if (feed := env("FEED_URL")) is not None:
+        raw["feed_url"] = feed
     if (chain_id := env("CHAIN_ID")) is not None and chain_id.isdigit():
         raw["chain_id"] = int(chain_id)
     if (wrapped := env("WRAPPED_NATIVE")) is not None:

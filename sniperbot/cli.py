@@ -398,6 +398,63 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------------------ feed
+def cmd_feed(args: argparse.Namespace) -> int:
+    """Проверка потока секвенсора на живой сети: подключились ли и что приходит."""
+    import asyncio
+
+    return asyncio.run(_feed(args))
+
+
+async def _feed(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from sniperbot.chain.feed import SequencerFeed
+    from sniperbot.config import env_prefix, get_chains
+
+    chains = get_chains()
+    chain = chains.get(args.chain)
+    if chain is None:
+        print(f"Сети «{args.chain}» нет. Доступны: {', '.join(chains)}")
+        return 1
+    url = args.url or chain.feed_url
+    if not url:
+        print(f"Для сети {chain.name} адрес потока не задан.\n"
+              f"Укажите его в .env: {env_prefix(args.chain)}_FEED_URL=wss://…\n"
+              "или передайте здесь: sniper feed --url wss://…")
+        return 1
+
+    watched = {router.factory for router in chain.routers if router.configured}
+    watched |= {router.router for router in chain.routers if router.configured}
+    if not watched:
+        print(f"У сети {chain.name} не настроен ни один роутер — следить не за чем.\n"
+              f"Сначала укажите роутер и фабрику: {env_prefix(args.chain)}_ROUTER, "
+              f"{env_prefix(args.chain)}_FACTORY в .env")
+        return 1
+
+    print(f"Сеть {chain.name}: подключаюсь к {url}")
+    print(f"Под наблюдением адресов: {len(watched)} (роутеры и фабрики)")
+
+    feed = SequencerFeed(url, watched, lambda number: print(f"  🔔 пробуждение на блоке {number}"),
+                         name=chain.name)
+    task = asyncio.create_task(feed.run())
+    try:
+        await asyncio.sleep(args.seconds)
+    finally:
+        feed.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    print(f"\nЗа {args.seconds} с: сообщений {feed.messages}, пробуждений {feed.hits}, "
+          f"последний блок {feed.last_sequence}")
+    if not feed.messages:
+        print("Данных не пришло. " + (f"Последняя ошибка: {feed.last_error}"
+                                      if feed.last_error else "Проверьте адрес потока."))
+        return 1
+    print("Поток работает. Включить в боте: пропишите адрес в .env и перезапустите.")
+    return 0
+
+
 # ----------------------------------------------------------------------------- check
 def cmd_check(args: argparse.Namespace) -> int:
     import asyncio
@@ -777,6 +834,13 @@ def build_parser() -> argparse.ArgumentParser:
     wallets_parser = subparsers.add_parser("wallets", help="кошельки пользователей и балансы")
     wallets_parser.add_argument("--no-balances", action="store_true", help="не запрашивать балансы")
     wallets_parser.set_defaults(func=cmd_wallets)
+
+    feed_parser = subparsers.add_parser(
+        "feed", help="проверить поток секвенсора сети (Arbitrum Nitro)")
+    feed_parser.add_argument("--chain", default="robinhood", help="ключ сети из chains.json")
+    feed_parser.add_argument("--url", default="", help="адрес потока, если не задан в .env")
+    feed_parser.add_argument("--seconds", type=float, default=20.0, help="сколько слушать")
+    feed_parser.set_defaults(func=cmd_feed)
 
     keygen_parser = subparsers.add_parser("keygen", help="сгенерировать MASTER_KEY")
     keygen_parser.set_defaults(func=cmd_keygen)

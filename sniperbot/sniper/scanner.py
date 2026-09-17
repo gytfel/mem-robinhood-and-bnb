@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -51,6 +52,9 @@ class PairScanner:
         self.handler = handler
         self.poll_interval = poll_interval
         self._running = False
+        # Поток секвенсора будит сканер раньше срока: ждать полный интервал,
+        # когда пара уже создана, — это отданные кому-то блоки.
+        self._wake = asyncio.Event()
 
     async def run(self) -> None:
         chain_key = self.client.config.key
@@ -79,10 +83,21 @@ class PairScanner:
                 log.warning("Сканер %s: ошибка (%s), попытка %s", chain_key, exc, errors)
                 await asyncio.sleep(min(60.0, self.poll_interval * 2**min(errors, 5)))
                 continue
-            await asyncio.sleep(self.poll_interval)
+            await self._pause(self.poll_interval)
 
     def stop(self) -> None:
         self._running = False
+        self._wake.set()
+
+    def wake(self) -> None:
+        """Прервать ожидание: в сети что-то произошло, смотреть надо сейчас."""
+        self._wake.set()
+
+    async def _pause(self, seconds: float) -> None:
+        """Ждёт следующий проход, но не дольше, чем до звонка будильника."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._wake.wait(), timeout=seconds)
+        self._wake.clear()
 
     def _span(self) -> int:
         """Сколько блоков просить за раз: не больше, чем узел согласен отдать."""

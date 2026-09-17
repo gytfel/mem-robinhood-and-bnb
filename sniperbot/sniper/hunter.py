@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import time
@@ -58,6 +59,7 @@ class MomentumHunter:
         # Кошельки, за которыми идём: пересчитывать их на каждом проходе дорого
         # и незачем — репутация не меняется за минуту.
         self._trusted: dict[str, tuple[float, set[str]]] = {}
+        self._wake = asyncio.Event()
 
     # ------------------------------------------------------------------ цикл
     async def run(self) -> None:
@@ -70,10 +72,20 @@ class MomentumHunter:
                 raise
             except Exception as exc:  # noqa: BLE001 - задача не должна умирать
                 log.exception("Перехват разгона: %s", exc)
-            await asyncio.sleep(self.settings.momentum_interval)
+            await self._pause(self.settings.momentum_interval)
 
     def stop(self) -> None:
         self._running = False
+        self._wake.set()
+
+    def wake(self) -> None:
+        """Кто-то тронул роутер: покупка умного кошелька ждать до прохода не должна."""
+        self._wake.set()
+
+    async def _pause(self, seconds: float) -> None:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._wake.wait(), timeout=seconds)
+        self._wake.clear()
 
     async def tick(self) -> None:
         for chain_key, config in self.registry.configs.items():
