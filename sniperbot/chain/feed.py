@@ -40,6 +40,31 @@ TO_INDEX_1559 = 5            # то же место у blob (0x03) и 7702 (0x04
 
 RECONNECT_STEPS = (1.0, 2.0, 5.0, 15.0, 30.0)
 HANDSHAKE_HEADERS = {"Arbitrum-Feed-Client-Version": "2"}
+# Ленты Nitro переходят на обязательное сжатие: клиент, который не предложил
+# permessage-deflate, получает отказ ещё на рукопожатии. 15 — размер окна.
+COMPRESS_BITS = 15
+
+# Заслоны вроде Cloudflare часто отказывают клиентам, не похожим на браузер:
+# aiohttp представляется «Python/aiohttp», и этого достаточно для 403.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/140.0 Safari/537.36"),
+    "Origin": "https://robinhood.com",
+}
+
+# Чем пробовать, если обычное подключение отказали. Заголовки лежат парами, а не
+# словарём, чтобы набор вариантов оставался сравнимым и без повторов.
+_NITRO = tuple(HANDSHAKE_HEADERS.items())
+_BROWSER = tuple({**HANDSHAKE_HEADERS, **BROWSER_HEADERS}.items())
+PROBE_VARIANTS = (
+    ("сжатие + заголовки", COMPRESS_BITS, _NITRO, ""),
+    ("сжатие, без заголовков", COMPRESS_BITS, (), ""),
+    ("без сжатия + заголовки", 0, _NITRO, ""),
+    ("как браузер", COMPRESS_BITS, _BROWSER, ""),
+    ("как браузер, без сжатия", 0, _BROWSER, ""),
+    ("путь /feed", COMPRESS_BITS, _NITRO, "/feed"),
+    ("путь /feed как браузер", COMPRESS_BITS, _BROWSER, "/feed"),
+)
 
 
 # ------------------------------------------------------------------ разбор
@@ -152,12 +177,56 @@ def targets(message: bytes) -> set[bytes]:
 
 
 # ------------------------------------------------------------------ подписка
+async def probe(url: str, *, timeout: float = 10.0) -> list[tuple[str, str]]:
+    """Перебирает способы подключения и говорит, какой сработал.
+
+    Ленты разных сетей требуют разного: где-то обязательно сжатие, где-то свой
+    путь. Гадать об этом по одному «403» бессмысленно, поэтому проверка
+    перебирает варианты сама и показывает ответ сервера по каждому.
+    """
+    results: list[tuple[str, str]] = []
+    base = url.rstrip("/")
+    async with aiohttp.ClientSession() as session:
+        # Сначала обычный HTTPS: так видно, кто вообще отвечает — лента или
+        # чужой заслон вроде Cloudflare.
+        page = base.replace("wss://", "https://").replace("ws://", "http://")
+        try:
+            async with session.get(page, headers=BROWSER_HEADERS,
+                                   timeout=aiohttp.ClientTimeout(total=timeout)) as answer:
+                server = answer.headers.get("Server", "")
+                results.append(("обычный HTTPS-запрос",
+                                f"{answer.status}" + (f" · сервер {server}" if server else "")))
+        except Exception as exc:  # noqa: BLE001
+            results.append(("обычный HTTPS-запрос", f"не ответил: {str(exc)[:80]}"))
+
+        for title, compress, headers, path in PROBE_VARIANTS:
+            target = base + path
+            try:
+                async with session.ws_connect(
+                    target,
+                    headers=dict(headers),
+                    compress=compress,
+                    timeout=aiohttp.ClientWSTimeout(ws_close=timeout),
+                    max_msg_size=32 * 1024 * 1024,
+                ) as socket:
+                    frame = await asyncio.wait_for(socket.receive(), timeout=timeout)
+                    got = len(parse_frame(frame.data)) if frame.type is aiohttp.WSMsgType.TEXT else 0
+                    results.append((title, f"✅ подключился, сообщений в первом кадре: {got}"))
+                    return results       # рабочий способ найден, дальше не нужно
+            except Exception as exc:  # noqa: BLE001 - перебор, отказ это ожидаемый исход
+                results.append((title, f"⛔️ {str(exc)[:90]}"))
+    return results
+
+
 class SequencerFeed:
     """Держит соединение с потоком секвенсора и будит бота при попадании."""
 
     def __init__(self, url: str, watched: set[str],
-                 on_hit: Callable[[int], Awaitable[None] | None], *, name: str = "") -> None:
+                 on_hit: Callable[[int], Awaitable[None] | None], *, name: str = "",
+                 compress: int = COMPRESS_BITS, headers: dict[str, str] | None = None) -> None:
         self.url = url
+        self.compress = compress
+        self.headers = HANDSHAKE_HEADERS if headers is None else headers
         self.name = name or url
         self.on_hit = on_hit
         # Адреса храним байтами: сравнивать их придётся на каждую транзакцию.
@@ -198,7 +267,7 @@ class SequencerFeed:
         self._running = False
 
     async def _listen(self, session: aiohttp.ClientSession) -> None:
-        async with session.ws_connect(self.url, headers=HANDSHAKE_HEADERS,
+        async with session.ws_connect(self.url, headers=self.headers, compress=self.compress,
                                       heartbeat=30, max_msg_size=32 * 1024 * 1024) as socket:
             self.connected = True
             self.last_error = ""

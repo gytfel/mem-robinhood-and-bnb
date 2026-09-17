@@ -249,3 +249,34 @@ def test_the_feed_starts_only_when_the_chain_gives_one(monkeypatch):
 
     assert created and created[0][0] == "wss://feed.mainnet.chain.robinhood.com"
     assert created[0][1] == {ROUTER, FACTORY}, "следим за роутером и фабрикой сети"
+
+
+# ------------------------------------------------- рукопожатие со сжатием
+def test_compression_is_offered_by_default():
+    """Ленты Nitro переходят на обязательное сжатие: клиент без него получает отказ."""
+    from sniperbot.chain.feed import COMPRESS_BITS
+
+    feed = SequencerFeed("wss://feed.example", {ROUTER}, lambda _: None)
+    assert feed.compress == COMPRESS_BITS
+    assert feed.headers == {"Arbitrum-Feed-Client-Version": "2"}
+
+
+def test_the_handshake_can_be_changed_without_touching_the_code():
+    """Если у сети свои требования, их должно хватить передать снаружи."""
+    feed = SequencerFeed("wss://feed.example", {ROUTER}, lambda _: None,
+                         compress=0, headers={"X-Key": "секрет"})
+    assert feed.compress == 0
+    assert feed.headers == {"X-Key": "секрет"}
+
+
+def test_every_probe_variant_is_distinct():
+    """Перебор должен покрывать сжатие, заголовки и путь — без повторов."""
+    from sniperbot.chain.feed import PROBE_VARIANTS
+
+    shapes = {(compress, headers, path) for _title, compress, headers, path in PROBE_VARIANTS}
+    assert len(shapes) == len(PROBE_VARIANTS), "повторяющийся вариант — потраченная попытка"
+    assert any(path == "/feed" for _t, _c, _h, path in PROBE_VARIANTS)
+    assert any(compress for _t, compress, _h, _p in PROBE_VARIANTS)
+    assert any(not compress for _t, compress, _h, _p in PROBE_VARIANTS)
+    assert any("User-Agent" in dict(headers) for _t, _c, headers, _p in PROBE_VARIANTS), \
+        "заслон, который не пускает не-браузеры, — самый частый случай"

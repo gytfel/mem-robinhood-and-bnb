@@ -447,12 +447,19 @@ async def _feed(args: argparse.Namespace) -> int:
 
     print(f"\nЗа {args.seconds} с: сообщений {feed.messages}, пробуждений {feed.hits}, "
           f"последний блок {feed.last_sequence}")
-    if not feed.messages:
-        print("Данных не пришло. " + (f"Последняя ошибка: {feed.last_error}"
-                                      if feed.last_error else "Проверьте адрес потока."))
-        return 1
-    print("Поток работает. Включить в боте: пропишите адрес в .env и перезапустите.")
-    return 0
+    if feed.messages:
+        print("Поток работает. Включить в боте: пропишите адрес в .env и перезапустите.")
+        return 0
+
+    print("Данных не пришло" + (f": {feed.last_error}" if feed.last_error else "."))
+    print("\nПеребираю способы подключения — какой из них примут:")
+    from sniperbot.chain.feed import probe
+
+    for title, outcome in await probe(url):
+        print(f"  {title:28} {outcome}")
+    print("\nЕсли сработал какой-то из вариантов — пришлите этот вывод, "
+          "поправлю подключение под него.")
+    return 1
 
 
 # ----------------------------------------------------------------------------- check
