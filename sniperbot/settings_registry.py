@@ -22,6 +22,7 @@ GROUPS = {
     "exits": "🎯 Выходы",
     "filters": "🛡 Фильтры безопасности",
     "momentum": "🚀 Перехват разгона",
+    "smart": "🧠 Умные кошельки",
     "risk": "🚦 Риск-лимиты",
     "ux": "🔔 Прочее",
 }
@@ -236,6 +237,17 @@ SETTINGS: tuple[Setting, ...] = (
             "Симулировать продажу перед покупкой", "filters"),
     Setting("sim", "require_simulation", "chain", "bool", "Требовать симуляцию",
             "Не покупать, если нода не поддерживает симуляцию", "filters"),
+    Setting("smart", "smart_copy", "chain", "bool", "Идти за умными кошельками",
+            "Покупать вслед за адресами, чьи входы уже много раз оказывались "
+            "удачными. Токен при этом проходит все те же проверки безопасности. "
+            "Список кошельков и их результаты — /smart", "smart"),
+    Setting("smartmin", "smart_min_trades", "chain", "int", "Мин. сделок кошелька",
+            "Сколько его покупок должно быть уже оценено, чтобы боту верить. "
+            "Меньше пяти — это совпадение, а не умение",
+            "smart", minimum=Decimal(3), maximum=Decimal(100)),
+    Setting("smartwin", "smart_min_win_pct", "chain", "int", "Мин. доля удачных",
+            "Какая часть его покупок должна расти, чтобы повторять за ним",
+            "smart", unit="%", minimum=Decimal(30), maximum=Decimal(100)),
     Setting("renounced", "require_renounced", "chain", "bool", "Только renounced",
             "Покупать лишь токены без владельца", "filters"),
     Setting("ownershare", "max_owner_share_pct", "chain", "int", "Макс. доля у владельца",

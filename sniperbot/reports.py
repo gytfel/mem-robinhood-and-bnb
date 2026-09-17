@@ -19,6 +19,7 @@ from sniperbot.utils.fmt import esc, fmt_amount, from_wei
 SOURCE_TITLES = {
     "auto": "снайп новых пар",
     "momentum": "перехват разгона",
+    "smart": "за умным кошельком",
     "manual": "покупки вручную",
 }
 

@@ -19,6 +19,7 @@ from sniperbot.db.models import (
     TradeLog,
     User,
     WalletEvent,
+    WalletTrade,
     utcnow,
 )
 
@@ -273,6 +274,77 @@ async def get_scanner_state(session: AsyncSession, chain: str, factory: str) -> 
         session.add(state)
         await session.flush()
     return state
+
+
+# ------------------------------------------------------------- чужие кошельки
+async def record_wallet_buys(session: AsyncSession, chain: str, buys: list,
+                             within: dt.timedelta = dt.timedelta(hours=6)) -> int:
+    """Запоминает покупки чужих кошельков. Повтор по тому же токену не считаем.
+
+    Докупка того же токена — не новое решение, а продолжение старого, и
+    засчитывать её второй раз значило бы завышать статистику кошелька.
+    """
+    if not buys:
+        return 0
+    since = utcnow() - within
+    pairs = {(buy.wallet.lower(), buy.token.lower()) for buy in buys}
+    stmt = select(WalletTrade.wallet, WalletTrade.token_address).where(
+        WalletTrade.chain == chain,
+        WalletTrade.created_at >= since,
+        func.lower(WalletTrade.wallet).in_({wallet for wallet, _ in pairs}),
+    )
+    known = {(wallet.lower(), token.lower()) for wallet, token in (await session.execute(stmt)).all()}
+
+    added = 0
+    for buy in buys:
+        if (buy.wallet.lower(), buy.token.lower()) in known:
+            continue
+        session.add(WalletTrade(
+            chain=chain, wallet=buy.wallet, token_address=buy.token,
+            pair_address=buy.pair or "", price=buy.price, native_wei=buy.native_wei,
+        ))
+        added += 1
+    return added
+
+
+async def touch_wallet_trades(session: AsyncSession, chain: str,
+                              prices: dict[str, Decimal]) -> int:
+    """Обновляет максимум цены после входа по всем токенам разом.
+
+    Одним запросом, а не по пулу за раз: за проход их бывает несколько сотен,
+    и у большинства чужих сделок нет вовсе.
+    """
+    wanted = {token.lower(): price for token, price in prices.items() if price and price > 0}
+    if not wanted:
+        return 0
+    stmt = select(WalletTrade).where(
+        WalletTrade.chain == chain,
+        func.lower(WalletTrade.token_address).in_(set(wanted)),
+    )
+    touched = 0
+    for trade in (await session.scalars(stmt)).all():
+        price = wanted.get(trade.token_address.lower())
+        if price is None:
+            continue
+        if trade.peak_after is None or price > trade.peak_after:
+            trade.peak_after = price
+        trade.samples = int(trade.samples or 0) + 1
+        touched += 1
+    return touched
+
+
+async def wallet_trades(session: AsyncSession, chain: str, since: dt.datetime | None = None,
+                        limit: int = 5000) -> list[WalletTrade]:
+    """Покупки чужих кошельков за период — материал для оценки."""
+    stmt = select(WalletTrade).where(WalletTrade.chain == chain)
+    if since is not None:
+        stmt = stmt.where(WalletTrade.created_at >= since)
+    return list((await session.scalars(stmt.order_by(WalletTrade.id.desc()).limit(limit))).all())
+
+
+async def prune_wallet_trades(session: AsyncSession, older_than: dt.datetime) -> None:
+    """Репутация кошелька устаревает вместе с рынком — старое не храним."""
+    await session.execute(delete(WalletTrade).where(WalletTrade.created_at < older_than))
 
 
 # ------------------------------------------------------------------------- flags

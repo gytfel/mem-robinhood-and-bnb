@@ -131,6 +131,12 @@ class ChainSettings(Base):
     momentum_min_trades: Mapped[int] = mapped_column(Integer, default=8)       # сделок за окно
     momentum_min_buy_ratio_pct: Mapped[int] = mapped_column(Integer, default=60)
     momentum_max_age_hours: Mapped[int] = mapped_column(Integer, default=48)   # глубина списка наблюдения
+
+    # Покупка следом за кошельками, которые уже угадывали. Выключено по
+    # умолчанию: это доверие чужому решению, и включать его человек должен сам.
+    smart_copy: Mapped[bool] = mapped_column(Boolean, default=False)
+    smart_min_trades: Mapped[int] = mapped_column(Integer, default=5)
+    smart_min_win_pct: Mapped[int] = mapped_column(Integer, default=60)
     momentum_min_volume: Mapped[Decimal] = mapped_column(Dec, default=Decimal("0.3"))
 
     # --- фильтры безопасности ---
@@ -335,6 +341,31 @@ class PoolSample(Base):
     buys: Mapped[int] = mapped_column(Integer, default=0)
     sells: Mapped[int] = mapped_column(Integer, default=0)
     volume_wei: Mapped[int] = mapped_column(Wei, default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class WalletTrade(Base):
+    """Покупка чужого кошелька и то, что случилось с ценой после неё.
+
+    Материал для единственного вопроса: стоит ли повторять за этим адресом.
+    Записи живут недолго — репутация кошелька устаревает вместе с рынком.
+    """
+
+    __tablename__ = "wallet_trades"
+    __table_args__ = (
+        Index("ix_wallet_trades_chain_wallet", "chain", "wallet"),
+        Index("ix_wallet_trades_chain_token", "chain", "token_address", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chain: Mapped[str] = mapped_column(String(32))
+    wallet: Mapped[str] = mapped_column(String(42))
+    token_address: Mapped[str] = mapped_column(String(42))
+    pair_address: Mapped[str] = mapped_column(String(42), default="")
+    price: Mapped[Decimal | None] = mapped_column(Dec)        # цена его входа
+    peak_after: Mapped[Decimal | None] = mapped_column(Dec)   # максимум цены после
+    native_wei: Mapped[int] = mapped_column(Wei, default=0)   # на сколько зашёл
+    samples: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 

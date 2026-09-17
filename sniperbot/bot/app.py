@@ -63,6 +63,7 @@ COMMANDS = [
     BotCommand(command="winrate", description="Как получить нужный % плюсовых"),
     BotCommand(command="stats", description="Качество фильтров и поток"),
     BotCommand(command="ab", description="A/B-тест настроек"),
+    BotCommand(command="smart", description="Умные кошельки и слежение за ними"),
     BotCommand(command="creators", description="Репутация создателей"),
     BotCommand(command="trending", description="Кто разгоняется сейчас"),
     BotCommand(command="watch", description="Следить за токеном"),

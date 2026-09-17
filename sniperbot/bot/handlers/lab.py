@@ -22,6 +22,8 @@ from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import ChainSettings, User
 from sniperbot.settings_registry import describe_variant, find, parse_variant
+from sniperbot.smart import MIN_DECIDED, score_wallets
+from sniperbot.sniper.hunter import SMART_HISTORY
 from sniperbot.utils.evm import extract_address
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr
 
@@ -145,6 +147,54 @@ async def _save_ab(user_id: int, chain_key: str, cfg: ChainSettings,
 
 
 # ------------------------------------------------------------ репутация создателей
+@router.message(Command("smart"))
+async def cmd_smart(message: Message, user: User, cfg: ChainSettings, chain: ChainConfig) -> None:
+    """Кошельки, чьи покупки чаще других оказывались удачными."""
+    since = dt.datetime.now(dt.UTC) - SMART_HISTORY
+    async with session_scope() as session:
+        history = await repo.wallet_trades(session, chain.key, since=since)
+
+    if not history:
+        await reply(
+            message,
+            "🧠 <b>Умные кошельки</b>\n\n"
+            "Покупок чужих кошельков пока не видел. Наблюдение идёт вместе с "
+            "перехватом разгона и не стоит лишних запросов — вернитесь через "
+            "несколько часов.\n\n"
+            "Перехват разгона включается так: <code>/set momentum on</code>",
+        )
+        return
+
+    min_trades = int(getattr(cfg, "smart_min_trades", 0) or MIN_DECIDED)
+    min_win = int(getattr(cfg, "smart_min_win_pct", 0) or 60)
+    scores = score_wallets(history)
+    good = [score for score in scores if score.qualifies(min_trades, min_win)]
+    shown = [score for score in scores if score.decided][:10]
+
+    lines = [
+        f"🧠 <b>Умные кошельки</b> — {esc(chain.name)}\n",
+        f"Запомнено покупок: <b>{len(history)}</b> за {SMART_HISTORY.days} дн. · "
+        f"кошельков: <b>{len(scores)}</b>",
+        f"Проходят ваш порог ({min_trades} сделок и {min_win}% удачных): <b>{len(good)}</b>\n",
+    ]
+    if shown:
+        lines.append("<b>Лучшие по результату</b>")
+        for score in shown:
+            mark = "▸" if score.qualifies(min_trades, min_win) else "·"
+            lines.append(f"{mark} <code>{short_addr(score.address)}</code> — "
+                         f"{score.wins} из {score.decided} выросли ({score.win_rate}%)"
+                         + (f", ещё {score.pending} в наблюдении" if score.pending else ""))
+    else:
+        lines.append("Пока ни одной покупки не прошло срок оценки — судить рано.")
+
+    state = "включено" if getattr(cfg, "smart_copy", False) else "выключено"
+    lines.append(f"\nПовторять за ними: <b>{state}</b> · <code>/set smart on</code>")
+    lines.append("Пороги: <code>/set smartmin 5</code> · <code>/set smartwin 60</code>")
+    lines.append("<i>Удачным считается вход, после которого цена росла на 30% и больше. "
+                 "Токен перед покупкой проходит все обычные проверки безопасности.</i>")
+    await reply(message, "\n".join(lines))
+
+
 @router.message(Command("creators"))
 async def cmd_creators(message: Message, user: User, chain: ChainConfig) -> None:
     async with session_scope() as session:

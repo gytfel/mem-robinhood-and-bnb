@@ -23,15 +23,18 @@ from sniperbot.chain.abi import V2_SWAP_TOPIC, V3_SWAP_TOPIC
 from sniperbot.chain.dex_adapter import PoolRef, get_adapter, route_allows
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
+from sniperbot.smart import MIN_DECIDED, score_wallets, trusted, wallet_buys
 from sniperbot.sniper.momentum import MomentumSignal, aggregate_swaps, evaluate_momentum, sample_age
 from sniperbot.sniper.safety import analyze_token, evaluate_verdict, proven_trap
 from sniperbot.sniper.scanner import MAX_BLOCK_RANGE, PairEvent, PairScanner
 from sniperbot.utils.evm import to_checksum
-from sniperbot.utils.fmt import to_wei
+from sniperbot.utils.fmt import short_addr, to_wei
 
 log = logging.getLogger(__name__)
 
 MAX_ADDRESSES = 100        # публичные ноды не любят длинные списки адресов в eth_getLogs
+TRUSTED_CACHE_SECONDS = 300      # как часто пересчитываем репутацию кошельков
+SMART_HISTORY = dt.timedelta(days=14)   # глубина, на которой судим о кошельке
 MAX_CANDIDATES = 5         # сколько пулов разбираем за один цикл: проверка дорогая
 MAX_SIM_AMOUNT = Decimal("0.05")   # верхняя граница суммы для симуляции налогов
 STALE_WINDOWS = 3          # замер старше этого числа окон уже не показывает разгон
@@ -52,6 +55,9 @@ class MomentumHunter:
         self.trending: dict[str, list[tuple[MomentumSignal, str, str]]] = {}
         self.last_tick: dict[str, dt.datetime] = {}
         self.watched: dict[str, int] = {}          # сколько пулов под наблюдением
+        # Кошельки, за которыми идём: пересчитывать их на каждом проходе дорого
+        # и незачем — репутация не меняется за минуту.
+        self._trusted: dict[str, tuple[float, set[str]]] = {}
 
     # ------------------------------------------------------------------ цикл
     async def run(self) -> None:
@@ -127,10 +133,64 @@ class MomentumHunter:
                 if bucket.last_price:
                     await repo.track_pool_price(session, pools[address]["row"].id, bucket.last_price)
 
+        await self._follow_wallets(chain_key, client, logs, pools, stats, subscribers)
+
         candidates = self._rank(chain_key, stats, previous, pools, subscribers)
         for signal, address, price in candidates[:MAX_CANDIDATES]:
             meta = pools[address]
             await self._consider(chain_key, meta["row"], stats[address], price, signal, subscribers)
+
+    # ------------------------------------------------------- умные кошельки
+    async def _follow_wallets(self, chain_key: str, client, logs: list, pools: dict,
+                              stats: dict, subscribers: list) -> None:
+        """Запоминает, кто что покупал, и идёт следом за теми, кто угадывает.
+
+        Логи уже получены для разгона, так что наблюдение за кошельками не
+        стоит ни одного лишнего запроса к ноде.
+        """
+        buys = wallet_buys(logs, pools, native_decimals=client.config.native_decimals)
+        prices = {meta["token"]: stats[address].last_price
+                  for address, meta in pools.items()
+                  if address in stats and stats[address].last_price}
+        async with session_scope() as session:
+            if buys:
+                await repo.record_wallet_buys(session, chain_key, buys)
+            if prices:
+                await repo.touch_wallet_trades(session, chain_key, prices)
+
+        copycats = [(user, cfg) for user, cfg in subscribers if getattr(cfg, "smart_copy", False)]
+        if not copycats or not buys:
+            return
+
+        good = await self._trusted_wallets(chain_key, copycats)
+        if not good:
+            return
+        for buy in buys:
+            if buy.wallet.lower() not in good:
+                continue
+            meta = pools.get(buy.pair.lower())
+            if meta is None:
+                continue
+            await self._copy(chain_key, meta["row"], copycats, buy.wallet)
+
+    async def _trusted_wallets(self, chain_key: str, copycats: list) -> set[str]:
+        """Кому верим. Пересчитывается раз в несколько минут, а не каждый проход."""
+        now = time.monotonic()
+        cached = self._trusted.get(chain_key)
+        if cached and now - cached[0] < TRUSTED_CACHE_SECONDS:
+            return cached[1]
+
+        min_trades = min(int(getattr(cfg, "smart_min_trades", 0) or MIN_DECIDED)
+                         for _, cfg in copycats)
+        min_win = min(int(getattr(cfg, "smart_min_win_pct", 0) or 60) for _, cfg in copycats)
+        since = dt.datetime.now(dt.UTC) - SMART_HISTORY
+        async with session_scope() as session:
+            history = await repo.wallet_trades(session, chain_key, since=since)
+        good = trusted(score_wallets(history), min_decided=min_trades, min_win_pct=min_win)
+        self._trusted[chain_key] = (now, good)
+        if good:
+            log.info("Сеть %s: кошельков, за которыми идём — %s", chain_key, len(good))
+        return good
 
     async def _backfill(self, chain_key: str, client) -> None:
         """Разбирает историю фабрик один раз за запуск.
@@ -281,17 +341,12 @@ class MomentumHunter:
             return False
         return (time.monotonic() - last) < self.settings.momentum_retry_minutes * 60
 
-    async def _consider(self, chain_key: str, row, bucket, price, signal: MomentumSignal,
-                        subscribers: list) -> None:
-        """Полная проверка кандидата и покупка тем, кому он подходит."""
-        subscribers = self._interested(subscribers, row.dex_kind)
-        if not subscribers:
-            return
-        address = row.pair_address.lower()
-        if self._cooling_down(address):
-            return
-        self._checked[address] = time.monotonic()
+    async def _prepare(self, chain_key: str, row, subscribers: list):
+        """Пул, отчёт безопасности и событие покупки — общее для всех поводов войти.
 
+        Повод у разгона и у умного кошелька разный, а проверки после него — те
+        же самые: пул живой, ликвидности хватает, токен не ловушка.
+        """
         client = self.registry.get(chain_key)
         router_cfg = client.config.router_by_address(row.router_address or "")
         if router_cfg is None:
@@ -334,6 +389,24 @@ class MomentumHunter:
             router=router_cfg, kind=row.dex_kind or "v2", fee=row.pool_fee or 0,
             pair_id=row.id,
         )
+        return adapter, pool, report, event
+
+    async def _consider(self, chain_key: str, row, bucket, price, signal: MomentumSignal,
+                        subscribers: list) -> None:
+        """Полная проверка кандидата и покупка тем, кому он подходит."""
+        subscribers = self._interested(subscribers, row.dex_kind)
+        if not subscribers:
+            return
+        address = row.pair_address.lower()
+        if self._cooling_down(address):
+            return
+        self._checked[address] = time.monotonic()
+
+        prepared = await self._prepare(chain_key, row, subscribers)
+        if prepared is None:
+            return
+        adapter, pool, report, event = prepared
+
         log.info("Разгон %s: рост %.1f%%, покупок %.0f%%, сделок %s",
                  row.token_address, signal.gain_pct, signal.buy_ratio * 100, signal.trades)
 
@@ -355,6 +428,44 @@ class MomentumHunter:
             async with session_scope() as session:
                 await repo.mark_pair(session, row.id, "sniped", "куплен на разгоне")
 
+    async def _copy(self, chain_key: str, row, subscribers: list, wallet: str) -> None:
+        """Покупка следом за кошельком, который уже много раз угадывал.
+
+        Чужой отбор не отменяет наших проверок: honeypot остаётся honeypot,
+        риск-лимиты — лимитами, а дубль позиции по-прежнему не берём.
+        """
+        interested = [(user, cfg) for user, cfg in self._interested(subscribers, row.dex_kind)
+                      if getattr(cfg, "smart_copy", False)]
+        if not interested:
+            return
+        address = row.pair_address.lower()
+        if self._cooling_down(address):
+            return
+        self._checked[address] = time.monotonic()
+
+        prepared = await self._prepare(chain_key, row, interested)
+        if prepared is None:
+            return
+        adapter, pool, report, event = prepared
+
+        log.info("Умный кошелёк %s купил %s — проверяю", wallet, row.token_address)
+        bought = 0
+        for user, cfg in interested:
+            if evaluate_verdict(report, cfg):
+                continue
+            if not await self._risk_ok(user, cfg, chain_key, row):
+                continue
+            group, effective = await self.engine.ab_variant(user.id, chain_key, cfg)
+            await self.engine.buy_for_user(
+                user, effective, event, report, (adapter, pool), group,
+                source="smart",
+                headline=f"🧠 <b>За кошельком</b> <code>{short_addr(wallet)}</code>",
+            )
+            bought += 1
+        if bought:
+            async with session_scope() as session:
+                await repo.mark_pair(session, row.id, "sniped", "куплен за умным кошельком")
+
     async def _risk_ok(self, user, cfg, chain_key: str, row) -> bool:
         """Чёрный список, дубль позиции и риск-лимиты пользователя."""
         async with session_scope() as session:
@@ -372,6 +483,9 @@ class MomentumHunter:
         before = dt.datetime.now(dt.UTC) - dt.timedelta(hours=ttl)
         async with session_scope() as session:
             await repo.prune_pool_samples(session, before)
+            # Репутация кошелька устаревает вместе с рынком: полугодовой успех
+            # ничего не говорит о сегодняшнем дне, а база растёт.
+            await repo.prune_wallet_trades(session, dt.datetime.now(dt.UTC) - SMART_HISTORY)
 
 
 async def _ignore(event: PairEvent) -> None:
