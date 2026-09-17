@@ -541,3 +541,68 @@ async def test_the_exit_check_never_delays_a_sale(db):
 
     assert trader.sales and trader.sales[0][2] == "stop_loss"
     assert trader.exit_checks == [], "продажа важнее проверки"
+
+
+# --------------------------------------------- наблюдение после выхода сделки
+async def test_the_monitor_follows_a_token_after_the_sale(db):
+    """Цена меряется тем же объёмом, что покупали: иначе она несравнима с входом."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position()
+    async with session_scope() as session:
+        stored = await session.get(Position, position.id)
+        stored.status = "closed"
+        stored.amount_wei = 0
+        stored.native_returned_wei = to_wei("0.002")
+        stored.last_price = ENTRY * 2
+        stored.closed_at = dt.datetime.now(dt.UTC)
+
+    trader.price = ENTRY * 5
+    watcher = monitor(trader, notifier)
+    await watcher.follow_closed()
+
+    async with session_scope() as session:
+        after = await session.get(Position, position.id)
+    assert after.after_samples == 1
+    assert after.after_peak_price == ENTRY * 5
+    assert after.after_low_price == ENTRY * 5
+
+
+async def test_the_dead_pool_is_asked_once_and_left(db):
+    """Пул умер сразу после выхода — незачем дёргать его весь час."""
+    trader, notifier = FakeTrader(), Silent()
+    trader.dead = True
+    position = await open_position()
+    async with session_scope() as session:
+        stored = await session.get(Position, position.id)
+        stored.status = "closed"
+        stored.amount_wei = 0
+        stored.native_returned_wei = to_wei("0.002")
+        stored.closed_at = dt.datetime.now(dt.UTC)
+
+    watcher = monitor(trader, notifier)
+    await watcher.follow_closed()
+    quotes = trader.quotes
+    await watcher.follow_closed()
+
+    assert trader.quotes == quotes, "мёртвый пул спрашивают один раз"
+    assert notifier.messages == [], "это наблюдение, а не повод тревожить человека"
+
+
+async def test_a_closed_trade_is_not_polled_every_tick(db):
+    """Замер раз в минуту: чаще — лишняя нагрузка на ноду без пользы."""
+    trader, notifier = FakeTrader(), Silent()
+    position = await open_position()
+    async with session_scope() as session:
+        stored = await session.get(Position, position.id)
+        stored.status = "closed"
+        stored.amount_wei = 0
+        stored.native_returned_wei = to_wei("0.002")
+        stored.closed_at = dt.datetime.now(dt.UTC)
+
+    watcher = monitor(trader, notifier)
+    for _ in range(5):
+        await watcher.follow_closed()
+
+    async with session_scope() as session:
+        after = await session.get(Position, position.id)
+    assert after.after_samples == 1

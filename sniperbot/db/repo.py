@@ -145,6 +145,42 @@ async def position_by_token(
     return await session.scalar(stmt)
 
 
+async def recently_closed(session: AsyncSession, within: dt.timedelta,
+                          limit: int = 20) -> list[Position]:
+    """Сделки, закрытые только что, — за их токенами ещё стоит последить.
+
+    Берутся только настоящие продажи: у списанной позиции («токены исчезли»,
+    «пул не принимает») продавать было нечего, и цена после выхода ничего не
+    объясняет.
+    """
+    since = utcnow() - within
+    stmt = (
+        select(Position)
+        .where(
+            Position.status == "closed",
+            Position.closed_at.is_not(None),
+            Position.closed_at >= since,
+            Position.native_returned_wei > 0,
+            Position.bought_wei > 0,
+        )
+        .order_by(Position.closed_at.desc())
+        .limit(limit)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def track_after_exit(session: AsyncSession, position_id: int, price: Decimal) -> None:
+    """Запоминает максимум и минимум цены после выхода."""
+    position = await session.get(Position, position_id)
+    if position is None or price is None or price <= 0:
+        return
+    if position.after_peak_price is None or price > position.after_peak_price:
+        position.after_peak_price = price
+    if position.after_low_price is None or price < position.after_low_price:
+        position.after_low_price = price
+    position.after_samples = int(position.after_samples or 0) + 1
+
+
 async def closed_positions(session: AsyncSession, user_id: int, limit: int = 10) -> list[Position]:
     stmt = (
         select(Position)

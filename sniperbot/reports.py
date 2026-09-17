@@ -399,6 +399,93 @@ def render_secure(rows: list[TradeRow], symbol: str, current: int = 0) -> str:
     return "\n".join(parts)
 
 
+MIN_AFTER_SAMPLE = 10             # меньше — это ещё не наблюдение, а совпадение
+AFTER_EARLY_PCT = Decimal(20)     # рост меньше этого после выхода — обычный шум
+AFTER_SAVED_PCT = Decimal(-30)    # падение глубже этого — выход реально спас деньги
+
+
+@dataclass(slots=True)
+class AfterRow:
+    """Что стало с токеном после того, как сделка закрылась."""
+
+    row: TradeRow
+    missed: Decimal        # на сколько процентов выше цены выхода он ещё уходил
+    dropped: Decimal       # и на сколько ниже падал
+
+
+def exit_price(row: TradeRow) -> Decimal | None:
+    """Цена, на которой сделка закончилась, — последняя, что видел монитор."""
+    price = row.position.last_price
+    return price if price and price > 0 else None
+
+
+def after_rows(rows: list[TradeRow]) -> list[AfterRow]:
+    """Сделки, за которыми успели последить после выхода."""
+    found: list[AfterRow] = []
+    for row in rows:
+        price = exit_price(row)
+        position = row.position
+        if price is None or not position.after_samples:
+            continue
+        peak = position.after_peak_price or price
+        low = position.after_low_price or price
+        found.append(AfterRow(row, (peak / price - 1) * 100, (low / price - 1) * 100))
+    return found
+
+
+def _median(values: list[Decimal]) -> Decimal:
+    """Медиана, а не среднее: один токен на ×50 иначе решает за все остальные."""
+    if not values:
+        return Decimal(0)
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def render_after(rows: list[TradeRow], symbol: str) -> str:
+    """Рано вы выходите или вовремя — по тому, что было с ценой дальше."""
+    found = after_rows(rows)
+    if len(found) < MIN_AFTER_SAMPLE:
+        return ""
+
+    early = [item for item in found if item.missed >= AFTER_EARLY_PCT]
+    saved = [item for item in found if item.dropped <= AFTER_SAVED_PCT]
+    missed = _median([item.missed for item in found])
+    dropped = _median([item.dropped for item in found])
+
+    parts = [
+        "⏱ <b>Что было после выхода</b>",
+        f"За час после продажи, по {len(found)} сделкам:",
+        f"· выше вашей цены выхода токен уходил на <b>{missed:+.0f}%</b> (медиана)",
+        f"· ниже — на <b>{dropped:+.0f}%</b>",
+        f"· рост продолжался после <b>{len(early)}</b> сделок из {len(found)}, "
+        f"обвал — после <b>{len(saved)}</b>",
+    ]
+
+    # Вывод делаем по величине, а не по числу случаев: держать дольше значит
+    # получить и то, и другое, поэтому сравнивать надо, где было больше хода —
+    # вверх или вниз. Счёт сделок обманывает: мелкая просадка после каждой
+    # продажи перевесила бы удвоение цены после трети из них.
+    if missed >= AFTER_EARLY_PCT and missed > -dropped:
+        parts.append("\n<b>Вы выходите рано.</b> Деньги остаются в тех сделках, которые "
+                     "и так шли вверх: часть позиции стоит отпускать дальше — поднять "
+                     "последнюю ступень тейка или расширить трейлинг. Числа подберёт "
+                     "<code>/optimize</code>.")
+    elif -dropped > missed:
+        parts.append("\n<b>Вы выходите вовремя.</b> После продажи токены чаще падали, чем "
+                     "росли: тянуть дольше на этих сделках значило бы отдавать прибыль "
+                     "обратно.")
+    else:
+        parts.append("\nВыход близок к лучшему моменту: и рост, и обвал после продажи "
+                     "случались одинаково часто.")
+
+    parts.append("<i>Считаются только сделки с настоящей продажей и только час после "
+                 "неё — что было с токеном через сутки, бот не знает.</i>")
+    return "\n".join(parts)
+
+
 def source_breakdown(rows: list[TradeRow], symbol: str) -> list[str]:
     """Что приносит деньги: снайп листингов, перехват разгона или ручные покупки.
 
@@ -454,6 +541,10 @@ def render_report(real: Summary, paper: Summary, days: int | None, symbol: str,
     if secure:
         parts.append("\n" + secure)
 
+    after = render_after(best.rows, symbol)
+    if after:
+        parts.append("\n" + after)
+
     if open_positions:
         parts.append(f"\nОткрытых позиций сейчас: <b>{open_positions}</b> "
                      "(в расчёт не входят — /positions)")
@@ -473,6 +564,7 @@ def trades_csv(rows: list[TradeRow], open_rows: list[TradeRow] | None = None) ->
     writer.writerow([
         "статус", "режим", "открыта", "закрыта", "сеть", "токен", "адрес", "площадка",
         "источник", "A/B", "причина выхода", "вложено", "возвращено", "pnl", "pnl_%",
+        "после выхода макс_%", "после выхода мин_%",
         "tx покупки", "tx продажи",
     ])
     for row in [*rows, *(open_rows or [])]:
@@ -494,10 +586,21 @@ def trades_csv(rows: list[TradeRow], open_rows: list[TradeRow] | None = None) ->
             _num(row.returned),
             _num(row.pnl),
             f"{row.pnl_pct:.2f}".replace(".", ","),
+            _after_pct(row, "after_peak_price"),
+            _after_pct(row, "after_low_price"),
             position.buy_tx or "",
             position.sell_tx or "",
         ])
     return buffer.getvalue()
+
+
+def _after_pct(row: TradeRow, field_name: str) -> str:
+    """Насколько цена уходила от вашей после выхода. Пусто — если не следили."""
+    price = exit_price(row)
+    value = getattr(row.position, field_name, None)
+    if price is None or not value or value <= 0:
+        return ""
+    return f"{(value / price - 1) * 100:.2f}".replace(".", ",")
 
 
 def _stamp(value: dt.datetime | None) -> str:

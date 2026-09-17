@@ -42,6 +42,13 @@ EXIT_CHECK_INTERVAL = 300.0  # дальше — раз в пять минут, �
 EXIT_CHECK_RETRY = 30.0      # после отказа перепроверяем быстрее, чем поднимаем тревогу
 EXIT_ALARM_FAILURES = 2      # один отказ может быть случайностью, два подряд — нет
 
+# Наблюдение за токеном после выхода: рано вы продали или вовремя, видно
+# только по тому, что было дальше. Час — столько живёт движение мемкоина;
+# минута между замерами ловит и короткий выброс цены.
+AFTER_WINDOW = dt.timedelta(minutes=60)
+AFTER_SAMPLE_SECONDS = 60.0
+AFTER_WATCH_LIMIT = 20       # больше закрытых сделок разом не отслеживаем
+
 
 def check_interval(age_minutes: float, fast_interval: float, normal_interval: float,
                    fast_window_minutes: float) -> float:
@@ -238,6 +245,10 @@ class PositionMonitor:
         self._exit_checked: dict[int, float] = {}
         self._exit_failures: dict[int, int] = {}
         self._exit_alarmed: set[int] = set()
+        # Закрытые сделки, за которыми ещё следим: когда спрашивали цену и по
+        # каким пул отвечать перестал (тогда до конца окна не тревожим).
+        self._after_checked: dict[int, float] = {}
+        self._after_failed: set[int] = set()
 
     async def run(self) -> None:
         self._running = True
@@ -293,6 +304,48 @@ class PositionMonitor:
                 raise result
             if isinstance(result, Exception):
                 log.debug("Позиция #%s: %s", position.id, result)
+
+        await self.follow_closed()
+
+    # ------------------------------------------------- что было после выхода
+    async def follow_closed(self) -> None:
+        """Следит за ценой закрытых сделок ещё час после продажи.
+
+        Продали рано или вовремя — по самой сделке не видно: она закончилась на
+        той цене, на которой закончилась. Ответ даёт только то, что было
+        дальше, и собрать его можно лишь заранее. Стоит это одной котировки в
+        минуту на сделку и ничего не решает само — только копит материал для
+        /report.
+        """
+        async with session_scope() as session:
+            closed = await repo.recently_closed(session, AFTER_WINDOW, limit=AFTER_WATCH_LIMIT)
+        if not closed:
+            self._after_checked.clear()
+            self._after_failed.clear()
+            return
+
+        alive = {position.id for position in closed}
+        self._after_checked = {key: value for key, value in self._after_checked.items()
+                               if key in alive}
+        self._after_failed &= alive
+
+        now = asyncio.get_running_loop().time()
+        for position in closed:
+            if position.id in self._after_failed:
+                continue
+            if now - self._after_checked.get(position.id, 0.0) < AFTER_SAMPLE_SECONDS:
+                continue
+            self._after_checked[position.id] = now
+            try:
+                price = await self.current_price(position, amount_wei=position.bought_wei)
+            except Exception as exc:  # noqa: BLE001 - пул мог умереть сразу после выхода
+                log.debug("Цена после выхода #%s недоступна: %s", position.id, exc)
+                self._after_failed.add(position.id)
+                continue
+            if price is None or price <= 0:
+                continue
+            async with session_scope() as session:
+                await repo.track_after_exit(session, position.id, price)
 
     # ----------------------------------------------------- выход ещё открыт?
     async def verify_exit(self, position: Position) -> None:
@@ -361,22 +414,26 @@ class PositionMonitor:
         return PoolRef(address=position.pair_address or "", kind=position.dex_kind or "v2",
                        fee=position.pool_fee or 0)
 
-    async def current_price(self, position: Position) -> Decimal | None:
-        """Цена выхода: сколько нативной монеты дадут за весь остаток позиции.
+    async def current_price(self, position: Position, amount_wei: int | None = None) -> Decimal | None:
+        """Цена выхода: сколько нативной монеты дадут за объём позиции.
 
         Спрашиваем там же, где будем продавать: если своя площадка перестала
         отвечать, а соседняя отвечает, позиция должна оцениваться и закрываться
         по ней, а не считаться потерянной.
+
+        ``amount_wei`` задаётся, когда остатка уже нет: у закрытой сделки цену
+        надо мерить тем же объёмом, что покупали, иначе она несравнима с ценой
+        входа — влияние на пул у разных объёмов разное.
         """
-        if position.amount_wei <= 0:
+        amount = position.amount_wei if amount_wei is None else amount_wei
+        if amount <= 0:
             return None
         client = self.registry.get(position.chain)
-        route = await self.trader.sell_route(client, position, position.token_address,
-                                             position.amount_wei)
+        route = await self.trader.sell_route(client, position, position.token_address, amount)
         if route is None:
             raise NoQuote("ни одна площадка не даёт котировку на продажу")
         native_out = route[2]
-        tokens = from_wei(position.amount_wei, position.token_decimals)
+        tokens = from_wei(amount, position.token_decimals)
         if tokens <= 0:
             return None
         return from_wei(native_out, client.config.native_decimals) / tokens

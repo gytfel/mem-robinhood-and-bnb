@@ -245,6 +245,13 @@ class Position(Base):
     peak_liquidity_wei: Mapped[int] = mapped_column(Wei, default=0)
     token_owner: Mapped[str | None] = mapped_column(String(42))           # для репутации создателя
 
+    # Что было с ценой ПОСЛЕ выхода. Без этого нельзя ответить на главный
+    # вопрос по прибыли: вы продаёте рано или поздно? Пока позиция закрыта,
+    # токен пропадал из виду, и любое решение про тейк оставалось на глаз.
+    after_peak_price: Mapped[Decimal | None] = mapped_column(Dec)
+    after_low_price: Mapped[Decimal | None] = mapped_column(Dec)
+    after_samples: Mapped[int] = mapped_column(Integer, default=0)
+
     opened_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
