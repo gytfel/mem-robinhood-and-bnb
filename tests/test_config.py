@@ -229,3 +229,50 @@ def test_a_broken_fee_wallet_is_reported_not_swallowed():
 
     off = Settings(BOT_TOKEN="1:aa", MASTER_KEY="k" * 32)
     assert off.validate_runtime() == []      # пустой кошелёк — это просто «комиссий нет»
+
+
+# ------------------------------------------- настройки сети доезжают из .env
+def _chain_from_env(tmp_path, monkeypatch, lines: str):
+    """Собирает сеть ровно так, как это делает бот при запуске: из файла .env."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "BOT_TOKEN=123:AA\nMASTER_KEY=" + "k" * 40 + "\n"
+        "RH_ENABLED=true\nRH_CHAIN_ID=4663\n"
+        "RH_RPC_URLS=https://rpc.mainnet.chain.robinhood.com\n"
+        "RH_ROUTER=0x10ED43C718714eb63d5aA57B78B54704E256024E\n"
+        "RH_FACTORY=0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73\n"
+        "RH_WRAPPED_NATIVE=0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c\n" + lines,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SNIPER_ENV_FILE", str(env))
+    from sniperbot.config import get_chains
+
+    get_chains.cache_clear()
+    try:
+        return get_chains()["robinhood"]
+    finally:
+        get_chains.cache_clear()
+
+
+def test_the_websocket_address_reaches_the_chain(tmp_path, monkeypatch):
+    """Настройка разбиралась из .env и молча терялась при сборке сети.
+
+    Поля добавлены в описание, а сборка перечисляет их руками — забытая строка
+    выглядит как «настройка не работает», и искать это приходится на сервере.
+    """
+    chain = _chain_from_env(tmp_path, monkeypatch,
+                            "RH_WS_URL=wss://api.example.com/key\nRH_FEED_URL=wss://feed.example\n")
+
+    assert chain.ws_url == "wss://api.example.com/key"
+    assert chain.feed_url == "wss://feed.example"
+
+
+def test_an_empty_setting_stays_empty(tmp_path, monkeypatch):
+    chain = _chain_from_env(tmp_path, monkeypatch, "RH_WS_URL=\nRH_FEED_URL=\n")
+    assert chain.ws_url == "" and chain.feed_url == ""
+
+
+def test_spaces_around_the_address_are_trimmed(tmp_path, monkeypatch):
+    """Строку вставляют вручную — лишний пробел не должен ломать подключение."""
+    chain = _chain_from_env(tmp_path, monkeypatch, "RH_WS_URL=  wss://api.example.com/key  \n")
+    assert chain.ws_url == "wss://api.example.com/key"

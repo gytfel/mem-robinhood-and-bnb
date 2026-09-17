@@ -396,6 +396,8 @@ def load_chains(path: str | Path | None = None, settings: Settings | None = None
             eip1559=bool(raw.get("eip1559", False)),
             block_time=float(raw.get("block_time", 3.0)),
             rpc_urls=list(raw.get("rpc_urls", [])),
+            feed_url=str(raw.get("feed_url", "")).strip(),
+            ws_url=str(raw.get("ws_url", "")).strip(),
             explorer_url=str(raw.get("explorer_url", "")).rstrip("/"),
             wrapped_native=raw.get("wrapped_native", ""),
             stable_token=raw.get("stable_token", ""),
