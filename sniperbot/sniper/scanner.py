@@ -65,7 +65,7 @@ class PairScanner:
                 if last_block == 0:
                     last_block = head  # первый запуск: не разбираем историю
                 if head > last_block:
-                    to_block = min(head, last_block + MAX_BLOCK_RANGE)
+                    to_block = min(head, last_block + self._span())
                     events = await self._fetch(last_block + 1, to_block)
                     for event in events:
                         await self._dispatch(event)
@@ -83,6 +83,11 @@ class PairScanner:
 
     def stop(self) -> None:
         self._running = False
+
+    def _span(self) -> int:
+        """Сколько блоков просить за раз: не больше, чем узел согласен отдать."""
+        limit = getattr(self.client, "log_span_limit", 0)
+        return min(MAX_BLOCK_RANGE, limit) if limit else MAX_BLOCK_RANGE
 
     # ------------------------------------------------------------- внутренности
     async def _load_cursor(self) -> int:

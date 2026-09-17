@@ -54,6 +54,18 @@ def fmt_usd(value: Decimal | None) -> str:
     return f"${fmt_amount(value, 2)}"
 
 
+def plural(count: int, one: str, few: str, many: str) -> str:
+    """«1 запрос», «2 запроса», «5 запросов» — число со своим окончанием."""
+    if 11 <= count % 100 <= 14:
+        return many
+    last = count % 10
+    if last == 1:
+        return one
+    if last in {2, 3, 4}:
+        return few
+    return many
+
+
 def short_addr(address: str, head: int = 6, tail: int = 4) -> str:
     if not address or len(address) <= head + tail + 2:
         return address or "—"

@@ -19,7 +19,7 @@ from sniperbot.audience import STATE_KEY as AUDIENCE_STATE_KEY
 from sniperbot.audience import AudienceCounter
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.ui import reply
-from sniperbot.chain.clients import ChainClient
+from sniperbot.chain.clients import REASON_HINTS, REASON_TITLES, ChainClient
 from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -41,6 +41,13 @@ SMALL_AUDIENCE = 50
 
 def _deny(is_admin: bool) -> bool:
     return not is_admin
+
+
+def _short_url(url: str) -> str:
+    """Ссылку на узел показываем без ключа: он не должен утечь со скриншотом."""
+    body = url.split("://", 1)[-1]
+    host, _, path = body.partition("/")
+    return host if not path else f"{host}/…"
 
 
 async def _refuse(message: Message) -> None:
@@ -112,10 +119,26 @@ async def cmd_usage(message: Message, ctx: BotContext, is_admin: bool = False) -
         await _refuse(message)
         return
     lines = ["📊 <b>Расход ресурсов</b>\n", "<b>Запросы к RPC</b> (с момента запуска)"]
+    hints: dict[str, str] = {}
     for key in ctx.active_chain_keys:
         client = ctx.registry.get(key)
-        lines.append(f"  {esc(ctx.chain(key).name)}: {client.requests} запросов, "
-                     f"сбоев {client.failures}, активный узел {esc(client.rpc_url)}")
+        lines.append(f"\n<b>{esc(ctx.chain(key).name)}</b>: {client.requests} запросов")
+        dropped = getattr(client, "dropped", 0)
+        if dropped:
+            lines.append(f"  ⛔️ не выполнено: <b>{dropped}</b> — данные не получены")
+        else:
+            lines.append("  ✅ все запросы выполнены: отказы узлов пережиты переключением")
+        for endpoint in getattr(client, "endpoints", []):
+            mark = "▸" if endpoint.url == client.rpc_url else "·"
+            lines.append(f"  {mark} {esc(_short_url(endpoint.url))} — {esc(endpoint.health())}")
+            if endpoint.pace:
+                lines.append(f"      темп снижен до {1 / endpoint.pace:.0f} запросов/сек")
+            for reason in endpoint.reasons:
+                if reason in REASON_HINTS:
+                    hints.setdefault(reason, REASON_HINTS[reason])
+    if hints:
+        lines.append("\n<b>Что с этим делать</b>")
+        lines += [f"  · {esc(REASON_TITLES[reason])}: {esc(hint)}" for reason, hint in hints.items()]
 
     async with session_scope() as session:
         users = await repo.user_count(session)

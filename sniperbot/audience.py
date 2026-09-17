@@ -13,19 +13,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sniperbot.utils.fmt import plural as fmt_plural
+
 STATE_KEY = "user_counter"        # где решение команды /counter лежит в базе
 
 
 def plural(count: int) -> str:
     """«1 пользователь», «2 пользователя», «5 пользователей»."""
-    if 11 <= count % 100 <= 14:
-        return "пользователей"
-    last = count % 10
-    if last == 1:
-        return "пользователь"
-    if last in {2, 3, 4}:
-        return "пользователя"
-    return "пользователей"
+    return fmt_plural(count, "пользователь", "пользователя", "пользователей")
 
 
 def fmt_count(count: int) -> str:
