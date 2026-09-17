@@ -280,3 +280,34 @@ def test_every_probe_variant_is_distinct():
     assert any(not compress for _t, compress, _h, _p in PROBE_VARIANTS)
     assert any("User-Agent" in dict(headers) for _t, _c, headers, _p in PROBE_VARIANTS), \
         "заслон, который не пускает не-браузеры, — самый частый случай"
+
+
+# ------------------------------------------------- адрес узла до подключения
+@pytest.mark.parametrize("url", [
+    "wss://api-robinhood-mainnet.n.dwellir.com/9f3c-abcdef",
+    "wss://rpc.ordofi.network",
+    "ws://127.0.0.1:9642",
+    "wss://cold-example-key.quiknode.pro/3c1ae59d1c5c67ffc32ab3ba40faf71504a63181/",
+])
+def test_a_real_address_passes(url):
+    """Ключ в пути может содержать любые буквы — придираться к нему нельзя."""
+    from sniperbot.chain.feed import url_problem
+
+    assert url_problem(url) == ""
+
+
+@pytest.mark.parametrize("url,hint", [
+    ("wss://ваш-адрес-с-ключом", "заглушка"),
+    ("wss://<your-key>.example.com", "пример"),
+    ("https://rpc.example.com", "wss://"),
+    ("rpc.example.com", "wss://"),
+    ("", "пустой"),
+    ("wss://", "нет имени сервера"),
+    ("wss://rpc.example.com/ключ сюда", "пробел"),
+])
+def test_a_placeholder_is_called_out_before_connecting(url, hint):
+    """Иначе человек видит ошибку DNS и думает, что дело в ключе."""
+    from sniperbot.chain.feed import url_problem
+
+    problem = url_problem(url)
+    assert problem and hint in problem

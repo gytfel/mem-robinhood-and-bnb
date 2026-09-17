@@ -409,7 +409,7 @@ def cmd_feed(args: argparse.Namespace) -> int:
 async def _feed(args: argparse.Namespace) -> int:
     import asyncio
 
-    from sniperbot.chain.feed import SequencerFeed
+    from sniperbot.chain.feed import SequencerFeed, url_problem
     from sniperbot.config import env_prefix, get_chains
     from sniperbot.utils.fmt import short_url
 
@@ -427,6 +427,11 @@ async def _feed(args: argparse.Namespace) -> int:
 
     watched = {router.factory for router in chain.routers if router.configured}
     watched |= {router.router for router in chain.routers if router.configured}
+    problem = url_problem(url)
+    if problem:
+        print(f"Адрес не годится: {problem}")
+        return 1
+
     if not watched:
         print(f"У сети {chain.name} не настроен ни один роутер — следить не за чем.\n"
               f"Сначала укажите роутер и фабрику: {env_prefix(args.chain)}_ROUTER, "
@@ -475,6 +480,7 @@ async def _ws(args: argparse.Namespace) -> int:
     import asyncio
 
     from sniperbot.chain.abi import PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC
+    from sniperbot.chain.feed import url_problem
     from sniperbot.chain.logstream import LogStream
     from sniperbot.config import env_prefix, get_chains
     from sniperbot.utils.fmt import short_url
@@ -489,6 +495,13 @@ async def _ws(args: argparse.Namespace) -> int:
         print(f"Для сети {chain.name} вебсокет не задан.\n"
               f"Укажите его в .env: {env_prefix(args.chain)}_WS_URL=wss://…\n"
               "или передайте здесь: sniper ws --url wss://…")
+        return 1
+
+    problem = url_problem(url)
+    if problem:
+        print(f"Адрес не годится: {problem}\n"
+              "Возьмите адрес в панели провайдера (QuickNode, Dwellir) — строка, "
+              "которая начинается с wss:// — и подставьте её целиком.")
         return 1
 
     factories = {router.factory for router in chain.routers if router.configured}
