@@ -98,7 +98,9 @@ async def cmd_health(message: Message, ctx: BotContext, is_admin: bool = False) 
         client = ctx.registry.get(key)
         started = time.perf_counter()
         try:
-            block = await client.block_number()
+            # Мимо кеша головы: здесь мерят скорость узла, а не читают номер
+            # блока. По кешированному ответу получались честные «0 мс».
+            block = await client.run(lambda w3: w3.eth.get_block_number())
             latency = (time.perf_counter() - started) * 1000
             lines.append(f"  ✅ {esc(chain.name)}: блок {block}, {latency:.0f} мс")
         except Exception as exc:  # noqa: BLE001
@@ -106,9 +108,14 @@ async def cmd_health(message: Message, ctx: BotContext, is_admin: bool = False) 
             continue
         async with session_scope() as session:
             recent = await repo.recent_pairs(session, key, limit=1)
+            snipers = await repo.users_with_autosnipe(session, key)
         if recent:
             age = dt.datetime.now(dt.UTC) - _aware(recent[0].created_at)
             lines.append(f"     последний пул: {int(age.total_seconds() // 60)} мин назад")
+        elif not snipers:
+            # Пары сканер видит, но без подписчиков они не разбираются и в базу
+            # не попадают. «Не видел пулов» читается как поломка — а это выбор.
+            lines.append("     автоснайп в этой сети выключен — пары не разбираются")
         else:
             lines.append("     новых пулов ещё не видел")
 

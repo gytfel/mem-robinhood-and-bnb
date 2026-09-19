@@ -282,3 +282,24 @@ async def test_the_head_block_is_asked_once_for_all_scanners():
     assert await client.block_number() == 5_000_000
     assert await client.block_number() == 5_000_000
     assert len(asked) == 1, "три сканера — один запрос к ноде"
+
+
+async def test_the_head_cache_does_not_fake_a_latency_measurement():
+    """/health мерит скорость узла — по кешированному ответу выходило «0 мс»."""
+    client = make_client(1)
+    asked = []
+
+    class Eth:
+        async def get_block_number(self):
+            asked.append(1)
+            return 5_000_000
+
+    client._providers = [SimpleNamespace(eth=Eth())]
+
+    await client.block_number()
+    await client.block_number()
+    assert len(asked) == 1, "обычное чтение головы кешируется"
+
+    # Прямой вызов минует кеш: именно так и должен мерить /health.
+    await client.run(lambda w3: w3.eth.get_block_number())
+    assert len(asked) == 2
