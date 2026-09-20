@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from sniperbot.bot.context import BotContext
+from sniperbot.chart import render as price_chart
 from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -179,6 +180,9 @@ def render_position(position: Position, chain: ChainConfig, price: Decimal | Non
     if price is not None:
         lines.append(f"💱 Сейчас: {fmt_amount(price, 12)} {chain.native_symbol}"
                      + (" <i>(из последней проверки)</i>" if stale else ""))
+    drawn = price_chart(position.price_track or "")
+    if drawn:
+        lines.append(drawn)
     lines.append("🤖 Автовыход: " + exit_rules(position))
     if cfg is not None and position.is_open:
         from sniperbot.sniper.executor import exit_rules_differ

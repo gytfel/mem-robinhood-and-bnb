@@ -18,6 +18,7 @@ from decimal import Decimal
 
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.dex_adapter import PoolRef
+from sniperbot.chart import add_point
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -517,6 +518,7 @@ class PositionMonitor:
             if stored is None or stored.status != "open":
                 return
             stored.last_price = price
+            stored.price_track = add_point(stored.price_track or "", age * 60, price)
             stored.peak_price = peak_price
             stored.breakeven_armed = armed
             if liquidity is not None:

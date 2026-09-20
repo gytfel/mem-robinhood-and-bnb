@@ -258,6 +258,11 @@ class Position(Base):
     after_low_price: Mapped[Decimal | None] = mapped_column(Dec)
     after_samples: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Замеры цены для графика в карточке: «секунда от покупки:цена» через
+    # запятую. Лежит в самой позиции, а не отдельной таблицей, потому что
+    # живёт ровно столько же и чистить его отдельно не нужно.
+    price_track: Mapped[str] = mapped_column(Text, default="")
+
     opened_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
