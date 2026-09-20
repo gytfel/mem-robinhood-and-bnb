@@ -37,9 +37,15 @@ STRANGER = "0x55d398326f99059fF775485246999027B3197955"
 BASE = {"nonce": 5, "gas": 200_000, "value": 10**16, "chainId": 4663, "data": b"\xab\xcd"}
 
 
-def signed(to: str | None = ROUTER, kind: str = "1559") -> bytes:
+ADD_LIQUIDITY = bytes.fromhex("f305d719")     # addLiquidityETH — так родится пара
+SWAP = bytes.fromhex("7ff36ab5")              # обычный обмен через тот же роутер
+
+
+def signed(to: str | None = ROUTER, kind: str = "1559", data: bytes | None = None) -> bytes:
     """Настоящая подписанная транзакция — разбор проверяем на них, не на макетах."""
     tx = dict(BASE)
+    if data is not None:
+        tx["data"] = data
     if kind == "legacy":
         tx["gasPrice"] = 10**9
     elif kind == "2930":
@@ -239,8 +245,8 @@ def test_the_feed_starts_only_when_the_chain_gives_one(monkeypatch):
     created: list = []
 
     class FakeFeed:
-        def __init__(self, url, watched, poke, name=""):  # noqa: ANN001
-            created.append((url, watched))
+        def __init__(self, url, watched, poke, name="", selectors=None):  # noqa: ANN001
+            created.append((url, watched, selectors))
             self.poke = poke
 
         async def run(self):
@@ -253,7 +259,8 @@ def test_the_feed_starts_only_when_the_chain_gives_one(monkeypatch):
     instance._start_feed("rh", chain, [])
 
     assert created and created[0][0] == "wss://feed.mainnet.chain.robinhood.com"
-    assert created[0][1] == {FACTORY}, "следим за фабрикой: пары рождаются там"
+    assert created[0][1] == {ROUTER, FACTORY}, "пару создают и через роутер, и напрямую"
+    assert created[0][2], "без отбора по методу роутер завалил бы бот обменами"
 
 
 # ------------------------------------------------- рукопожатие со сжатием
@@ -540,17 +547,52 @@ def feed_for_chain(monkeypatch):
     return instance.feeds["rh"], woken
 
 
-async def test_the_feed_watches_factories_not_routers(monkeypatch):
-    """Через роутер идёт каждый обмен в сети: будить на них — топить узел."""
-    feed, _ = feed_for_chain(monkeypatch)
-    assert bytes.fromhex(FACTORY[2:].lower()) in feed.watched
-    assert bytes.fromhex(ROUTER[2:].lower()) not in feed.watched
+async def test_an_ordinary_swap_does_not_wake_the_scanner(monkeypatch):
+    """Через роутер идёт вся торговля сети. Будить на ней — топить свой же узел."""
+    feed, woken = feed_for_chain(monkeypatch)
+    assert await feed.handle(frame(one(signed(ROUTER, data=SWAP)))) is False
+    assert woken == []
+
+
+async def test_adding_liquidity_through_the_router_wakes_the_scanner(monkeypatch):
+    """Так рождается почти каждая пара: получателем стоит роутер, не фабрика."""
+    feed, woken = feed_for_chain(monkeypatch)
+    assert await feed.handle(frame(one(signed(ROUTER, data=ADD_LIQUIDITY)))) is True
+    assert len(woken) == 1
+
+
+async def test_creating_a_pair_at_the_factory_wakes_the_scanner_too(monkeypatch):
+    from sniperbot.chain.abi import POOL_SELECTORS
+
+    create_pair = bytes.fromhex("c9c65396")
+    assert create_pair in POOL_SELECTORS
+    feed, woken = feed_for_chain(monkeypatch)
+    assert await feed.handle(frame(one(signed(FACTORY, data=create_pair)))) is True
+    assert len(woken) == 1
 
 
 async def test_a_burst_of_pairs_wakes_the_scanner_once(monkeypatch):
     """Сканер читает логи промежутком: на каждую пару в одном блоке — незачем."""
     feed, woken = feed_for_chain(monkeypatch)
     for _ in range(20):
-        await feed.handle(frame(one(signed(FACTORY))))
+        await feed.handle(frame(one(signed(ROUTER, data=ADD_LIQUIDITY))))
     assert len(woken) == 1, "пол между пробуждениями обязан держать"
     assert feed.hits == 20, "сами попадания при этом считаем все"
+
+
+def test_the_method_is_read_out_of_a_real_transaction():
+    """Селектор берём из той же RLP, что и адрес, — вторым проходом было бы вдвое дороже."""
+    from sniperbot.chain.feed import tx_call
+
+    for kind in ("legacy", "2930", "1559"):
+        address, selector = tx_call(signed(ROUTER, kind=kind, data=ADD_LIQUIDITY + b"\x11" * 64))
+        assert address == bytes.fromhex(ROUTER[2:].lower())
+        assert selector == ADD_LIQUIDITY, kind
+
+
+def test_a_transaction_without_data_has_no_method():
+    from sniperbot.chain.feed import tx_call
+
+    address, selector = tx_call(signed(ROUTER, data=b""))
+    assert address == bytes.fromhex(ROUTER[2:].lower())
+    assert selector == b"", "простой перевод монеты — не вызов метода"

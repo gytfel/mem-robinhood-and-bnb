@@ -38,6 +38,7 @@ MAX_BATCH_DEPTH = 4          # вложенность пачек огранич�
 TO_INDEX_LEGACY = 3
 TO_INDEX_2930 = 4
 TO_INDEX_1559 = 5            # то же место у blob (0x03) и 7702 (0x04)
+DATA_AFTER_TO = 2            # между получателем и данными лежит сумма перевода
 
 # Паузы между попытками. Обрыв уже установленной связи — обычное дело, сюда
 # можно возвращаться быстро. Отказ в рукопожатии — совсем другое: у публичных
@@ -200,11 +201,13 @@ def _header(raw: bytes, index: int) -> tuple[int, int, bool]:
     return index + 1 + size, int.from_bytes(raw[index + 1:index + 1 + size], "big"), True
 
 
-def tx_target(raw: bytes) -> bytes | None:
-    """Кому адресована транзакция. None — разбор не удался или создание контракта.
+def tx_call(raw: bytes) -> tuple[bytes, bytes] | None:
+    """Кому адресована транзакция и что у неё вызывают.
 
-    Полностью декодировать транзакцию незачем: из всего конверта нужен один
-    адрес, чтобы понять, касается ли она нас. Остальное прочитает RPC.
+    Возвращает (адрес получателя, первые четыре байта данных) — этого хватает,
+    чтобы понять и касается ли транзакция нас, и зачем она. Полностью
+    декодировать конверт незачем: остальное при необходимости прочитает RPC.
+    None — разбор не удался или это развёртывание контракта.
     """
     if not raw:
         return None
@@ -223,26 +226,42 @@ def tx_target(raw: bytes) -> bytes | None:
         if not is_list:
             return None
         position, limit = start, min(len(payload), start + length)
-        for _ in range(index):
+        # Поле данных стоит через одно после получателя (между ними сумма
+        # перевода) — и так во всех видах конвертов, поэтому смещение общее.
+        for wanted in range(index + DATA_AFTER_TO + 1):
             item_start, item_length, _kind = _header(payload, position)
+            if wanted == index:
+                if item_length != 20:
+                    return None      # пустое поле — это развёртывание контракта
+                address = payload[item_start:item_start + item_length]
+            if wanted == index + DATA_AFTER_TO:
+                return address, bytes(payload[item_start:item_start + min(4, item_length)])
             position = item_start + item_length
             if position > limit:
                 return None
-        item_start, item_length, _kind = _header(payload, position)
-        if item_length != 20:
-            return None      # пустое поле — это развёртывание контракта
-        return payload[item_start:item_start + item_length]
-    except IndexError:
+    except (IndexError, UnboundLocalError):
         return None
+    return None
+
+
+def tx_target(raw: bytes) -> bytes | None:
+    """Только адрес получателя."""
+    call = tx_call(raw)
+    return call[0] if call else None
 
 
 def targets(message: bytes) -> set[bytes]:
     """Все адреса получателей в одном L2-сообщении."""
+    return {address for address, _selector in calls(message)}
+
+
+def calls(message: bytes) -> set[tuple[bytes, bytes]]:
+    """Все пары «получатель, вызываемый метод» в одном L2-сообщении."""
     found = set()
     for raw in iter_transactions(message):
-        address = tx_target(raw)
-        if address is not None:
-            found.add(address)
+        call = tx_call(raw)
+        if call is not None:
+            found.add(call)
     return found
 
 
@@ -301,7 +320,8 @@ class SequencerFeed:
 
     def __init__(self, url: str, watched: set[str],
                  on_hit: Callable[[int], Awaitable[None] | None], *, name: str = "",
-                 compress: int = COMPRESS_BITS, headers: dict[str, str] | None = None) -> None:
+                 compress: int = COMPRESS_BITS, headers: dict[str, str] | None = None,
+                 selectors: frozenset[bytes] | set[bytes] | None = None) -> None:
         self.url = url
         self.compress = compress
         self.headers = HANDSHAKE_HEADERS if headers is None else headers
@@ -310,6 +330,9 @@ class SequencerFeed:
         # Адреса храним байтами: сравнивать их придётся на каждую транзакцию.
         self.watched = {bytes.fromhex(address.lower().removeprefix("0x"))
                         for address in watched if address}
+        # Какие вызовы считать своими. Пусто — любые: так поток годится и для
+        # адреса, у которого интересна вся переписка.
+        self.selectors = frozenset(selectors) if selectors else frozenset()
         self._running = False
         self.connected = False
         self.messages = 0        # сколько кадров разобрали
@@ -426,7 +449,7 @@ class SequencerFeed:
         for number, message in parse_frame(payload):
             self.messages += 1
             sequence = max(sequence, number)
-            if targets(message) & self.watched:
+            if self._touches_us(message):
                 hit = True
         if sequence:
             self.last_sequence = max(self.last_sequence, sequence)
@@ -440,6 +463,15 @@ class SequencerFeed:
         except Exception as exc:  # noqa: BLE001 - подписка важнее одного пробуждения
             log.debug("Поток %s: обработчик не сработал (%s)", self.name, exc)
         return True
+
+    def _touches_us(self, message: bytes) -> bool:
+        """Есть ли в сообщении интересная нам транзакция."""
+        for address, selector in calls(message):
+            if address not in self.watched:
+                continue
+            if not self.selectors or selector in self.selectors:
+                return True
+        return False
 
     def status(self) -> str:
         """Строка для /health."""

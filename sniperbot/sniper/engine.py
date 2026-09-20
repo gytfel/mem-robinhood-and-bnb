@@ -8,7 +8,11 @@ import logging
 import time
 from decimal import Decimal
 
-from sniperbot.chain.abi import PAIR_CREATED_TOPIC, POOL_CREATED_TOPIC
+from sniperbot.chain.abi import (
+    PAIR_CREATED_TOPIC,
+    POOL_CREATED_TOPIC,
+    POOL_SELECTORS,
+)
 from sniperbot.chain.clients import ChainRegistry
 from sniperbot.chain.dex_adapter import PoolRef, get_adapter, route_allows
 from sniperbot.chain.feed import SequencerFeed
@@ -102,12 +106,14 @@ class SniperEngine:
         url = (getattr(config, "feed_url", "") or "").strip()
         if not url:
             return
-        # Только фабрики. Новая пара рождается через фабрику, а через роутер
-        # идёт каждый обмен в сети: на роутерах лента будила сканер по пять раз
-        # в секунду на чужих сделках, и каждое пробуждение — поход в RPC за
-        # логами. Скорости это не добавляло (пары там не появляются), а запросы
-        # к узлу множило на порядок.
+        # Смотрим и роутеры, и фабрики, но не на всё подряд: будят нас только
+        # вызовы, которыми создают пул. По одному адресу отобрать нельзя —
+        # пару обычно создают через addLiquidity у роутера, и получателем в
+        # транзакции стоит роутер, а не фабрика. А если брать роутер целиком,
+        # поток будит сканер на каждом обмене в сети, по пять раз в секунду,
+        # и каждое пробуждение — лишний поход в RPC за логами.
         watched = {router.factory for router in config.routers if router.configured}
+        watched |= {router.router for router in config.routers if router.configured}
 
         last_wake = 0.0
 
@@ -124,7 +130,8 @@ class SniperEngine:
                 scanner.wake()
             self.hunter.wake()
 
-        feed = SequencerFeed(url, watched, poke, name=config.name)
+        feed = SequencerFeed(url, watched, poke, name=config.name,
+                             selectors=POOL_SELECTORS)
         self.feeds[chain_key] = feed
         self._tasks.append(asyncio.create_task(feed.run(), name=f"feed-{chain_key}"))
 

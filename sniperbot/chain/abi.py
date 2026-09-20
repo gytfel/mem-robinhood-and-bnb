@@ -201,6 +201,20 @@ WETH_ABI = [
 POOL_CREATED_TOPIC = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
 
 
+# Чем создают новый пул. Нужно потоку секвенсора: там видно только сырую
+# транзакцию, и без этого списка пришлось бы будить бота на каждом обмене —
+# через роутер идёт вся торговля сети, а пара рождается считанные разы в час.
+# Пару почти никогда не создают обращением к самой фабрике: обычно зовут
+# addLiquidity у роутера, а фабрику он дёргает уже внутри себя.
+POOL_SELECTORS = frozenset({
+    bytes.fromhex("e8e33700"),   # addLiquidity(...)              — V2, через роутер
+    bytes.fromhex("f305d719"),   # addLiquidityETH(...)           — V2, через роутер
+    bytes.fromhex("c9c65396"),   # createPair(address,address)    — V2, напрямую
+    bytes.fromhex("a1671295"),   # createPool(...)                — V3, напрямую
+    bytes.fromhex("13ead562"),   # createAndInitializePoolIfNecessary(...) — V3
+})
+
+
 # keccak256("Swap(address,uint256,uint256,uint256,uint256,address)") — Uniswap V2
 V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
 # keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)") — Uniswap V3
