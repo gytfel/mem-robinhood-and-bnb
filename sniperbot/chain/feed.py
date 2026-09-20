@@ -51,6 +51,20 @@ MAX_WAIT = 3600.0
 # иначе быстрый разрыв сразу после подключения крутил бы цикл без пауз.
 MIN_SESSION_SECONDS = 10.0
 
+# Молчание при живом соединении. Секвенсор говорит без умолку, поэтому полторы
+# минуты тишины означают не затишье в сети, а что нас слушают не там.
+SILENT_SECONDS = 90.0
+# Где у ленты дверь. У одних она в корне адреса, у других — в /feed; угадать
+# снаружи нельзя, поэтому пробуем по очереди, пока не пойдут данные.
+PATH_VARIANTS = ("", "/feed")
+# Кадры с данными. Ленты шлют то текст, то двоичное — с одинаковым JSON внутри,
+# и отбрасывать двоичные значило бы молча выкидывать всё содержимое.
+DATA_TYPES = (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY)
+
+
+class FeedSilent(RuntimeError):
+    """Соединение есть, данных нет. Обычно это значит: не тот путь."""
+
 
 def retry_after(error: BaseException) -> float:
     """Сколько секунд сервер просил подождать. 0 — не просил или сказал датой."""
@@ -304,6 +318,8 @@ class SequencerFeed:
         self.last_error = ""
         self.refusals = 0        # подряд отказов в рукопожатии
         self.waiting = 0.0       # сколько ждём до следующей попытки
+        self.frames = 0          # сколько кадров пришло — отдельно от разобранных
+        self._variant = 0        # какой путь пробуем сейчас
 
     async def run(self) -> None:
         self._running = True
@@ -327,6 +343,17 @@ class SequencerFeed:
                     wait = RECONNECT_STEPS[min(failures, len(RECONNECT_STEPS) - 1)]
                 except asyncio.CancelledError:
                     raise
+                except FeedSilent as quiet:
+                    # Пустили, но молчат. Отказом это не считается — ограничитель
+                    # частоты здесь ни при чём, — поэтому возвращаемся быстро,
+                    # но уже в другую дверь.
+                    self.connected = False
+                    self._variant += 1
+                    self.last_error = "пустили, но данных нет — пробую другой путь"
+                    failures += 1
+                    wait = RECONNECT_STEPS[min(failures, len(RECONNECT_STEPS) - 1)]
+                    log.warning("Поток %s: %s молчит, перехожу на %s",
+                                self.name, quiet, self.target())
                 except aiohttp.WSServerHandshakeError as exc:
                     # Нас не приняли. Ломиться дальше в прежнем темпе — верный
                     # способ остаться в отказе навсегда: счётчик ограничителя
@@ -353,18 +380,34 @@ class SequencerFeed:
     def stop(self) -> None:
         self._running = False
 
+    def target(self) -> str:
+        """Адрес текущей попытки: корень или /feed."""
+        return self.url.rstrip("/") + PATH_VARIANTS[self._variant % len(PATH_VARIANTS)]
+
     async def _listen(self, session: aiohttp.ClientSession) -> None:
-        async with session.ws_connect(self.url, headers=self.headers, compress=self.compress,
+        target = self.target()
+        async with session.ws_connect(target, headers=self.headers, compress=self.compress,
                                       heartbeat=30, max_msg_size=32 * 1024 * 1024) as socket:
             self.connected = True
             self.last_error = ""
-            log.info("Поток %s: подключён", self.name)
-            async for frame in socket:
-                if frame.type is not aiohttp.WSMsgType.TEXT:
+            log.info("Поток %s: подключён (%s)", self.name, target)
+            while self._running:
+                try:
+                    frame = await asyncio.wait_for(socket.receive(), timeout=SILENT_SECONDS)
+                except TimeoutError:
+                    raise FeedSilent(target) from None
+                if frame.type not in DATA_TYPES:
+                    if frame.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
+                                      aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
                     continue
+                self.frames += 1
+                if self.frames == 1:
+                    # Первый кадр стоит показать в журнале целиком по размеру и
+                    # виду: если разбор не пойдёт, именно это скажет почему.
+                    log.info("Поток %s: первый кадр — %s, %s байт",
+                             self.name, frame.type.name, len(frame.data))
                 await self.handle(frame.data)
-                if not self._running:
-                    break
         self.connected = False
 
     async def handle(self, payload: str | bytes) -> bool:
@@ -399,4 +442,5 @@ class SequencerFeed:
             state = f"нет связи ({self.last_error or 'подключаюсь'})"
             if self.waiting >= 60:
                 state += f", следующая попытка через {self.waiting / 60:.0f} мин"
-        return f"{state} · блок {self.last_sequence} · пробуждений {self.hits}"
+        return (f"{state} · кадров {self.frames} · блок {self.last_sequence}"
+                f" · пробуждений {self.hits}")

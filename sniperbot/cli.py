@@ -451,8 +451,11 @@ async def _feed(args: argparse.Namespace) -> int:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    print(f"\nЗа {args.seconds} с: сообщений {feed.messages}, пробуждений {feed.hits}, "
-          f"последний блок {feed.last_sequence}")
+    print(f"\nЗа {args.seconds} с: кадров {feed.frames}, сообщений {feed.messages}, "
+          f"пробуждений {feed.hits}, последний блок {feed.last_sequence}")
+    if feed.frames and not feed.messages:
+        print("Кадры приходят, но разобрать их не удалось — пришлите этот вывод, "
+              "поправлю разбор под формат этой ленты.")
     if feed.messages:
         print("Поток работает. Включить в боте: пропишите адрес в .env и перезапустите.")
         return 0

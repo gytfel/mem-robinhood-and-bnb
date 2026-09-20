@@ -389,3 +389,54 @@ async def test_a_refusal_says_in_health_when_the_next_try_is(monkeypatch):
     await drive(feed, refuse, monkeypatch)
     assert "отказ, код 429" in feed.status()
     assert "через 30 мин" in feed.status()
+
+
+# ------------------------------------------- молчащее соединение
+async def test_a_silent_connection_makes_us_try_the_other_door(monkeypatch):
+    """Соединение без данных — почти всегда не тот путь, а не затишье в сети."""
+    feed, _ = feed_for({ROUTER})
+    assert feed.target() == "wss://feed.example"
+
+    async def silence(_session):
+        raise feed_module.FeedSilent(feed.target())
+
+    waits = await drive(feed, silence, monkeypatch)
+    assert feed.target() == "wss://feed.example/feed", "второй заход — в другую дверь"
+    assert waits == [2.0], "нас пустили, ограничитель частоты тут ни при чём"
+    assert feed.refusals == 0
+
+
+async def test_the_doors_are_tried_in_turn_not_once(monkeypatch):
+    feed, _ = feed_for({ROUTER})
+
+    async def silence(_session):
+        raise feed_module.FeedSilent(feed.target())
+
+    await drive(feed, silence, monkeypatch, rounds=2)
+    assert feed.target() == "wss://feed.example", "перебор идёт по кругу"
+
+
+def test_binary_frames_count_as_data():
+    """Ленты шлют то текст, то двоичное — с одинаковым JSON внутри."""
+    import aiohttp as _aiohttp
+
+    assert _aiohttp.WSMsgType.BINARY in feed_module.DATA_TYPES
+    assert _aiohttp.WSMsgType.TEXT in feed_module.DATA_TYPES
+
+
+async def test_a_frame_in_bytes_is_understood():
+    feed, woken = feed_for({ROUTER})
+    payload = frame(one(signed(ROUTER)))
+    assert await feed.handle(payload.encode()) is True
+    assert woken == [1234]
+
+
+async def test_health_tells_frames_apart_from_understood_messages(monkeypatch):
+    """«Кадров 0» и «кадров много, блок 0» — разные беды и разное лечение."""
+    feed, _ = feed_for({ROUTER})
+
+    async def silence(_session):
+        raise feed_module.FeedSilent(feed.target())
+
+    await drive(feed, silence, monkeypatch)
+    assert "кадров 0" in feed.status()
