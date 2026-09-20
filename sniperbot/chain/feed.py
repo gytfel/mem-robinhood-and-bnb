@@ -25,6 +25,8 @@ from collections.abc import Awaitable, Callable, Iterator
 
 import aiohttp
 
+from sniperbot.chain.abi import MULTICALL_SELECTORS
+
 log = logging.getLogger(__name__)
 
 # Виды L2-сообщений Nitro. Нас интересуют только два: подписанная транзакция и
@@ -204,9 +206,9 @@ def _header(raw: bytes, index: int) -> tuple[int, int, bool]:
 def tx_call(raw: bytes) -> tuple[bytes, bytes] | None:
     """Кому адресована транзакция и что у неё вызывают.
 
-    Возвращает (адрес получателя, первые четыре байта данных) — этого хватает,
-    чтобы понять и касается ли транзакция нас, и зачем она. Полностью
-    декодировать конверт незачем: остальное при необходимости прочитает RPC.
+    Возвращает (адрес получателя, поле данных). Поле отдаём целиком: у V3 пул
+    создают через multicall, и настоящий вызов лежит внутри — по четырём
+    первым байтам его не увидеть. Остальное при необходимости прочитает RPC.
     None — разбор не удался или это развёртывание контракта.
     """
     if not raw:
@@ -235,7 +237,7 @@ def tx_call(raw: bytes) -> tuple[bytes, bytes] | None:
                     return None      # пустое поле — это развёртывание контракта
                 address = payload[item_start:item_start + item_length]
             if wanted == index + DATA_AFTER_TO:
-                return address, bytes(payload[item_start:item_start + min(4, item_length)])
+                return address, bytes(payload[item_start:item_start + item_length])
             position = item_start + item_length
             if position > limit:
                 return None
@@ -261,8 +263,25 @@ def calls(message: bytes) -> set[tuple[bytes, bytes]]:
     for raw in iter_transactions(message):
         call = tx_call(raw)
         if call is not None:
-            found.add(call)
+            found.add((call[0], call[1][:4]))
     return found
+
+
+def creates_pool(data: bytes, selectors: frozenset[bytes],
+                 wrappers: frozenset[bytes] = MULTICALL_SELECTORS) -> bool:
+    """Создаёт ли этот вызов новый пул.
+
+    Отбираем по вызываемому методу, а не по адресу получателя, и вот почему:
+    пул создают через что угодно — роутер, менеджер позиций, собственный
+    контракт запуска токена. Адреса всех не знать, а список методов конечен и
+    короток. Внутрь multicall заглядываем поиском: подделать там случайное
+    совпадение четырёх байт можно, но цена ошибки — один лишний проход
+    сканера, а цена пропуска — незамеченная пара.
+    """
+    head = data[:4]
+    if head in selectors:
+        return True
+    return head in wrappers and any(selector in data for selector in selectors)
 
 
 # ------------------------------------------------------------------ подписка
@@ -466,10 +485,15 @@ class SequencerFeed:
 
     def _touches_us(self, message: bytes) -> bool:
         """Есть ли в сообщении интересная нам транзакция."""
-        for address, selector in calls(message):
-            if address not in self.watched:
+        for raw in iter_transactions(message):
+            call = tx_call(raw)
+            if call is None:
                 continue
-            if not self.selectors or selector in self.selectors:
+            address, data = call
+            if self.selectors:
+                if creates_pool(data, self.selectors):
+                    return True
+            elif address in self.watched:
                 return True
         return False
 

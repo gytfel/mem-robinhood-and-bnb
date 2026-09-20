@@ -214,6 +214,16 @@ POOL_SELECTORS = frozenset({
     bytes.fromhex("13ead562"),   # createAndInitializePoolIfNecessary(...) — V3
 })
 
+# Обёртки, внутри которых прячется настоящий вызов. У V3 пул почти всегда
+# создают так: multicall, а в нём createAndInitializePoolIfNecessary и сразу
+# mint. Снаружи виден только multicall, поэтому в таких вызовах приходится
+# заглядывать внутрь.
+MULTICALL_SELECTORS = frozenset({
+    bytes.fromhex("ac9650d8"),   # multicall(bytes[])
+    bytes.fromhex("5ae401dc"),   # multicall(uint256,bytes[])
+    bytes.fromhex("1f0464d1"),   # multicall(bytes32,bytes[])
+})
+
 
 # keccak256("Swap(address,uint256,uint256,uint256,uint256,address)") — Uniswap V2
 V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"

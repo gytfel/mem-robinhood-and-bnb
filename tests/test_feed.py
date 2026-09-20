@@ -580,19 +580,49 @@ async def test_a_burst_of_pairs_wakes_the_scanner_once(monkeypatch):
     assert feed.hits == 20, "сами попадания при этом считаем все"
 
 
-def test_the_method_is_read_out_of_a_real_transaction():
-    """Селектор берём из той же RLP, что и адрес, — вторым проходом было бы вдвое дороже."""
+def test_the_call_is_read_out_of_a_real_transaction():
+    """Данные берём из той же RLP, что и адрес, — вторым проходом было бы вдвое дороже."""
     from sniperbot.chain.feed import tx_call
 
+    body = ADD_LIQUIDITY + b"\x11" * 64
     for kind in ("legacy", "2930", "1559"):
-        address, selector = tx_call(signed(ROUTER, kind=kind, data=ADD_LIQUIDITY + b"\x11" * 64))
+        address, data = tx_call(signed(ROUTER, kind=kind, data=body))
         assert address == bytes.fromhex(ROUTER[2:].lower())
-        assert selector == ADD_LIQUIDITY, kind
+        assert data == body, kind
 
 
 def test_a_transaction_without_data_has_no_method():
     from sniperbot.chain.feed import tx_call
 
-    address, selector = tx_call(signed(ROUTER, data=b""))
+    address, data = tx_call(signed(ROUTER, data=b""))
     assert address == bytes.fromhex(ROUTER[2:].lower())
-    assert selector == b"", "простой перевод монеты — не вызов метода"
+    assert data == b"", "простой перевод монеты — не вызов метода"
+
+
+# ------------------------------------------- отбор по методу, а не по адресу
+async def test_a_pool_born_at_an_unknown_address_is_still_noticed(monkeypatch):
+    """Пул создают и через свой контракт запуска — его адреса мы знать не можем."""
+    feed, woken = feed_for_chain(monkeypatch)
+    launcher = "0xDDdDddDdDdddDDddDDddDDDDdDdDDdDDdDDDDDDd"
+    assert bytes.fromhex(launcher[2:].lower()) not in feed.watched
+    assert await feed.handle(frame(one(signed(launcher, data=ADD_LIQUIDITY)))) is True
+    assert len(woken) == 1
+
+
+async def test_a_pool_created_inside_a_multicall_is_noticed(monkeypatch):
+    """У V3 пул почти всегда создают так: снаружи виден только multicall."""
+    from sniperbot.chain.abi import MULTICALL_SELECTORS
+
+    create_v3 = bytes.fromhex("13ead562")
+    wrapper = next(iter(MULTICALL_SELECTORS))
+    feed, woken = feed_for_chain(monkeypatch)
+    payload = wrapper + b"\x00" * 96 + create_v3 + b"\x22" * 32
+    assert await feed.handle(frame(one(signed("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", data=payload)))) is True
+    assert len(woken) == 1
+
+
+async def test_a_multicall_of_ordinary_swaps_is_left_alone(monkeypatch):
+    feed, woken = feed_for_chain(monkeypatch)
+    payload = bytes.fromhex("ac9650d8") + b"\x00" * 96 + SWAP + b"\x33" * 32
+    assert await feed.handle(frame(one(signed(ROUTER, data=payload)))) is False
+    assert woken == []
