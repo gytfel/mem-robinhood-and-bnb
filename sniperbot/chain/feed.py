@@ -391,9 +391,17 @@ class SequencerFeed:
             self.connected = True
             self.last_error = ""
             log.info("Поток %s: подключён (%s)", self.name, target)
+            # Время последних данных, а не последнего кадра вообще. Раз в
+            # полминуты мы сами шлём служебный пинг, и ответ на него приходит
+            # кадром: считать его признаком жизни ленты значит никогда не
+            # заметить, что данных нет.
+            fed = time.monotonic()
             while self._running:
+                left = SILENT_SECONDS - (time.monotonic() - fed)
+                if left <= 0:
+                    raise FeedSilent(target)
                 try:
-                    frame = await asyncio.wait_for(socket.receive(), timeout=SILENT_SECONDS)
+                    frame = await asyncio.wait_for(socket.receive(), timeout=left)
                 except TimeoutError:
                     raise FeedSilent(target) from None
                 if frame.type not in DATA_TYPES:
@@ -401,6 +409,7 @@ class SequencerFeed:
                                       aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         break
                     continue
+                fed = time.monotonic()
                 self.frames += 1
                 if self.frames == 1:
                     # Первый кадр стоит показать в журнале целиком по размеру и

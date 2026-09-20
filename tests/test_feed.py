@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
@@ -440,3 +441,71 @@ async def test_health_tells_frames_apart_from_understood_messages(monkeypatch):
 
     await drive(feed, silence, monkeypatch)
     assert "кадров 0" in feed.status()
+
+
+# ------------------------------------------- служебные кадры не считаются данными
+class FakeSocket:
+    """Сокет, который шлёт только служебные ответы на пинги."""
+
+    def __init__(self, kinds) -> None:
+        self.kinds = list(kinds)
+        self.sent = 0
+
+    async def receive(self):
+        await asyncio.sleep(0.01)
+        self.sent += 1
+        kind = self.kinds[min(self.sent - 1, len(self.kinds) - 1)]
+        return aiohttp.WSMessage(kind, b"", "")
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc) -> bool:
+        return False
+
+
+class FakeSession:
+    def __init__(self, socket) -> None:
+        self.socket = socket
+        self.target = ""
+
+    def ws_connect(self, url, **_kwargs):
+        self.target = url
+        return self.socket
+
+
+async def test_answers_to_our_own_pings_do_not_count_as_a_live_feed(monkeypatch):
+    """Из-за этого перебор путей не запускался ни разу: тишина не наступала."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(feed_module, "SILENT_SECONDS", 0.2)
+    feed, _ = feed_for({ROUTER})
+    feed._running = True
+    socket = FakeSocket([aiohttp.WSMsgType.PONG])
+    session = FakeSession(socket)
+
+    with pytest.raises(feed_module.FeedSilent):
+        await _asyncio.wait_for(feed._listen(session), timeout=5)
+    assert socket.sent > 5, "кадры шли — молчали именно данные"
+    assert feed.frames == 0
+
+
+async def test_real_data_keeps_the_connection_alive(monkeypatch):
+    """Обратная сторона: пока данные идут, обрывать связь нельзя."""
+    monkeypatch.setattr(feed_module, "SILENT_SECONDS", 0.2)
+    feed, _ = feed_for({ROUTER})
+    feed._running = True
+    payload = frame(one(signed(ROUTER)))
+    socket = FakeSocket([aiohttp.WSMsgType.TEXT])
+    socket.receive_payload = payload
+
+    async def receive():
+        await asyncio.sleep(0.01)
+        socket.sent += 1
+        if socket.sent > 30:
+            feed._running = False
+        return aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, payload, "")
+
+    socket.receive = receive
+    await feed._listen(FakeSession(socket))
+    assert feed.frames > 25, "связь должна была прожить дольше времени тишины"
