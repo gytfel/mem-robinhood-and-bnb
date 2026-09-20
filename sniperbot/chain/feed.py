@@ -20,6 +20,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable, Iterator
 
 import aiohttp
@@ -38,7 +39,34 @@ TO_INDEX_LEGACY = 3
 TO_INDEX_2930 = 4
 TO_INDEX_1559 = 5            # то же место у blob (0x03) и 7702 (0x04)
 
+# Паузы между попытками. Обрыв уже установленной связи — обычное дело, сюда
+# можно возвращаться быстро. Отказ в рукопожатии — совсем другое: у публичных
+# лент стоит ограничитель частоты, и упорные попытки только продлевают отказ.
+# Поэтому после отказа паузы растут до часа, а просьбу сервера подождать
+# (Retry-After) мы исполняем буквально.
 RECONNECT_STEPS = (1.0, 2.0, 5.0, 15.0, 30.0)
+REFUSAL_STEPS = (60.0, 300.0, 900.0, 1800.0, 3600.0)
+MAX_WAIT = 3600.0
+# Связь, прожившая меньше этого, пользы не принесла: считаем попытку неудачной,
+# иначе быстрый разрыв сразу после подключения крутил бы цикл без пауз.
+MIN_SESSION_SECONDS = 10.0
+
+
+def retry_after(error: BaseException) -> float:
+    """Сколько секунд сервер просил подождать. 0 — не просил или сказал датой."""
+    headers = getattr(error, "headers", None)
+    if not headers:
+        return 0.0
+    try:
+        value = headers.get("Retry-After") or headers.get("retry-after") or ""
+    except AttributeError:
+        return 0.0
+    try:
+        seconds = float(str(value).strip())
+    except ValueError:
+        return 0.0
+    return min(max(seconds, 0.0), MAX_WAIT)
+
 HANDSHAKE_HEADERS = {"Arbitrum-Feed-Client-Version": "2"}
 # Ленты Nitro переходят на обязательное сжатие: клиент, который не предложил
 # permessage-deflate, получает отказ ещё на рукопожатии. 15 — размер окна.
@@ -274,6 +302,8 @@ class SequencerFeed:
         self.hits = 0            # сколько раз поток нас разбудил
         self.last_sequence = 0
         self.last_error = ""
+        self.refusals = 0        # подряд отказов в рукопожатии
+        self.waiting = 0.0       # сколько ждём до следующей попытки
 
     async def run(self) -> None:
         self._running = True
@@ -285,19 +315,40 @@ class SequencerFeed:
         failures = 0
         async with aiohttp.ClientSession() as session:
             while self._running:
+                started = time.monotonic()
                 try:
                     await self._listen(session)
-                    failures = 0
+                    # Долгая связь — признак, что с нами всё в порядке, счётчики
+                    # можно обнулить. Мгновенный разрыв пользы не принёс.
+                    if time.monotonic() - started >= MIN_SESSION_SECONDS:
+                        failures = self.refusals = 0
+                    else:
+                        failures += 1
+                    wait = RECONNECT_STEPS[min(failures, len(RECONNECT_STEPS) - 1)]
                 except asyncio.CancelledError:
                     raise
+                except aiohttp.WSServerHandshakeError as exc:
+                    # Нас не приняли. Ломиться дальше в прежнем темпе — верный
+                    # способ остаться в отказе навсегда: счётчик ограничителя
+                    # обнуляется на каждой попытке.
+                    self.connected = False
+                    self.last_error = f"отказ, код {exc.status}"
+                    asked = retry_after(exc)
+                    wait = max(asked, REFUSAL_STEPS[min(self.refusals,
+                                                        len(REFUSAL_STEPS) - 1)])
+                    self.refusals += 1
+                    log.warning("Поток %s: %s, следующая попытка через %.0f мин",
+                                self.name, self.last_error, wait / 60)
                 except Exception as exc:  # noqa: BLE001 - обрыв связи это норма
                     self.connected = False
                     self.last_error = str(exc)[:200]
-                    log.warning("Поток %s: обрыв (%s)", self.name, self.last_error)
                     failures += 1
+                    wait = RECONNECT_STEPS[min(failures, len(RECONNECT_STEPS) - 1)]
+                    log.warning("Поток %s: обрыв (%s)", self.name, self.last_error)
                 if not self._running:
                     break
-                await asyncio.sleep(RECONNECT_STEPS[min(failures, len(RECONNECT_STEPS) - 1)])
+                self.waiting = wait
+                await asyncio.sleep(wait)
 
     def stop(self) -> None:
         self._running = False
@@ -342,5 +393,10 @@ class SequencerFeed:
         """Строка для /health."""
         if not self.watched:
             return "выключен"
-        state = "на связи" if self.connected else f"нет связи ({self.last_error or 'подключаюсь'})"
+        if self.connected:
+            state = "на связи"
+        else:
+            state = f"нет связи ({self.last_error or 'подключаюсь'})"
+            if self.waiting >= 60:
+                state += f", следующая попытка через {self.waiting / 60:.0f} мин"
         return f"{state} · блок {self.last_sequence} · пробуждений {self.hits}"

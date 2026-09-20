@@ -11,15 +11,19 @@ from __future__ import annotations
 import base64
 import json
 
+import aiohttp
 import pytest
 from eth_account import Account
 
+from sniperbot.chain import feed as feed_module
 from sniperbot.chain.feed import (
     KIND_BATCH,
     KIND_SIGNED_TX,
+    MAX_WAIT,
     SequencerFeed,
     iter_transactions,
     parse_frame,
+    retry_after,
     targets,
     tx_target,
 )
@@ -311,3 +315,77 @@ def test_a_placeholder_is_called_out_before_connecting(url, hint):
 
     problem = url_problem(url)
     assert problem and hint in problem
+
+
+# ------------------------------------------- как часто стучаться в ленту
+def refusal(status: int, wait: str = "") -> aiohttp.WSServerHandshakeError:
+    """Отказ в рукопожатии — такой же, какой отдаёт настоящая лента."""
+    return aiohttp.WSServerHandshakeError(
+        None, (), status=status, message=str(status),
+        headers={"Retry-After": wait} if wait else {})
+
+
+async def drive(feed: SequencerFeed, listen, monkeypatch, rounds: int = 1) -> list[float]:
+    """Прокручивает цикл переподключения, подменив ожидание, и отдаёт паузы."""
+    waits: list[float] = []
+
+    async def note(delay: float) -> None:
+        waits.append(delay)
+        if len(waits) >= rounds:
+            feed.stop()
+
+    monkeypatch.setattr(feed, "_listen", listen)
+    monkeypatch.setattr(feed_module.asyncio, "sleep", note)
+    await feed.run()
+    return waits
+
+
+def test_a_request_to_wait_is_read_from_the_answer():
+    assert retry_after(refusal(429, "1800")) == 1800
+    assert retry_after(refusal(403)) == 0, "не просили — не выдумываем"
+    assert retry_after(refusal(429, "Sat, 20 Sep 2026 12:00:00 GMT")) == 0, "дату не понимаем"
+    assert retry_after(refusal(429, "999999")) == MAX_WAIT, "ждать сутки бот не станет"
+
+
+async def test_a_refusal_is_answered_by_waiting_as_long_as_asked(monkeypatch):
+    """Полчаса просили — полчаса и ждём, а не полминуты."""
+    feed, _ = feed_for({ROUTER})
+
+    async def refuse(_session):
+        raise refusal(429, "1800")
+
+    assert await drive(feed, refuse, monkeypatch) == [1800.0]
+    assert feed.refusals == 1
+
+
+async def test_every_next_refusal_is_answered_by_a_longer_pause(monkeypatch):
+    """Упорство здесь вредно: ограничитель частоты считает сами попытки."""
+    feed, _ = feed_for({ROUTER})
+
+    async def refuse(_session):
+        raise refusal(403)
+
+    waits = await drive(feed, refuse, monkeypatch, rounds=3)
+    assert waits == [60.0, 300.0, 900.0]
+    assert min(waits) >= 60, "чаще раза в минуту стучаться нельзя"
+
+
+async def test_an_ordinary_break_is_not_punished_by_a_long_pause(monkeypatch):
+    """Обрыв связи — не отказ: возвращаться надо сразу, скорость здесь и нужна."""
+    feed, _ = feed_for({ROUTER})
+
+    async def drop(_session):
+        raise ConnectionResetError("оборвалось")
+
+    assert await drive(feed, drop, monkeypatch) == [2.0], "секунды, а не минуты"
+
+
+async def test_a_refusal_says_in_health_when_the_next_try_is(monkeypatch):
+    feed, _ = feed_for({ROUTER})
+
+    async def refuse(_session):
+        raise refusal(429, "1800")
+
+    await drive(feed, refuse, monkeypatch)
+    assert "отказ, код 429" in feed.status()
+    assert "через 30 мин" in feed.status()
