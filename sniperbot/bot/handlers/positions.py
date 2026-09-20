@@ -7,12 +7,13 @@ import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from sniperbot.bot.context import BotContext
 from sniperbot.bot.keyboards import MenuCB, PosCB, back_button, position_actions, positions_list
 from sniperbot.bot.ui import reply, safe_edit
 from sniperbot.bot.views import render_position, render_positions_list
+from sniperbot.chart import draw
 from sniperbot.config import ChainConfig
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -61,6 +62,47 @@ async def cb_position(callback: CallbackQuery, callback_data: PosCB, ctx: BotCon
     price = await _price(ctx, position)
     if price is not None and price != position.last_price:
         await safe_edit(callback, render_position(position, chain, price, cfg=cfg), markup)
+
+
+@router.callback_query(PosCB.filter(F.action == "chart"))
+async def cb_chart(callback: CallbackQuery, callback_data: PosCB, ctx: BotContext,
+                   user: User) -> None:
+    """Свечной график позиции отдельной картинкой.
+
+    Картинка приходит новым сообщением, а не вместо карточки: карточка живая,
+    её обновляют кнопкой, и заменять её изображением значило бы отобрать у
+    владельца позиции кнопки продажи ровно в тот момент, когда он смотрит на
+    падающую цену.
+    """
+    async with session_scope() as session:
+        position = await repo.find_position(session, callback_data.pid, user.id)
+    if position is None:
+        await callback.answer("Позиция не найдена", show_alert=True)
+        return
+
+    picture = draw(position.price_track or "", position.entry_price)
+    if picture is None:
+        await callback.answer(
+            "Замеров пока мало — график появится через пару минут после покупки",
+            show_alert=True)
+        return
+
+    chain = ctx.chain(position.chain)
+    await callback.answer()
+    caption = [f"📈 <b>{esc(position.token_symbol)}</b> · позиция #{position.id}"]
+    if position.entry_price:
+        caption.append(f"🎯 Вход: {fmt_amount(position.entry_price, 12)} {chain.native_symbol}"
+                       " <i>(пунктир)</i>")
+    if position.last_price:
+        caption.append(f"💱 Сейчас: {fmt_amount(position.last_price, 12)} "
+                       f"{chain.native_symbol}")
+        if position.entry_price and position.entry_price > 0:
+            change = (position.last_price / position.entry_price - 1) * 100
+            caption.append(f"{'🟢' if change >= 0 else '🔴'} <b>{change:+.1f}%</b> от входа")
+    await callback.message.answer_photo(
+        BufferedInputFile(picture, filename=f"position-{position.id}.png"),
+        caption="\n".join(caption),
+    )
 
 
 @router.callback_query(PosCB.filter(F.action == "sell"))

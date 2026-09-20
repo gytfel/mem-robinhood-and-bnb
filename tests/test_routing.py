@@ -461,3 +461,45 @@ async def test_declining_the_proposal_changes_nothing(bot_and_dispatcher):
     async with session_scope() as db_session:
         assert (await repo.get_settings(db_session, USER_ID, "rh")).stop_loss_pct == before
         assert not await repo.get_state(db_session, pending_key(USER_ID))
+
+
+async def test_the_chart_arrives_as_a_picture_and_leaves_the_card_alone(bot_and_dispatcher):
+    """Карточку подменять нельзя: на ней кнопки продажи, и нужны они именно
+    тогда, когда владелец смотрит на падающий график."""
+    import datetime as dt
+    from decimal import Decimal
+
+    from aiogram.types import CallbackQuery
+
+    from sniperbot.bot.keyboards import PosCB
+    from sniperbot.chart import pack
+    from sniperbot.db.base import session_scope
+    from sniperbot.db.models import Position
+    from sniperbot.utils.fmt import to_wei
+
+    bot, dp, session = bot_and_dispatcher
+    await dp.feed_update(bot, update("/start"))
+
+    async with session_scope() as db_session:
+        position = Position(
+            user_id=USER_ID, chain="rh", token_address="0x" + "a" * 40, token_symbol="PAW",
+            token_decimals=18, router_address="0x" + "c" * 40, amount_wei=to_wei(1000),
+            native_spent_wei=to_wei("0.008"), status="open",
+            entry_price=Decimal("1"), last_price=Decimal("2"),
+            price_track=pack([(0, Decimal("1")), (60, Decimal("2")), (120, Decimal("3"))]),
+        )
+        db_session.add(position)
+        await db_session.flush()
+        pid = position.id
+
+    card = TgMessage(message_id=11, date=dt.datetime.now(dt.UTC),
+                     chat=Chat(id=CHAT_ID, type="private"), text="карточка позиции")
+    session.sent.clear()
+    await dp.feed_update(bot, Update(update_id=21, callback_query=CallbackQuery(
+        id="2", chat_instance="c", data=PosCB(action="chart", pid=pid).pack(),
+        from_user=TgUser(id=USER_ID, is_bot=False, first_name="Vlad"),
+        message=card,
+    )))
+
+    assert any("PAW" in text for text in session.sent), "картинка должна прийти с подписью"
+    assert any("от входа" in text for text in session.sent), "без цифр график мало что говорит"

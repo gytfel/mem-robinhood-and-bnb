@@ -124,9 +124,10 @@ def position_actions(position_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for pct in (25, 50, 100):
         kb.button(text=f"Продать {pct}%", callback_data=PosCB(action="sell", pid=position_id, pct=pct))
+    kb.button(text="📈 График", callback_data=PosCB(action="chart", pid=position_id))
     kb.button(text="🔄 Обновить", callback_data=PosCB(action="view", pid=position_id))
     kb.button(text="⬅️ К позициям", callback_data=MenuCB(section="positions"))
-    kb.adjust(3, 2)
+    kb.adjust(3, 3)
     return kb.as_markup()
 
 

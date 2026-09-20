@@ -31,6 +31,7 @@ from sniperbot.chain.erc20 import (
     fetch_token,
 )
 from sniperbot.chain.wallet import SentTx, WalletError, WalletService
+from sniperbot.chart import add_point
 from sniperbot.config import Settings
 from sniperbot.db import repo
 from sniperbot.db.base import session_scope
@@ -893,6 +894,7 @@ class Trader:
             position.entry_price = entry
             position.last_price = entry
             position.peak_price = entry
+            position.price_track = add_point("", 0, entry)
             session.add(position)
             await session.flush()
             position_id = position.id
@@ -1058,6 +1060,9 @@ class Trader:
                 if total_tokens > 0 else entry
             )
             position.last_price = position.entry_price
+            # Первая точка графика — цена покупки: иначе он начинается с
+            # первого опроса, и собственный вход на нём не виден.
+            position.price_track = add_point("", 0, position.entry_price)
             position.peak_price = max(position.peak_price or Decimal(0), position.entry_price or Decimal(0))
             copy_exit_rules(cfg, position)
             position.token_owner = token.owner
