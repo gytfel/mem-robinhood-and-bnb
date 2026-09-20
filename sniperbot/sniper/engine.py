@@ -33,6 +33,9 @@ from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_addr, to_wei
 
 log = logging.getLogger(__name__)
 
+# Минимальный промежуток между пробуждениями от ленты секвенсора.
+WAKE_FLOOR_SECONDS = 0.25
+
 MAX_PARALLEL_PAIRS = 4
 EARLY_BLOCKS = 3          # сколько блоков после листинга считать «первыми»
 MAX_SIM_AMOUNT = Decimal("0.05")  # верхняя граница суммы для симуляции налогов
@@ -99,10 +102,24 @@ class SniperEngine:
         url = (getattr(config, "feed_url", "") or "").strip()
         if not url:
             return
+        # Только фабрики. Новая пара рождается через фабрику, а через роутер
+        # идёт каждый обмен в сети: на роутерах лента будила сканер по пять раз
+        # в секунду на чужих сделках, и каждое пробуждение — поход в RPC за
+        # логами. Скорости это не добавляло (пары там не появляются), а запросы
+        # к узлу множило на порядок.
         watched = {router.factory for router in config.routers if router.configured}
-        watched |= {router.router for router in config.routers if router.configured}
+
+        last_wake = 0.0
 
         def poke(_sequence: int) -> None:
+            # Пол между пробуждениями. Пары рождаются редко, но если в одном
+            # блоке их несколько, будить сканер на каждую незачем — он всё
+            # равно читает логи целым промежутком.
+            nonlocal last_wake
+            now = time.monotonic()
+            if now - last_wake < WAKE_FLOOR_SECONDS:
+                return
+            last_wake = now
             for scanner in scanners:
                 scanner.wake()
             self.hunter.wake()

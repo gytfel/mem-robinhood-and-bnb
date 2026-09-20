@@ -253,7 +253,7 @@ def test_the_feed_starts_only_when_the_chain_gives_one(monkeypatch):
     instance._start_feed("rh", chain, [])
 
     assert created and created[0][0] == "wss://feed.mainnet.chain.robinhood.com"
-    assert created[0][1] == {ROUTER, FACTORY}, "следим за роутером и фабрикой сети"
+    assert created[0][1] == {FACTORY}, "следим за фабрикой: пары рождаются там"
 
 
 # ------------------------------------------------- рукопожатие со сжатием
@@ -509,3 +509,48 @@ async def test_real_data_keeps_the_connection_alive(monkeypatch):
     socket.receive = receive
     await feed._listen(FakeSession(socket))
     assert feed.frames > 25, "связь должна была прожить дольше времени тишины"
+
+
+# ------------------------------------------- нагрузка от ленты на узел
+def feed_for_chain(monkeypatch):
+    """Заводит поток так, как это делает движок, и отдаёт его вместе со счётчиком."""
+    from sniperbot.config import ChainConfig, RouterConfig
+    from sniperbot.sniper import engine as engine_module
+
+    chain = ChainConfig(key="rh", name="RH", chain_id=4663, rpc_urls=["http://localhost"],
+                        wrapped_native="0x" + "b" * 40, feed_url="wss://feed.example",
+                        routers=[RouterConfig("DEX", ROUTER, FACTORY, 25, True)])
+    woken: list[int] = []
+
+    class Scanner:
+        def wake(self) -> None:
+            woken.append(1)
+
+    class Hunter:
+        def wake(self) -> None:
+            return None
+
+    instance = engine_module.SniperEngine.__new__(engine_module.SniperEngine)
+    instance.feeds = {}
+    instance._tasks = []
+    instance.hunter = Hunter()
+    instance._start_feed("rh", chain, [Scanner()])
+    for task in instance._tasks:
+        task.cancel()
+    return instance.feeds["rh"], woken
+
+
+async def test_the_feed_watches_factories_not_routers(monkeypatch):
+    """Через роутер идёт каждый обмен в сети: будить на них — топить узел."""
+    feed, _ = feed_for_chain(monkeypatch)
+    assert bytes.fromhex(FACTORY[2:].lower()) in feed.watched
+    assert bytes.fromhex(ROUTER[2:].lower()) not in feed.watched
+
+
+async def test_a_burst_of_pairs_wakes_the_scanner_once(monkeypatch):
+    """Сканер читает логи промежутком: на каждую пару в одном блоке — незачем."""
+    feed, woken = feed_for_chain(monkeypatch)
+    for _ in range(20):
+        await feed.handle(frame(one(signed(FACTORY))))
+    assert len(woken) == 1, "пол между пробуждениями обязан держать"
+    assert feed.hits == 20, "сами попадания при этом считаем все"

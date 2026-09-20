@@ -452,4 +452,4 @@ class SequencerFeed:
             if self.waiting >= 60:
                 state += f", следующая попытка через {self.waiting / 60:.0f} мин"
         return (f"{state} · кадров {self.frames} · блок {self.last_sequence}"
-                f" · пробуждений {self.hits}")
+                f" · попаданий {self.hits}")
