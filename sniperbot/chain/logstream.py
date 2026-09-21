@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 import aiohttp
@@ -123,6 +124,7 @@ class LogStream:
         self.connected = False
         self.events = 0
         self.last_block = 0
+        self.last_event_at = 0.0     # когда пришло последнее событие
         self.last_error = ""
 
     async def run(self) -> None:
@@ -201,6 +203,7 @@ class LogStream:
             return False
         self.events += 1
         self.last_block = max(self.last_block, block)
+        self.last_event_at = time.monotonic()
         try:
             result = self.on_hit(block)
             if asyncio.iscoroutine(result):
@@ -213,4 +216,12 @@ class LogStream:
         if not self.addresses:
             return "выключена"
         state = "на связи" if self.connected else f"нет связи ({self.last_error or 'подключаюсь'})"
-        return f"{state} · блок {self.last_block} · событий {self.events}"
+        # Возраст последнего события, а не голый номер блока. Номер стоит на
+        # месте, пока новых пар нет, и рядом с бегущим номером у ленты читается
+        # как отставание — хотя означает всего лишь «пока тихо».
+        if self.last_event_at:
+            minutes = (time.monotonic() - self.last_event_at) / 60
+            when = "только что" if minutes < 1 else f"{minutes:.0f} мин назад"
+        else:
+            when = "событий ещё не было"
+        return f"{state} · событий {self.events} · последнее {when}"

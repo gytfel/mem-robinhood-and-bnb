@@ -127,11 +127,29 @@ async def test_without_addresses_there_is_nothing_to_subscribe_to():
 
 
 def test_the_status_says_what_is_happening():
+    import time
+
     stream, _ = stream_for({FACTORY})
     assert "нет связи" in stream.status()
     stream.connected = True
+    assert "событий ещё не было" in stream.status(), "тишина и поломка — разные вещи"
+
     stream.events, stream.last_block = 3, 777
-    assert "на связи" in stream.status() and "777" in stream.status()
+    stream.last_event_at = time.monotonic()
+    assert "на связи" in stream.status() and "событий 3" in stream.status()
+    assert "только что" in stream.status()
+
+
+def test_the_status_says_how_long_the_silence_lasts():
+    """Номер блока стоит на месте, пока пар нет, и читается как отставание —
+    хотя означает всего лишь «пока тихо»."""
+    import time
+
+    stream, _ = stream_for({FACTORY})
+    stream.connected = True
+    stream.events = 5
+    stream.last_event_at = time.monotonic() - 12 * 60
+    assert "12 мин назад" in stream.status()
 
 
 def test_the_subscription_starts_only_when_the_chain_gives_a_websocket(monkeypatch):
