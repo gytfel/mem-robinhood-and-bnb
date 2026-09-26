@@ -9,11 +9,16 @@ from dataclasses import dataclass
 
 from sniperbot.chain.abi import ERC20_ABI, ERC20_BYTES32_ABI, ERC20_LIMITS_ABI
 from sniperbot.chain.clients import ChainClient
+from sniperbot.utils.bounded import remember
 from sniperbot.utils.evm import ZERO_ADDRESS, to_checksum
 
 log = logging.getLogger(__name__)
 
 _CACHE_TTL = 600.0
+# Живых токенов одновременно — сотни. Остальные записи давно просрочены и
+# только держат память: срок годности проверяется при чтении, а сама
+# просроченная запись без предела не удалялась бы никогда.
+CACHE_LIMIT = 2000
 _cache: dict[tuple[str, str], tuple[float, TokenInfo]] = {}
 
 
@@ -86,7 +91,7 @@ async def fetch_token(client: ChainClient, address: str, *, use_cache: bool = Tr
         total_supply=int(supply),
         owner=owner,
     )
-    _cache[key] = (now, info)
+    remember(_cache, key, (now, info), CACHE_LIMIT)
     return info
 
 

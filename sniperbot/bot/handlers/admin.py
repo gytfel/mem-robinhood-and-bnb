@@ -25,6 +25,7 @@ from sniperbot.db import repo
 from sniperbot.db.base import session_scope
 from sniperbot.db.models import Position, SeenPair, TradeLog
 from sniperbot.utils.fmt import esc, fmt_amount, from_wei, short_url
+from sniperbot.utils.memory import health_line
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +70,9 @@ async def cmd_health(message: Message, ctx: BotContext, is_admin: bool = False) 
         unclean = sum(1 for run in runs[1:] if not run.clean_shutdown)
         lines.append(f"Аптайм: <b>{human_duration(uptime)}</b>"
                      + (f" · аварийных завершений подряд: {unclean}" if unclean else ""))
+    memory = health_line()
+    if memory:
+        lines.append(memory)
     lines.append("\n<b>Сканеры</b>")
     statuses = ctx.engine.status()
     if not statuses:

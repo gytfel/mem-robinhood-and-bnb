@@ -28,6 +28,7 @@ from sniperbot.smart import MIN_DECIDED, score_wallets, trusted, wallet_buys
 from sniperbot.sniper.momentum import MomentumSignal, aggregate_swaps, evaluate_momentum, sample_age
 from sniperbot.sniper.safety import analyze_token, evaluate_verdict, proven_trap
 from sniperbot.sniper.scanner import MAX_BLOCK_RANGE, PairEvent, PairScanner
+from sniperbot.utils.bounded import remember
 from sniperbot.utils.evm import to_checksum
 from sniperbot.utils.fmt import short_addr, to_wei
 
@@ -39,6 +40,10 @@ SMART_HISTORY = dt.timedelta(days=14)   # глубина, на которой с
 MAX_CANDIDATES = 5         # сколько пулов разбираем за один цикл: проверка дорогая
 MAX_SIM_AMOUNT = Decimal("0.05")   # верхняя граница суммы для симуляции налогов
 STALE_WINDOWS = 3          # замер старше этого числа окон уже не показывает разгон
+# Отметка о разборе нужна только на время паузы между повторами — минуты.
+# За цикл разбираем не больше MAX_CANDIDATES пулов, так что столько
+# отметок покрывает многие часы, а всё старше — мёртвый груз.
+CHECKED_LIMIT = 5000
 
 
 class MomentumHunter:
@@ -412,7 +417,7 @@ class MomentumHunter:
         address = row.pair_address.lower()
         if self._cooling_down(address):
             return
-        self._checked[address] = time.monotonic()
+        remember(self._checked, address, time.monotonic(), CHECKED_LIMIT)
 
         prepared = await self._prepare(chain_key, row, subscribers)
         if prepared is None:
@@ -453,7 +458,7 @@ class MomentumHunter:
         address = row.pair_address.lower()
         if self._cooling_down(address):
             return
-        self._checked[address] = time.monotonic()
+        remember(self._checked, address, time.monotonic(), CHECKED_LIMIT)
 
         prepared = await self._prepare(chain_key, row, interested)
         if prepared is None:

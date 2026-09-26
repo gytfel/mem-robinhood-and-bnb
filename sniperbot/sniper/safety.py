@@ -30,6 +30,7 @@ from sniperbot.chain.dex_adapter import DexAdapter, PoolRef, PoolState, find_bes
 from sniperbot.chain.erc20 import TokenInfo, allowance, fetch_token, trading_limits
 from sniperbot.config import RouterConfig
 from sniperbot.sniper.analysis import RISK_TITLES, ContractProfile, profile_token
+from sniperbot.utils.bounded import remember
 from sniperbot.utils.evm import has_code, hex32, mapping_slot, nested_mapping_slot
 from sniperbot.utils.fmt import from_wei
 
@@ -45,6 +46,9 @@ SEARCH_ROUNDS = 5        # 8^5 ≈ 32 000 делений — та же точн�
 
 # Кэш найденных слотов хранилища: {(chain, token): (balance_slot, vyper, allowance_slot)}
 _slot_cache: dict[tuple[str, str], tuple[int | None, bool, int | None]] = {}
+# Слот нужен, пока токен в игре: проверка перед покупкой и проверка выхода.
+# Токен, про который забыли, при надобности переищется за пару запросов.
+SLOT_CACHE_LIMIT = 5000
 
 
 @dataclass(slots=True)
@@ -228,7 +232,8 @@ class HoneypotSimulator:
             ]
             for found in await asyncio.gather(*batch, return_exceptions=True):
                 if isinstance(found, tuple):
-                    _slot_cache[(self.client.config.key, token.lower())] = (found[0], found[1], None)
+                    remember(_slot_cache, (self.client.config.key, token.lower()),
+                             (found[0], found[1], None), SLOT_CACHE_LIMIT)
                     return found
         return None
 
@@ -263,7 +268,7 @@ class HoneypotSimulator:
                     # Кешируем и тогда, когда слот баланса ещё не искали: иначе
                     # повторная проверка выхода каждый раз перебирает слоты заново.
                     base = cached or (None, False, None)
-                    _slot_cache[cache_key] = (base[0], base[1], found)
+                    remember(_slot_cache, cache_key, (base[0], base[1], found), SLOT_CACHE_LIMIT)
                     return found
         return None
 
