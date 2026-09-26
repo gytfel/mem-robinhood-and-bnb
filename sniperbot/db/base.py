@@ -16,6 +16,24 @@ log = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+# Сколько соединение ждёт, пока база занята чужой записью. По умолчанию SQLite
+# сдаётся через 5 секунд с «database is locked», а у бота пишут сразу многие:
+# сканер, опрос позиций, лента, обработчики кнопок. Сдаться посреди записи
+# позиции после покупки значит потерять её из учёта, хотя монеты уже на
+# кошельке. Подождать полминуты безопаснее.
+SQLITE_BUSY_MS = 30_000
+
+
+def _on_sqlite_connect(dbapi_connection, _record) -> None:  # noqa: ANN001 - так зовёт SQLAlchemy
+    """Настройка каждого нового соединения, а не только первого.
+
+    PRAGMA действует на одно соединение. Выставить её один раз при старте —
+    значит оставить без неё все остальные соединения из пула.
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_MS}")
+    cursor.close()
+
 
 def _ensure_sqlite_dir(url: str) -> None:
     marker = "sqlite+aiosqlite:///"
@@ -30,6 +48,10 @@ async def init_db(database_url: str) -> AsyncEngine:
     global _engine, _session_factory
     _ensure_sqlite_dir(database_url)
     _engine = create_async_engine(database_url, echo=False, pool_pre_ping=True, future=True)
+    if database_url.startswith("sqlite"):
+        from sqlalchemy import event
+
+        event.listen(_engine.sync_engine, "connect", _on_sqlite_connect)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False, class_=AsyncSession)
 
     async with _engine.begin() as conn:
